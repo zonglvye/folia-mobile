@@ -1,0 +1,27 @@
+# Folia Mobile
+
+# 依赖与构建产物
+web/node_modules/
+web/dist/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/captures/
+
+# 壳打包用的 Web 产物镜像（由 tools/sync-web-assets.ps1 生成）
+android/app/src/main/assets/www/
+
+# 签名材料绝不入库
+android/keystore.properties
+*.jks
+*.keystore
+
+# 编辑器与系统
+.vscode/
+.DS_Store
+Thumbs.db

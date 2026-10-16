@@ -1,0 +1,89 @@
+// Folia Mobile shell — app module.
+//
+// The shell bundles the whole Folia web build inside the APK and serves it to the WebView
+// from a virtual https origin (see MainActivity). That is what makes offline work structural
+// rather than best-effort: the assets never leave the device, and because the origin is
+// https the WebView keeps a secure context, so IndexedDB / OPFS / Cache Storage all stay
+// available to the web app.
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'app.folia.mobile'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'app.folia.mobile'
+        // 26 keeps notification channels, adaptive icons and foreground-service types
+        // unconditional, which removes a large amount of SDK_INT branching from the shell.
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        // The web bundle is a large JS payload; the shell itself has no native ABI to filter.
+    }
+
+    // Release signing comes from keystore.properties, which lives OUTSIDE version control (it
+    // points at a keystore outside the repository). When that file is absent the release variant
+    // is simply left unsigned rather than silently falling back to a shared debug key: shipping
+    // a distributable APK must be a deliberate act with a key you keep.
+    def keystorePropertiesFile = rootProject.file('keystore.properties')
+    def hasReleaseKeystore = keystorePropertiesFile.exists()
+    def releaseKeystoreProps = new Properties()
+    if (hasReleaseKeystore) {
+        keystorePropertiesFile.withInputStream { releaseKeystoreProps.load(it) }
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile rootProject.file(releaseKeystoreProps['storeFile'])
+                storePassword releaseKeystoreProps['storePassword']
+                keyAlias releaseKeystoreProps['keyAlias']
+                keyPassword releaseKeystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // Web assets are already compressed payloads; letting aapt re-compress them only slows
+    // packaging down and inflates the WebView's read path.
+    androidResources {
+        noCompress 'woff2', 'wasm'
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    // Sole dependency: WebViewAssetLoader. It is what turns a directory of APK assets into a
+    // real https origin with correct MIME types, instead of the file:// origin that would
+    // silently disable the entire storage layer the web app depends on.
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

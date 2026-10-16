@@ -1,0 +1,2267 @@
+From 4def766d417c6d915553b1a1837d731daadc8cb7 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 00:34:50 +0800
+Subject: [PATCH] feat(local-music): import a library from plain File objects
+
+Android Chrome and iOS Safari have no showDirectoryPicker, and Android's WebView cannot
+provide one either, so the whole local library was unreachable on phones. This adds a
+handle-less import path alongside the existing directory-picker one.
+
+- add src/services/localAudioBinaryStore.ts: OPFS-backed audio byte store under
+  folia-cache/local-audio-assets, keyed by a self-describing id derived from the song
+  record alone, so playback/cover/delete all rebuild the same key with no second index
+- importLocalFiles(File[]) and importLocalFilesViaInput() on localMusicService
+- FileEntryForImport.handle is now optional; metadata, sidecar lyrics and covers are
+  parsed for handle-less entries too
+- getAudioFromLocalSong / getFileFromLocalSong / getLocalSongArrayBuffer fall back to
+  the stored bytes when no handle is reachable
+- resyncFolder / resyncAllFolders no-op for roots that have no directory handle
+- getLocalFileImportAvailability() plus resolveLocalHomeAvailability() so the local tab
+  is reachable when only the file input is available
+---
+ src/i18n/locales/en.ts                        |   2 +
+ src/i18n/locales/in.ts                        |   2 +
+ src/i18n/locales/zh-CN.ts                     |   2 +
+ src/library/app/createLibraryHomePort.ts      |   5 +-
+ .../core/bindings/useLibraryHomeSources.ts    |   8 +-
+ src/library/core/contracts/homeModel.ts       |  13 +-
+ src/library/core/model/homeSources.ts         |  19 +-
+ src/library/core/model/localHomeModel.ts      |  24 +-
+ .../core/services/libraryHomeActions.ts       |  47 +-
+ .../suites/grid/home/LocalGrid3DView.tsx      |  16 +-
+ src/services/db.ts                            |   2 +
+ src/services/localAudioBinaryStore.ts         | 246 +++++++++++
+ src/services/localLibraryAvailability.ts      |  29 +-
+ src/services/localMusicService.ts             | 407 ++++++++++++++++--
+ test/unit/library/core/homeSources.test.ts    |  32 +-
+ .../library/core/libraryHomeActions.test.ts   |  60 ++-
+ test/unit/library/core/localHomeModel.test.ts |  21 +-
+ .../services/localAudioBinaryStore.test.ts    | 252 +++++++++++
+ test/unit/services/localMusicService.test.ts  |   2 +
+ .../localMusicServiceFileImport.test.ts       | 309 +++++++++++++
+ .../localMusicServiceFileInput.test.ts        | 165 +++++++
+ 21 files changed, 1594 insertions(+), 69 deletions(-)
+ create mode 100644 src/services/localAudioBinaryStore.ts
+ create mode 100644 test/unit/services/localAudioBinaryStore.test.ts
+ create mode 100644 test/unit/services/localMusicServiceFileImport.test.ts
+ create mode 100644 test/unit/services/localMusicServiceFileInput.test.ts
+
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index d87137c..568344c 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -3328,6 +3328,7 @@ export default {
+     "sortAscending": "Ascending",
+     "sortDescending": "Descending",
+     "importFolder": "Import Folder",
++    "fileImport": "Import Files",
+     "importing": "Importing...",
+     "importPlaylist": "Import Playlist",
+     "importingPlaylist": "Importing playlist...",
+@@ -3356,6 +3357,7 @@ export default {
+     "deleteSubfolderMessage": "Remove “{{folderName}}” and skip future scans. Restore in All view. Disk files stay unchanged.",
+     "deleteRootFolderMessage": "Remove “{{folderName}}” and all its tracks from the library. Disk files stay unchanged.",
+     "importNotSupported": "Folder import not supported in this browser or cancelled",
++    "fileImportNotSupported": "File import is not available here. Use HTTPS, localhost, or the Electron app.",
+     "insecureHttpDisabled": "Local library is disabled on remote HTTP. Use HTTPS, localhost, or the Electron app.",
+     "resyncFailed": "Failed to resync folder. Please try again.",
+     "deleteFailed": "Failed to delete folder. Please try again.",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index 3f1bfc5..91c6c53 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -3215,6 +3215,7 @@ export default {
+     "sortAscending": "Menaik",
+     "sortDescending": "Menurun",
+     "importFolder": "Impor Folder",
++    "fileImport": "Impor Berkas",
+     "importing": "Mengimpor...",
+     "importPlaylist": "Impor Playlist",
+     "importingPlaylist": "Mengimpor playlist...",
+@@ -3241,6 +3242,7 @@ export default {
+     "deleteFolderCount": "Ini akan menghapus total {{count}} lagu dari perpustakaan Anda, termasuk subfolder bersarang.",
+     "deleteFolderNote": "Catatan: Ini hanya akan menghapus lagu dari perpustakaan Anda. File Anda di disk tidak akan terpengaruh.",
+     "importNotSupported": "Impor folder tidak didukung di browser ini atau dibatalkan",
++    "fileImportNotSupported": "Impor berkas tidak tersedia di sini. Gunakan HTTPS, localhost, atau aplikasi Electron.",
+     "insecureHttpDisabled": "Perpustakaan lokal dinonaktifkan di HTTP remote. Gunakan HTTPS, localhost, atau aplikasi Electron.",
+     "resyncFailed": "Gagal menyinkronkan ulang folder. Silakan coba lagi.",
+     "deleteFailed": "Gagal menghapus folder. Silakan coba lagi.",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 8b3ff2a..11b9157 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -3327,6 +3327,7 @@ export default {
+     "sortAscending": "升序",
+     "sortDescending": "降序",
+     "importFolder": "导入文件夹",
++    "fileImport": "导入文件",
+     "importing": "导入中...",
+     "importPlaylist": "导入歌单",
+     "importingPlaylist": "正在导入歌单...",
+@@ -3355,6 +3356,7 @@ export default {
+     "deleteSubfolderMessage": "移除“{{folderName}}”并忽略扫描，可在全部视图恢复。磁盘文件不变。",
+     "deleteRootFolderMessage": "从曲库移除“{{folderName}}”及全部歌曲。磁盘文件不变。",
+     "importNotSupported": "当前浏览器不支持文件夹导入",
++    "fileImportNotSupported": "当前环境不支持文件导入，请使用 HTTPS、localhost 或 Electron 客户端。",
+     "insecureHttpDisabled": "远程 HTTP 环境已禁用本地曲库，请使用 HTTPS、localhost 或 Electron 客户端。",
+     "resyncFailed": "重新同步文件夹失败，请重试。",
+     "deleteFailed": "删除文件夹失败，请重试。",
+diff --git a/src/library/app/createLibraryHomePort.ts b/src/library/app/createLibraryHomePort.ts
+index 5f9a5e4..e78410a 100644
+--- a/src/library/app/createLibraryHomePort.ts
++++ b/src/library/app/createLibraryHomePort.ts
+@@ -2,7 +2,7 @@ import i18n from '../../i18n/config';
+ import type { LibraryHomePort, LibraryHomeScanProgress } from '../core/contracts/homeModel';
+ import type { HomeSurfaceProps } from '../../components/app/home/homeSurfaceTypes';
+ import { translateHomeMessage } from '../core/model/homeSources';
+-import { importFolder, resyncAllFolders, LOCAL_MUSIC_SCAN_PROGRESS_EVENT } from '../../services/localMusicService';
++import { importFolder, importLocalFilesViaInput, resyncAllFolders, LOCAL_MUSIC_SCAN_PROGRESS_EVENT } from '../../services/localMusicService';
+ import { getLocalLibraryAvailability } from '../../services/localLibraryAvailability';
+ import { importLocalPlaylistFile } from '../../services/localPlaylistFileService';
+ import { omni } from '../../services/onlineMusic/omni';
+@@ -14,7 +14,7 @@ import {
+ 
+ // src/library/app/createLibraryHomePort.ts
+ // 把首页 surface 的回调与本地曲库服务、omni、集合描述工厂装配成首页动作的端口（照 createLibraryDirectoryBatchPort
+-// 的做法）。core 的 libraryHomeActions 只说「导入文件夹、刷新曲库、播放私人 FM、打开这张卡」；调哪个服务、
++// 的做法）。core 的 libraryHomeActions 只说「导入文件夹、导入文件、刷新曲库、播放私人 FM、打开这张卡」；调哪个服务、
+ // 提示怎么翻译与显示（alert 仍是 window.alert，状态消息走 onStatusMessage），都在这里。surface 按调用现读。
+ 
+ type HomePortSurface = Pick<HomeSurfaceProps, 'localSongs' | 'onRefreshLocalSongs' | 'onStatusMessage' | 'onPlaySong'>;
+@@ -22,6 +22,7 @@ type HomePortSurface = Pick<HomeSurfaceProps, 'localSongs' | 'onRefreshLocalSong
+ export const createLibraryHomePort = (getSurface: () => HomePortSurface): LibraryHomePort => ({
+     localAvailability: () => getLocalLibraryAvailability(),
+     importFolder: async () => (await importFolder()).length,
++    importFiles: async () => (await importLocalFilesViaInput()).length,
+     resyncAllFolders: async () => (await resyncAllFolders())?.length ?? 0,
+     importPlaylistFile: async (file) => {
+         const result = await importLocalPlaylistFile(file, getSurface().localSongs);
+diff --git a/src/library/core/bindings/useLibraryHomeSources.ts b/src/library/core/bindings/useLibraryHomeSources.ts
+index a02a7f5..7c62e43 100644
+--- a/src/library/core/bindings/useLibraryHomeSources.ts
++++ b/src/library/core/bindings/useLibraryHomeSources.ts
+@@ -5,19 +5,20 @@ import type { HomeViewTab } from '../../../types';
+ import type { ProviderCollection, ProviderUser } from '../../../types/onlineMusic';
+ import type { LibraryHomeOnlineSource, LibraryHomeTabView } from '../contracts/homeModel';
+ import type { LibraryAccountController } from '../contracts/account';
+-import { isOnlineHomeTab, resolveHomeOnlineSource, resolveHomeTabs, translateHomeTabs } from '../model/homeSources';
++import { isOnlineHomeTab, resolveHomeOnlineSource, resolveHomeTabs, resolveLocalHomeAvailability, translateHomeTabs } from '../model/homeSources';
+ import { resolveActiveProviderSummary } from '../model/accountRules';
+ import { readOnlineProviderCapabilities, readOnlineProviderLabel } from '../services/onlineHomeProvider';
+ import { useSearchNavigationStore } from '../../../stores/useSearchNavigationStore';
+ import { useHomeLayoutSettingsStore } from '../../../stores/useHomeLayoutSettingsStore';
+ import { usePersonalFmModeStore } from '../../../stores/usePersonalFmModeStore';
+-import { getLocalLibraryAvailability } from '../../../services/localLibraryAvailability';
++import { getLocalFileImportAvailability, getLocalLibraryAvailability } from '../../../services/localLibraryAvailability';
+ import { getPersonalFmSelectionLabel } from '../../../services/onlineMusic/fmModes';
+ import { useLibraryAccountProviders } from './useLibraryAccount';
+ 
+ // src/library/core/bindings/useLibraryHomeSources.ts
+ // 首页的来源与一级页签：当前页签（搜索导航 store 持有）、当前在线来源（provider、账户、能力）、
+ // 页签列表与不可用原因（规则在 core/model/homeSources，这里翻译）、私人 FM 卡上显示的当前模式。
++// 本地页签的可用性由目录导入与文件导入两个判定合成（没有目录选择器的浏览器仍能进本地页签）。
+ // 只订阅这几样（页签、页签显示开关、FM 模式），别的 store 写入不会让首页重渲染。
+ 
+ export type LibraryHomeSources = {
+@@ -79,7 +80,8 @@ export const useLibraryHomeSources = ({
+         canListPlaylists, cloudPlaylist, personalFmModes, playlists, provider, providerId, recommendations, user, userAlbums, userLibrary,
+     ]);
+ 
+-    const localAvailability = getLocalLibraryAvailability();
++    // 目录导入与文件导入任一能用，本地页签就可进（规则见 core/model/homeSources）。
++    const localAvailability = resolveLocalHomeAvailability(getLocalLibraryAvailability(), getLocalFileImportAvailability());
+     const tabs = useMemo(() => translateHomeTabs(resolveHomeTabs({
+         visibility,
+         navidromeEnabled,
+diff --git a/src/library/core/contracts/homeModel.ts b/src/library/core/contracts/homeModel.ts
+index 889a21b..c222ce2 100644
+--- a/src/library/core/contracts/homeModel.ts
++++ b/src/library/core/contracts/homeModel.ts
+@@ -59,7 +59,7 @@ export type LibraryHomeOnlineSource = {
+ /** 本地曲库能不能用（浏览器要安全上下文与文件系统 API）。 */
+ export type LibraryHomeLocalAvailability = {
+     supported: boolean;
+-    reason: 'insecure-http' | 'file-system-api-unavailable' | null;
++    reason: 'insecure-http' | 'file-system-api-unavailable' | 'file-input-unavailable' | null;
+ };
+ 
+ /** 在线首页数据的归属：哪个 provider 的哪个账户。换了归属，旧数据与还在路上的应答都作废。 */
+@@ -153,12 +153,17 @@ export type LibraryHomeScanProgress = {
+     completedSongs: number;
+ };
+ 
+-/** 首页动作控制器的快照：哪个导入在进行、扫描进度。 */
++/** 首页动作控制器的快照：哪个导入在进行、扫描进度、目录选择器缺席时能不能改用文件导入。 */
+ export type LibraryHomeActionsSnapshot = {
+     importingFolder: boolean;
+     refreshingFolders: boolean;
+     importingPlaylist: boolean;
+     scan: LibraryHomeScanProgress | null;
++    /**
++     * 这个环境只能用文件导入（Android Chrome / iOS Safari 没有 showDirectoryPicker）。true 时
++     * 首页的入口换成「导入文件」，目录导入动作不出现。
++     */
++    canImportFiles: boolean;
+ };
+ 
+ /** 首页动作的结果（存判别式；要显示的提示已经经端口发出）。 */
+@@ -191,6 +196,8 @@ export interface LibraryHomePort {
+     localAvailability(): LibraryHomeLocalAvailability;
+     /** 选一个文件夹导入；返回新导入的歌曲数。 */
+     importFolder(): Promise<number>;
++    /** 选若干音频 / 歌词文件导入（没有目录选择器时的入口）；返回新导入的歌曲数。 */
++    importFiles(): Promise<number>;
+     /** 重扫全部导入根；返回新导入的歌曲数。 */
+     resyncAllFolders(): Promise<number>;
+     /** 用宿主此刻的曲库匹配 m3u 文件里的路径并建歌单。 */
+@@ -216,6 +223,8 @@ export interface LibraryHomeActionsController {
+     /** 第一个订阅者到来时开始听扫描进度，最后一个离开时停。 */
+     subscribe(listener: () => void): () => void;
+     importFolder(): Promise<LibraryHomeActionResult>;
++    /** 用文件选择器导入本地音乐；与 importFolder 共用「忙」。 */
++    importFiles(): Promise<LibraryHomeActionResult>;
+     refreshFolders(): Promise<LibraryHomeActionResult>;
+     importPlaylistFile(file: File): Promise<LibraryHomeActionResult>;
+     /** 取私人 FM 并从第一首开始播放（取不到歌时什么都不做）。 */
+diff --git a/src/library/core/model/homeSources.ts b/src/library/core/model/homeSources.ts
+index fba2a03..fb72c28 100644
+--- a/src/library/core/model/homeSources.ts
++++ b/src/library/core/model/homeSources.ts
+@@ -89,9 +89,26 @@ export const resolveOnlineTabUnavailableReason = (
+ /** 本地曲库为什么不可用（可用时为 undefined）。 */
+ export const resolveLocalUnavailableReason = (availability: LibraryHomeLocalAvailability): LibraryHomeMessage | undefined => {
+     if (availability.supported) return undefined;
+-    return { key: availability.reason === 'insecure-http' ? 'localMusic.insecureHttpDisabled' : 'localMusic.importNotSupported' };
++    if (availability.reason === 'insecure-http') return { key: 'localMusic.insecureHttpDisabled' };
++    if (availability.reason === 'file-input-unavailable') return { key: 'localMusic.fileImportNotSupported' };
++    return { key: 'localMusic.importNotSupported' };
+ };
+ 
++/**
++ * 本地曲库对界面的可用性：目录导入（File System Access API）或文件导入任一能用，本地页签就能进——
++ * Android Chrome 与 iOS Safari 没有 showDirectoryPicker，但文件选择器加音频字节存储一样能建曲库，
++ * 只按目录导入判定的话本地页签会整个被禁用，文件导入的入口就永远点不到。
++ * 两个判定都不可用时，原因取目录导入那边的（它对应本地曲库的既有说明）。
++ */
++export const resolveLocalHomeAvailability = (
++    directoryAvailability: LibraryHomeLocalAvailability,
++    fileAvailability: LibraryHomeLocalAvailability,
++): LibraryHomeLocalAvailability => (
++    directoryAvailability.supported || fileAvailability.supported
++        ? { supported: true, reason: null }
++        : directoryAvailability
++);
++
+ /** 首页设置里各页签的显示开关（Navidrome 由是否启用决定）。 */
+ export type LibraryHomeTabVisibility = {
+     playlist: boolean;
+diff --git a/src/library/core/model/localHomeModel.ts b/src/library/core/model/localHomeModel.ts
+index 7d75802..15a40ba 100644
+--- a/src/library/core/model/localHomeModel.ts
++++ b/src/library/core/model/localHomeModel.ts
+@@ -274,18 +274,26 @@ export const localBatchSelectionType = (section: LocalHomeSectionKey): LibraryDi
+     section === 'folders' || section === 'albums' || section === 'artists' ? section : null
+ );
+ 
+-/** 本地页签右上角的三个导入动作：文案随进行中的动作变，任何一个在进行或扫描中时都禁用。 */
++/**
++ * 本地页签右上角的导入动作：文案随进行中的动作变，任何一个在进行或扫描中时都禁用。
++ * 没有目录选择器的环境（Android Chrome / iOS Safari）把「导入文件夹」换成「导入文件」，
++ * 一次只出现一个导入入口；刷新仍是所有环境共用。
++ */
+ export const resolveLocalHomeActions = (snapshot: LibraryHomeActionsSnapshot): LibraryHomeListAction[] => {
+     const busy = isHomeImportBusy(snapshot);
+     const scanning = Boolean(snapshot.scan?.active) || snapshot.refreshingFolders;
++    // 两个入口共用「忙」与进行中的文案，只有 id 与 label 不同。
++    const importAction: LibraryHomeListAction = {
++        id: snapshot.canImportFiles ? 'import-files' : 'import-folder',
++        labelKey: snapshot.importingFolder
++            ? 'localMusic.importing'
++            : snapshot.canImportFiles ? 'localMusic.fileImport' : 'localMusic.importFolder',
++        titleKey: snapshot.canImportFiles ? 'localMusic.fileImport' : 'localMusic.importFolder',
++        pending: snapshot.importingFolder,
++        disabled: busy,
++    };
+     return [
+-        {
+-            id: 'import-folder',
+-            labelKey: snapshot.importingFolder ? 'localMusic.importing' : 'localMusic.importFolder',
+-            titleKey: 'localMusic.importFolder',
+-            pending: snapshot.importingFolder,
+-            disabled: busy,
+-        },
++        importAction,
+         {
+             id: 'refresh-folders',
+             labelKey: scanning ? 'options.scanning' : 'options.refresh',
+diff --git a/src/library/core/services/libraryHomeActions.ts b/src/library/core/services/libraryHomeActions.ts
+index a3ac335..0b86516 100644
+--- a/src/library/core/services/libraryHomeActions.ts
++++ b/src/library/core/services/libraryHomeActions.ts
+@@ -9,14 +9,16 @@ import type {
+     LibraryHomePort,
+     LibraryHomeScanProgress,
+ } from '../contracts/homeModel';
++import { getLocalFileImportAvailability } from '../../../services/localLibraryAvailability';
+ import { isPersonalFmCard, onlineCardCollection } from '../model/homeCards';
+ import { isHomeImportBusy, resolveLocalUnavailableReason } from '../model/homeSources';
+ 
+ // src/library/core/services/libraryHomeActions.ts
+-// 首页动作层（原样搬自 Grid3D）：本地的导入文件夹、刷新全部、导入歌单文件，私人 FM 直接播放，打开卡片。
+-// - 三个导入共用一个「忙」：任何一个在进行或扫描在进行时，导入文件夹 / 刷新再提交返回 busy；歌单文件导入只看自己；
+-// - 导入文件夹前先看本地曲库能不能用（不能用时弹提示）；导入 / 刷新有新歌才刷新曲库；导入失败弹「不支持」提示，
+-//   刷新失败只记日志；歌单文件导入一首都没匹配上时报错、不刷新，否则刷新曲库后按有没有跳过的路径给出提示；
++// 首页动作层（原样搬自 Grid3D）：本地的导入文件夹 / 导入文件、刷新全部、导入歌单文件，私人 FM 直接播放，打开卡片。
++// - 三个导入共用一个「忙」：任何一个在进行或扫描在进行时，导入文件夹 / 导入文件 / 刷新再提交返回 busy；歌单文件导入只看自己；
++// - 导入文件夹前先看本地曲库能不能用（不能用时弹提示）；没有目录选择器（Android Chrome / iOS Safari）时入口换成导入文件，
++//   能不能用由 localLibraryAvailability 的第二个判定给出（不看目录选择器，只看文件选择器与安全上下文）；
++// - 导入 / 刷新有新歌才刷新曲库；导入失败弹「不支持」提示，刷新失败只记日志；歌单文件导入一首都没匹配上时报错、不刷新；
+ // - 扫描进度：第一个订阅者到来时开始听端口，最后一个离开时停（宿主创建一次，不需要 dispose）。
+ // 副作用都经宿主装配的 LibraryHomePort。
+ 
+@@ -25,11 +27,17 @@ const BUSY: LibraryHomeActionResult = { ok: false, reason: 'busy' };
+ const UNSUPPORTED: LibraryHomeActionResult = { ok: false, reason: 'unsupported' };
+ const FAILED: LibraryHomeActionResult = { ok: false, reason: 'failed' };
+ 
++const resolveCanImportFiles = (): boolean => {
++    const availability = getLocalFileImportAvailability();
++    return availability.supported && !resolveLocalUnavailableReason(availability);
++};
++
+ const IDLE: LibraryHomeActionsSnapshot = {
+     importingFolder: false,
+     refreshingFolders: false,
+     importingPlaylist: false,
+     scan: null,
++    canImportFiles: resolveCanImportFiles(),
+ };
+ 
+ /** 创建首页动作控制器。端口在调用时现读（宿主每次渲染都可能换新的曲库与回调）。 */
+@@ -59,7 +67,14 @@ export const createLibraryHomeActions = (port: LibraryHomePort): LibraryHomeActi
+     };
+ 
+     return {
+-        getSnapshot: () => snapshot,
++        getSnapshot: () => {
++            // Whether the file input can be offered is a runtime property; re-read it on the calls the
++            // snapshot is built for (subscribe, patch) instead of on every read, so the snapshot object
++            // stays referentially stable for useSyncExternalStore.
++            const canImportFiles = resolveCanImportFiles();
++            if (canImportFiles !== snapshot.canImportFiles) snapshot = { ...snapshot, canImportFiles };
++            return snapshot;
++        },
+         subscribe: (listener) => {
+             listeners.add(listener);
+             if (!stopScanProgress) stopScanProgress = port.subscribeScanProgress(handleScanProgress);
+@@ -93,6 +108,28 @@ export const createLibraryHomeActions = (port: LibraryHomePort): LibraryHomeActi
+             }
+         },
+ 
++        importFiles: async () => {
++            if (isHomeImportBusy(snapshot)) return BUSY;
++            const availability = getLocalFileImportAvailability();
++            const unavailable = resolveLocalUnavailableReason(availability);
++            if (unavailable) {
++                port.notify({ kind: 'alert', message: unavailable });
++                return UNSUPPORTED;
++            }
++            patch({ importingFolder: true });
++            try {
++                const imported = await port.importFiles();
++                if (imported > 0) void port.refreshLocalSongs();
++                return OK;
++            } catch (error) {
++                console.error('[LibraryHome] Failed to import local files:', error);
++                port.notify({ kind: 'alert', message: { key: 'localMusic.importNotSupported' } });
++                return FAILED;
++            } finally {
++                patch({ importingFolder: false });
++            }
++        },
++
+         refreshFolders: async () => {
+             if (isHomeImportBusy(snapshot)) return BUSY;
+             patch({ refreshingFolders: true });
+diff --git a/src/library/suites/grid/home/LocalGrid3DView.tsx b/src/library/suites/grid/home/LocalGrid3DView.tsx
+index 5bdba57..e6a2f84 100644
+--- a/src/library/suites/grid/home/LocalGrid3DView.tsx
++++ b/src/library/suites/grid/home/LocalGrid3DView.tsx
+@@ -30,6 +30,7 @@ const SECTION_ICONS: Record<LocalHomeSectionKey, React.ReactNode> = {
+ 
+ const ACTION_ICONS: Record<string, React.ReactNode> = {
+     'import-folder': <FolderOpen size={13} />,
++    'import-files': <FileUp size={13} />,
+     'refresh-folders': <RefreshCw size={13} />,
+     'import-playlist': <FileUp size={13} />,
+ };
+@@ -132,6 +133,7 @@ export const LocalGrid3DView: React.FC<LocalGrid3DViewProps> = ({
+ 
+     const runAction = (id: string) => {
+         if (id === 'import-folder') void homeActions.importFolder();
++        else if (id === 'import-files') void homeActions.importFiles();
+         else if (id === 'refresh-folders') void homeActions.refreshFolders();
+         else if (id === 'import-playlist') playlistFileInputRef.current?.click();
+     };
+@@ -179,17 +181,25 @@ export const LocalGrid3DView: React.FC<LocalGrid3DViewProps> = ({
+ 
+     if (isEmptyLibrary) {
+         const scanning = Boolean(actionState.scan?.active);
++        // The empty state offers whatever import entry this environment has: 首页模型给出的第一个动作
++        // 已经是「导入文件夹」或「导入文件」（没有目录选择器时是后者），文案与图标都跟着它，不再各写一份。
++        const importEntry = localActions[0];
++        const emptyImportLabel = scanning
++            ? t('options.scanning')
++            : actionState.importingFolder
++                ? t('localMusic.importing')
++                : t(importEntry?.labelKey ?? 'localMusic.importFolder');
+         return (
+             <div className="w-full h-full flex flex-col items-center justify-center gap-4 opacity-60">
+                 <Music size={64} />
+                 <p className="text-lg">{t('localMusic.noLocalMusic')}</p>
+                 <button
+-                    onClick={() => void homeActions.importFolder()}
++                    onClick={() => importEntry && runAction(importEntry.id)}
+                     disabled={importBusy}
+                     className="px-6 py-3 rounded-full transition-colors text-sm flex items-center gap-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                 >
+-                    {importBusy ? <Loader2 size={16} className="animate-spin" /> : <FolderOpen size={16} />}
+-                    {scanning ? t('options.scanning') : actionState.importingFolder ? t('localMusic.importing') : t('localMusic.importFolder')}
++                    {importBusy ? <Loader2 size={16} className="animate-spin" /> : (ACTION_ICONS[importEntry?.id ?? ''] ?? <FolderOpen size={16} />)}
++                    {emptyImportLabel}
+                 </button>
+             </div>
+         );
+diff --git a/src/services/db.ts b/src/services/db.ts
+index 0e791e2..9f2365f 100644
+--- a/src/services/db.ts
++++ b/src/services/db.ts
+@@ -32,6 +32,7 @@ import { clearSessionValues, putSessionValue, readSession } from './repositories
+ import { readThemeRegistryEntries, writeThemeRegistryEntries } from './repositories/themeRegistryRepository';
+ import { clearCoverAssets, getCoverAssetUsage } from './binaryAssetStore';
+ import { clearLocalCoverBinaries } from './localCoverBinaryStore';
++import { clearLocalAudioBinaries } from './localAudioBinaryStore';
+ import {
+   cancelLocalCoverAssetMigration,
+   resetLocalCoverAssetRuntime,
+@@ -254,6 +255,7 @@ export const clearAllData = async (): Promise<void> => {
+     await clearCoverAssets();
+     await cancelLocalCoverAssetMigration();
+     await clearLocalCoverBinaries();
++    await clearLocalAudioBinaries();
+     resetLocalCoverAssetRuntime();
+     await appDatabase.delete();
+     await appDatabase.open();
+diff --git a/src/services/localAudioBinaryStore.ts b/src/services/localAudioBinaryStore.ts
+new file mode 100644
+index 0000000..3e39d7c
+--- /dev/null
++++ b/src/services/localAudioBinaryStore.ts
+@@ -0,0 +1,246 @@
++import { isBlob } from '../utils/blobGuards';
++
++// src/services/localAudioBinaryStore.ts
++// Persists imported audio bytes outside IndexedDB in OPFS, in the same validated <key>.bin + <key>.json
++// layout as localCoverBinaryStore. It backs playback for songs that were imported through a plain file
++// input (a picker File with no FileSystemFileHandle to re-read later); songs imported from a directory
++// handle keep using their handle and never touch this store.
++
++export type LocalAudioBinaryBackend = 'opfs';
++
++/** A stored audio asset key: "local-audio:" + the song id + ":" + the sanitized file name. */
++const AUDIO_KEY_PREFIX = 'local-audio:';
++const AUDIO_KEY_PATTERN = /^local-audio:(local_[0-9]+_[0-9a-z]+|sha256:[0-9a-f]{64}):([^/\\:*?"<>|\u0000-\u001f]{1,120})$/;
++// File.type is what the bytes are labelled with downstream: an empty or unknown label is kept as
++// application/octet-stream rather than rejected, so an audio file whose MIME the browser did not
++// guess still plays. The allowlist only decides what a descriptor may claim.
++const ALLOWED_MIME_TYPES = new Set([
++  'application/octet-stream',
++  'audio/aac',
++  'audio/flac',
++  'audio/mp4',
++  'audio/mpeg',
++  'audio/ogg',
++  'audio/opus',
++  'audio/wav',
++  'audio/webm',
++  'audio/x-flac',
++  'audio/x-m4a',
++  'audio/x-wav',
++]);
++const OPFS_ROOT_DIRECTORY = 'folia-cache';
++const OPFS_LOCAL_AUDIO_DIRECTORY = 'local-audio-assets';
++
++export interface LocalAudioBinaryWriteResult {
++  backend: LocalAudioBinaryBackend;
++  mimeType: string;
++  size: number;
++}
++
++interface LocalAudioFileDescriptor {
++  key: string;
++  fileName: string;
++  mimeType: string;
++  size: number;
++  updatedAt: number;
++}
++
++const getKeyFileNames = (key: string) => (
++  isValidLocalAudioAssetKey(key) ? { data: `${key}.bin`, metadata: `${key}.json` } : null
++);
++
++const normalizeAudioMimeType = (value: unknown): string | null => {
++  if (typeof value !== 'string') return null;
++  const normalized = value.toLowerCase();
++  return ALLOWED_MIME_TYPES.has(normalized) ? normalized : null;
++};
++
++/** Keeps the file name usable inside one OPFS entry name without losing how the track is displayed. */
++const sanitizeAudioFileName = (fileName: string): string => (
++  fileName
++    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, '_')
++    .trim()
++    .slice(0, 120) || 'audio'
++);
++
++export const isValidLocalAudioAssetKey = (value: unknown): value is string => (
++  typeof value === 'string' && AUDIO_KEY_PATTERN.test(value)
++);
++
++/**
++ * The store key for one imported song. Self-describing on purpose: the song id makes it lookup-able
++ * from a LocalSong record alone, and the trailing file name keeps the persisted entry readable and
++ * lets the file be rebuilt with a sensible name and MIME type when the database record is gone.
++ */
++export const buildLocalAudioAssetKey = (songId: string, fileName: string): string | null => {
++  const key = `${AUDIO_KEY_PREFIX}${songId}:${sanitizeAudioFileName(fileName)}`;
++  return isValidLocalAudioAssetKey(key) ? key : null;
++};
++
++/** The MIME type to persist for these bytes: the blob's own label, else a neutral binary label. */
++export const resolveLocalAudioMimeType = (value: unknown): string | null => (
++  isBlob(value) ? (normalizeAudioMimeType(value.type) ?? 'application/octet-stream') : null
++);
++
++const hasElectronBridge = (): boolean => (
++  typeof window !== 'undefined' && typeof window.electron !== 'undefined'
++);
++
++export const isLocalAudioWebRuntimeSupported = (): boolean => {
++  if (typeof window === 'undefined') return false;
++  // The Electron build plays local files through its own bridge; this store is web-only.
++  if (hasElectronBridge()) return false;
++  const isLocalhost = ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
++  return (window.location.protocol === 'https:' || isLocalhost)
++    && window.isSecureContext
++    && typeof navigator.storage?.getDirectory === 'function';
++};
++
++/**
++ * Whether audio bytes can be persisted at all. There is no Electron branch: the desktop bridge has no
++ * audio-asset API, so the desktop build always answers "unsupported" instead of inventing one.
++ */
++export const isLocalAudioBinaryRuntimeSupported = (): boolean => (
++  !hasElectronBridge() && isLocalAudioWebRuntimeSupported()
++);
++
++const getOpfsDirectory = async (create: boolean): Promise<FileSystemDirectoryHandle | null> => {
++  if (!isLocalAudioBinaryRuntimeSupported()) return null;
++  try {
++    const root = await navigator.storage.getDirectory();
++    const cacheRoot = await root.getDirectoryHandle(OPFS_ROOT_DIRECTORY, { create });
++    return await cacheRoot.getDirectoryHandle(OPFS_LOCAL_AUDIO_DIRECTORY, { create });
++  } catch {
++    return null;
++  }
++};
++
++// The descriptor is only trusted when it agrees with the bytes actually on disk: a mismatch (a
++// truncated write, a replaced blob, a descriptor edited by hand) is reported as "absent".
++const readOpfsDescriptor = async (
++  directory: FileSystemDirectoryHandle,
++  key: string,
++): Promise<{ descriptor: LocalAudioFileDescriptor; file: File } | null> => {
++  const names = getKeyFileNames(key);
++  if (!names) return null;
++  try {
++    const [file, rawMetadata] = await Promise.all([
++      directory.getFileHandle(names.data).then(handle => handle.getFile()),
++      directory.getFileHandle(names.metadata).then(handle => handle.getFile()).then(value => value.text()),
++    ]);
++    const descriptor = JSON.parse(rawMetadata) as Partial<LocalAudioFileDescriptor>;
++    const mimeType = normalizeAudioMimeType(descriptor.mimeType);
++    const fileName = typeof descriptor.fileName === 'string' ? descriptor.fileName : '';
++    if (descriptor.key !== key || !mimeType || !fileName || descriptor.size !== file.size || file.size <= 0) {
++      return null;
++    }
++    return {
++      descriptor: { key, fileName, mimeType, size: file.size, updatedAt: Number(descriptor.updatedAt) || 0 },
++      file,
++    };
++  } catch {
++    return null;
++  }
++};
++
++export const writeLocalAudioBinary = async (
++  key: string,
++  value: unknown,
++  fileName: string,
++): Promise<LocalAudioBinaryWriteResult | null> => {
++  const mimeType = resolveLocalAudioMimeType(value);
++  const names = getKeyFileNames(key);
++  if (!names || !isBlob(value) || value.size <= 0 || !mimeType) return null;
++
++  const directory = await getOpfsDirectory(true);
++  if (!directory) return null;
++  const dataHandle = await directory.getFileHandle(names.data, { create: true });
++  const metadataHandle = await directory.getFileHandle(names.metadata, { create: true });
++  const dataWritable = await dataHandle.createWritable();
++  try {
++    await dataWritable.write(value);
++    await dataWritable.close();
++  } catch (error) {
++    await dataWritable.abort().catch(() => undefined);
++    throw error;
++  }
++  const descriptor: LocalAudioFileDescriptor = {
++    key,
++    fileName: fileName || sanitizeAudioFileName(fileName),
++    mimeType,
++    size: value.size,
++    updatedAt: Date.now(),
++  };
++  const metadataWritable = await metadataHandle.createWritable();
++  try {
++    await metadataWritable.write(JSON.stringify(descriptor));
++    await metadataWritable.close();
++  } catch (error) {
++    await metadataWritable.abort().catch(() => undefined);
++    await directory.removeEntry(names.data).catch(() => undefined);
++    throw error;
++  }
++  return { backend: 'opfs', mimeType, size: value.size };
++};
++
++/**
++ * The stored audio bytes as a File, or null when nothing valid is stored for this key. The file is
++ * named and typed from the descriptor rather than from the caller, because the descriptor is the part
++ * that was validated against the bytes on disk.
++ */
++export const readLocalAudioBinary = async (key: string): Promise<File | null> => {
++  const directory = await getOpfsDirectory(false);
++  if (!directory) return null;
++  const stored = await readOpfsDescriptor(directory, key);
++  if (!stored) return null;
++  return new File([stored.file], stored.descriptor.fileName, {
++    type: stored.descriptor.mimeType,
++    lastModified: stored.descriptor.updatedAt || stored.file.lastModified,
++  });
++};
++
++export const hasLocalAudioBinary = async (key: string): Promise<boolean> => {
++  const directory = await getOpfsDirectory(false);
++  return directory ? Boolean(await readOpfsDescriptor(directory, key)) : false;
++};
++
++export const removeLocalAudioBinary = async (key: string): Promise<void> => {
++  const names = getKeyFileNames(key);
++  if (!names) return;
++  const directory = await getOpfsDirectory(false);
++  if (!directory) return;
++  await Promise.all([
++    directory.removeEntry(names.data).catch(() => undefined),
++    directory.removeEntry(names.metadata).catch(() => undefined),
++  ]);
++};
++
++export const clearLocalAudioBinaries = async (): Promise<void> => {
++  if (!isLocalAudioWebRuntimeSupported()) return;
++  try {
++    const root = await navigator.storage.getDirectory();
++    const cacheRoot = await root.getDirectoryHandle(OPFS_ROOT_DIRECTORY);
++    await cacheRoot.removeEntry(OPFS_LOCAL_AUDIO_DIRECTORY, { recursive: true });
++  } catch {
++    // A missing local-audio directory is already clear.
++  }
++};
++
++/**
++ * Bytes the store currently holds, descriptors included. Walks the directory instead of trusting a
++ * counter, so it stays correct after a partial delete or an interrupted import.
++ */
++export const estimateLocalAudioBinaryUsage = async (): Promise<number> => {
++  const directory = await getOpfsDirectory(false);
++  if (!directory) return 0;
++  let total = 0;
++  for await (const entry of directory.values()) {
++    if (entry.kind !== 'file') continue;
++    try {
++      total += (await entry.getFile()).size;
++    } catch {
++      // A concurrently removed entry contributes nothing.
++    }
++  }
++  return total;
++};
+diff --git a/src/services/localLibraryAvailability.ts b/src/services/localLibraryAvailability.ts
+index 147da7d..8ca5cb2 100644
+--- a/src/services/localLibraryAvailability.ts
++++ b/src/services/localLibraryAvailability.ts
+@@ -1,9 +1,11 @@
+ // src/services/localLibraryAvailability.ts
+-// Centralizes the secure-context requirement for browser local-library access.
++// Centralizes the secure-context requirement for browser local-library access, and separates the two
++// browser entry points: the directory picker (File System Access API, desktop Chromium) and the plain
++// file input (everywhere else, including Android Chrome and iOS Safari).
+ 
+ export interface LocalLibraryAvailability {
+   supported: boolean;
+-  reason: 'insecure-http' | 'file-system-api-unavailable' | null;
++  reason: 'insecure-http' | 'file-system-api-unavailable' | 'file-input-unavailable' | null;
+ }
+ 
+ export const getLocalLibraryAvailability = (): LocalLibraryAvailability => {
+@@ -20,3 +22,26 @@ export const getLocalLibraryAvailability = (): LocalLibraryAvailability => {
+   }
+   return { supported: true, reason: null };
+ };
++
++/**
++ * Whether a plain file input can import local music. This is the directory picker's fallback entry:
++ * Android Chrome and iOS Safari have no showDirectoryPicker, but they do have a multi-select file
++ * input, and the imported bytes are persisted by the local audio store so playback needs no handle.
++ * The input element itself is the only requirement, so an insecure context is still rejected (the
++ * bytes could not be persisted there) but a missing File System Access API is not.
++ */
++export const getLocalFileImportAvailability = (): LocalLibraryAvailability => {
++  if (typeof window === 'undefined' || typeof document === 'undefined') {
++    return { supported: false, reason: 'file-input-unavailable' };
++  }
++  const currentLocation = window.location;
++  if (!currentLocation) return { supported: false, reason: 'file-input-unavailable' };
++  const isLocalhost = ['localhost', '127.0.0.1', '[::1]'].includes(currentLocation.hostname);
++  if (!(currentLocation.protocol === 'https:' || isLocalhost) || !window.isSecureContext) {
++    return { supported: false, reason: 'insecure-http' };
++  }
++  // Electron already reaches every local file through its own bridge, and its renderer may not be a
++  // secure context; the file input is the browser fallback, not a desktop entry.
++  if (window.electron) return { supported: false, reason: 'file-input-unavailable' };
++  return { supported: true, reason: null };
++};
+diff --git a/src/services/localMusicService.ts b/src/services/localMusicService.ts
+index 3abe339..c4dce0d 100644
+--- a/src/services/localMusicService.ts
++++ b/src/services/localMusicService.ts
+@@ -23,6 +23,12 @@ import {
+     type PreparedLocalCoverBlob,
+ } from './localCoverAssetService';
+ import { hasLocalCoverBinary } from './localCoverBinaryStore';
++import {
++    buildLocalAudioAssetKey,
++    readLocalAudioBinary,
++    removeLocalAudioBinary,
++    writeLocalAudioBinary,
++} from './localAudioBinaryStore';
+ import { hasLocalSongCover } from '../utils/localSongCover';
+ import { createFoliaIgnoreMatcher, isIgnoredByFoliaMatchers, type FoliaIgnoreMatcher } from '../utils/foliaIgnore';
+ import { getLocalLibraryAvailability } from './localLibraryAvailability';
+@@ -46,7 +52,11 @@ interface ImportPreparationMetrics {
+ }
+ 
+ interface FileEntryForImport {
+-    handle: FileSystemFileHandle;
++    // Absent for file-input imports: a picked File is readable for this session only, so there is no
++    // handle to re-read it later and the audio bytes are persisted by the local audio store instead.
++    // Everything else in the import pipeline works from `file`, so a handle-less entry still parses
++    // metadata and sidecar lyrics / covers.
++    handle?: FileSystemFileHandle;
+     file: File;
+     folderName: string;
+     relativePath: string;
+@@ -947,8 +957,10 @@ async function buildImportedSong(
+         useOnlineCover: existingSong?.useOnlineCover,
+     };
+ 
+-    fileHandleMap.set(songId, fileHandle);
+-    localSong.fileHandle = fileHandle;
++    if (fileHandle) {
++        fileHandleMap.set(songId, fileHandle);
++        localSong.fileHandle = fileHandle;
++    }
+ 
+     return {
+         song: localSong,
+@@ -1296,6 +1308,269 @@ async function importFolderContents(dirHandle: FileSystemDirectoryHandle, expect
+     }
+ }
+ 
++// Root folder name for a flat multi-file pick: the files carry no webkitRelativePath, so there is no
++// folder on disk to name the import after.
++const SYNTHETIC_IMPORT_ROOT_NAME = 'Local Import';
++const FILE_INPUT_ACCEPT = 'audio/*,.lrc,.vtt,.ttml,.qrc,.yrc,.krc';
++
++/**
++ * Imports plain File objects with no directory handle, for environments without the File System Access
++ * API (Android Chrome, iOS Safari, an Android WebView shell that hands over SAF files).
++ *
++ * The bytes of every audio file are written to the local audio store inside this call, before the song
++ * records are saved, so a song that reaches the library is always playable; songs whose bytes could not
++ * be stored are skipped instead of being persisted as unplayable rows. If it throws, nothing was saved.
++ *
++ * The songs are not rescan-able: re-picking the same files rebuilds the same root in place (the closest
++ * analogue of a folder rescan), and resyncFolder / resyncAllFolders skip such roots.
++ */
++export async function importLocalFiles(files: File[]): Promise<LocalSong[]> {
++    if (files.length === 0) return [];
++    return await runLocalFolderMutation(() => importLocalFilesContents(files));
++}
++
++/**
++ * Opens a hidden file input and imports whatever the user picked, resolving with the created songs and
++ * with [] when the picker was cancelled. Deliberately without `webkitdirectory`: Android Chromium ignores
++ * it and hands back a tree the page cannot read, so a filtered multi-select is the portable choice.
++ */
++export function importLocalFilesViaInput(): Promise<LocalSong[]> {
++    return new Promise<LocalSong[]>((resolve) => {
++        const input = document.createElement('input');
++        input.type = 'file';
++        input.multiple = true;
++        input.accept = FILE_INPUT_ACCEPT;
++        input.style.display = 'none';
++
++        let settled = false;
++        const finish = (songs: LocalSong[]) => {
++            if (settled) return;
++            settled = true;
++            input.remove();
++            resolve(songs);
++        };
++
++        // Chrome and Safari fire `cancel` when the dialog is dismissed; without it the promise from a
++        // cancelled pick would never settle.
++        input.addEventListener('cancel', () => finish([]));
++        input.addEventListener('change', () => {
++            const pickedFiles = Array.from(input.files || []);
++            if (pickedFiles.length === 0) {
++                finish([]);
++                return;
++            }
++            void importLocalFiles(pickedFiles)
++                .then(finish)
++                .catch((error) => {
++                    console.error('[LocalMusic][Import] File-input import failed:', error);
++                    finish([]);
++                });
++        });
++
++        document.body.appendChild(input);
++        input.click();
++    });
++}
++
++/**
++ * Groups picked files into one synthetic root and persists them: same grouping convention as the
++ * directory import (first path segment of webkitRelativePath is the root folder name), same sidecar
++ * lyric / folder cover priority rules, same store keys as `buildLocalAudioAssetKey`.
++ */
++async function importLocalFilesContents(files: File[]): Promise<LocalSong[]> {
++    const importStartedAt = performance.now();
++    const entriesWithPaths = files.map(file => {
++        // Directory uploads carry "Root/sub/track.mp3"; a flat multi-select only has the file name.
++        const webkitRelativePath = (file as File & { webkitRelativePath?: string; }).webkitRelativePath || '';
++        const relativePath = webkitRelativePath.includes('/') ? webkitRelativePath : file.name;
++        return { file, relativePath };
++    });
++
++    const hasStructuredPaths = entriesWithPaths.some(entry => entry.relativePath.includes('/'));
++    const rootFolderName = hasStructuredPaths
++        ? entriesWithPaths[0].relativePath.split('/')[0]
++        : SYNTHETIC_IMPORT_ROOT_NAME;
++    const lyricFormatOrder = useLyricSettingsStore.getState().localLyricFormatOrder;
++
++    const audioEntries: FileEntryForImport[] = [];
++    const lyricCandidates = new Map<string, LocalLyricFileCandidate>();
++    // Winning priority per base path, kept apart from the candidate so the map handed to
++    // buildImportedSong keeps the same shape the directory import produces.
++    const lyricCandidatePriorities = new Map<string, number>();
++    const translationLyricCandidates = new Map<string, { file: File; priority: number; }>();
++    const coverCandidates = new Map<string, { file: File; priority: number; }>();
++
++    entriesWithPaths.forEach(({ file, relativePath: originalRelativePath }) => {
++        const relativePath = originalRelativePath.includes('/') ? originalRelativePath : `${rootFolderName}/${originalRelativePath}`;
++        const folderName = getParentRelativePath(relativePath);
++        const kind = getSnapshotFileKind(file.name);
++
++        if (kind === 'lyric' || kind === 'translationLyric') {
++            const baseName = getSidecarLyricBasePath(relativePath, kind);
++            const priority = getLocalLyricFilePriority(file.name, lyricFormatOrder);
++
++            if (kind === 'translationLyric') {
++                const existingTranslation = translationLyricCandidates.get(baseName);
++                if (!existingTranslation || priority < existingTranslation.priority) {
++                    translationLyricCandidates.set(baseName, { file, priority });
++                }
++            } else {
++                const existingPriority = lyricCandidatePriorities.get(baseName);
++                if (existingPriority === undefined || priority < existingPriority) {
++                    lyricCandidatePriorities.set(baseName, priority);
++                    lyricCandidates.set(baseName, { file, format: resolveExplicitFileTimedLyricFormat(file.name) });
++                }
++            }
++            return;
++        }
++
++        if (kind === 'cover') {
++            const priority = getFolderCoverPriority(file.name);
++            const existingCover = coverCandidates.get(folderName);
++            if (!existingCover || priority < existingCover.priority) {
++                coverCandidates.set(folderName, { file, priority });
++            }
++            return;
++        }
++
++        if (kind === 'audio') {
++            audioEntries.push({ file, folderName, relativePath });
++        }
++    });
++
++    if (audioEntries.length === 0) {
++        console.log('[LocalMusic][Import] File-input import skipped: no audio files selected.');
++        return [];
++    }
++
++    const allSongs = await getLocalSongs();
++    const existingRootSongs = allSongs.filter(song =>
++        song.folderName === rootFolderName || (song.folderName && song.folderName.startsWith(`${rootFolderName}/`))
++    );
++    const existingSongsByPath = new Map(existingRootSongs.map(song => [song.filePath, song]));
++    console.log(`[LocalMusic][Import] File-input import of "${rootFolderName}": ${audioEntries.length} audio files, ${lyricCandidates.size} lyric files, ${translationLyricCandidates.size} translated lyric files, ${coverCandidates.size} cover files.`);
++
++    notifyLocalMusicScanProgress({
++        active: true,
++        folderName: rootFolderName,
++        totalSongs: audioEntries.length,
++        completedSongs: 0
++    });
++
++    try {
++        const tlrcMap = new Map(Array.from(translationLyricCandidates.entries()).map(([baseName, value]) => [baseName, value.file]));
++        const coverMap = new Map(Array.from(coverCandidates.entries()).map(([folderKey, value]) => [folderKey, value.file]));
++        const coverBlobCache = new Map<string, Promise<PreparedLocalCoverBlob | undefined>>();
++        const metadataStartedAt = performance.now();
++        // File imports have no later scan to fill metadata in, so embedded metadata is parsed inline.
++        const processedSongs = await mapWithConcurrency(audioEntries, IMPORT_CONCURRENCY, async (entry) => {
++            try {
++                return await buildImportedSong(
++                    entry,
++                    lyricCandidates,
++                    tlrcMap,
++                    coverMap,
++                    coverBlobCache,
++                    true,
++                    existingSongsByPath.get(entry.relativePath)
++                );
++            } catch (error) {
++                console.error(`Failed to import file ${entry.relativePath}:`, error);
++                return {
++                    song: null,
++                    metrics: {
++                        getFileMs: 0,
++                        lyricReadMs: 0,
++                        coverReadMs: 0,
++                        parseMetadataMs: 0,
++                        durationFallbackMs: 0,
++                        usedDurationFallback: false
++                    }
++                };
++            }
++        });
++        // mapWithConcurrency preserves input order, so entries zip with their results by index.
++        const readySongs = processedSongs
++            .map((result, index) => ({ song: result.song, entry: audioEntries[index] }))
++            .filter((item): item is { song: LocalSong; entry: FileEntryForImport; } => item.song !== null);
++        console.log(`[LocalMusic][Import] Prepared ${readySongs.length} audio files with concurrency=${IMPORT_CONCURRENCY} in ${formatImportDuration(performance.now() - metadataStartedAt)}.`);
++
++        const storedSongIds: string[] = [];
++        for (const { song, entry } of readySongs) {
++            const key = await persistImportedAudioBytes(song, entry);
++            if (key) storedSongIds.push(song.id);
++        }
++        if (storedSongIds.length === 0) {
++            throw new Error(`No audio bytes could be persisted for "${rootFolderName}"`);
++        }
++        // Replacing a root leaves the tracks that were not picked again with bytes nothing can reach.
++        const currentPaths = new Set(audioEntries.map(entry => entry.relativePath));
++        const replacedSongs = existingRootSongs.filter(song => !currentPaths.has(song.filePath));
++        for (const song of replacedSongs) {
++            fileHandleMap.delete(song.id);
++            await removeLocalSongAudioBytes(song);
++            await dbDeleteLocalSong(song.id);
++        }
++
++        const songsToPersist = readySongs.map(item => item.song);
++        try {
++            await saveLocalSongs(songsToPersist);
++        } catch (saveError) {
++            console.error('Failed to save file-input imported songs:', saveError);
++            songsToPersist.forEach(song => fileHandleMap.delete(song.id));
++            await Promise.all(songsToPersist.map(song => removeLocalSongAudioBytes(song)));
++            throw saveError;
++        }
++
++        console.log(`[LocalMusic][Import] Finished file-input import of "${rootFolderName}" with ${songsToPersist.length}/${audioEntries.length} available songs in ${formatImportDuration(performance.now() - importStartedAt)}.`);
++        notifyLocalMusicUpdated();
++        return songsToPersist;
++    } finally {
++        notifyLocalMusicScanProgress({
++            active: false,
++            folderName: rootFolderName,
++            totalSongs: audioEntries.length,
++            completedSongs: audioEntries.length
++        });
++    }
++}
++
++/**
++ * Writes one imported file's bytes to the audio store under the song's key. Returns the key that now
++ * holds the bytes, or null when nothing was stored (an unsupported runtime, an unrepresentable file
++ * name, a quota failure) - the caller treats that song as not importable.
++ */
++async function persistImportedAudioBytes(song: LocalSong, entry: FileEntryForImport): Promise<string | null> {
++    const key = buildLocalAudioAssetKey(song.id, entry.file.name);
++    if (!key) {
++        console.warn(`[LocalMusic][Import] Cannot store audio for "${entry.file.name}": no representable store key.`);
++        return null;
++    }
++
++    try {
++        // Re-picking the same file again reuses the bytes already stored for it.
++        const existing = await readLocalAudioBinary(key);
++        if (existing && existing.size === entry.file.size) {
++            return key;
++        }
++
++        const result = await writeLocalAudioBinary(key, entry.file, entry.file.name);
++        return result ? key : null;
++    } catch (error) {
++        console.error(`[LocalMusic][Import] Failed to store audio bytes for "${entry.file.name}":`, error);
++        return null;
++    }
++}
++
++// Best effort: a song whose bytes were never stored (or are already gone) has nothing to remove.
++async function removeLocalSongAudioBytes(song: LocalSong): Promise<void> {
++    const key = buildLocalAudioAssetKey(song.id, song.fileName);
++    if (!key) return;
++    await removeLocalAudioBinary(key).catch(error => {
++        console.warn(`[LocalMusic] Failed to remove stored audio for ${song.fileName}:`, error);
++    });
++}
++
+ // Helper function to normalize title for comparison
+ function normalizeTitle(title: string): string {
+     return normalizeLyricMatchText(title).replace(/\s+/g, '');
+@@ -1502,9 +1777,13 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
+ export async function deleteLocalSong(id: string): Promise<void> {
+     // Remove fileHandle from memory
+     fileHandleMap.delete(id);
++    // Same reason as deleteSongsByIds: a file-input import keeps its bytes in the audio store, and the
++    // store key needs the song's file name, so the record is read before it is gone.
++    const song = (await getLocalSongs()).find(candidate => candidate.id === id);
+     await Promise.all([
+         dbDeleteLocalSong(id),
+         removeCachedCover(`cover_local_${id}`),
++        ...(song ? [removeLocalSongAudioBytes(song)] : []),
+     ]);
+ }
+ 
+@@ -1602,6 +1881,21 @@ async function cleanupDirHandleIfUnused(rootFolderName: string): Promise<void> {
+     }
+ }
+ 
++/**
++ * The persisted audio bytes of a handle-less import (a plain file input, or a shell that handed the
++ * page File objects). Directory imports never store bytes here, so this is null for them.
++ */
++async function readStoredLocalSongFile(song: LocalSong): Promise<File | null> {
++    const key = buildLocalAudioAssetKey(song.id, song.fileName);
++    if (!key) return null;
++    try {
++        return await readLocalAudioBinary(key);
++    } catch (error) {
++        console.warn(`[LocalMusic] Failed to read stored audio for ${song.fileName}:`, error);
++        return null;
++    }
++}
++
+ // Get audio blob from local song using fileHandle
+ // Returns blob URL if fileHandle exists, null otherwise
+ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | null> {
+@@ -1629,7 +1923,13 @@ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | n
+         }
+     }
+ 
+-    // No accessible handle available - permission may need to be restored or the file moved.
++    // No handle anywhere: this is either a handle-less import (its bytes live in the audio store) or a
++    // directory import whose permission was not restored.
++    const storedFile = await readStoredLocalSongFile(song);
++    if (storedFile) {
++        return await getAudioFromFile(storedFile);
++    }
++
+     console.warn(`[LocalMusic] No accessible handle for song ${song.id}. Permission restore or re-import is required.`);
+     return null;
+ }
+@@ -1647,14 +1947,16 @@ export async function getFileFromLocalSong(song: LocalSong): Promise<File | null
+     }
+ 
+     const recoveredHandle = await recoverFileHandleFromPersistedDirectory(song);
+-    if (!recoveredHandle) return null;
+-    try {
+-        return await recoveredHandle.getFile();
+-    } catch (error) {
+-        console.warn(`[LocalMusic] Failed to read recovered local input for ${song.id}:`, error);
+-        fileHandleMap.delete(song.id);
+-        return null;
++    if (recoveredHandle) {
++        try {
++            return await recoveredHandle.getFile();
++        } catch (error) {
++            console.warn(`[LocalMusic] Failed to read recovered local input for ${song.id}:`, error);
++            fileHandleMap.delete(song.id);
++        }
+     }
++
++    return await readStoredLocalSongFile(song);
+ }
+ 
+ /**
+@@ -1662,45 +1964,51 @@ export async function getFileFromLocalSong(song: LocalSong): Promise<File | null
+  *
+  * Automix separation is the caller: it must not mint a blob URL only to read it once and then have to
+  * revoke it, and a local file never enters the online media cache, so its bytes are reachable only
+- * from its own handle. Mirrors getAudioFromLocalSong's resolution (accessible handle, else a recover)
+- * but returns the ArrayBuffer. Null when no handle can be reached - permission not restored, or moved.
++ * from its own handle or, for a handle-less import, from the local audio store. Mirrors
++ * getAudioFromLocalSong's resolution (accessible handle, else a recover, else the stored bytes) but
++ * returns the ArrayBuffer. Null when none of the three can produce the bytes.
+  */
+ export async function getLocalSongArrayBuffer(song: LocalSong): Promise<ArrayBuffer | null> {
+     const fileHandle = await getAccessibleFileHandle(song);
+-    if (!fileHandle) {
+-        console.warn(`[LocalMusic] No accessible handle for song ${song.id} (automix bytes)`);
+-        return null;
++    if (fileHandle) {
++        try {
++            return await (await fileHandle.getFile()).arrayBuffer();
++        } catch (error) {
++            console.error('[LocalMusic] Failed to read local bytes:', error);
++            fileHandleMap.delete(song.id);
++        }
+     }
+-    try {
+-        return await (await fileHandle.getFile()).arrayBuffer();
+-    } catch (error) {
+-        console.error('[LocalMusic] Failed to read local bytes:', error);
+-        fileHandleMap.delete(song.id);
+-        return null;
++
++    const storedFile = await readStoredLocalSongFile(song);
++    if (storedFile) {
++        return await storedFile.arrayBuffer();
+     }
++
++    console.warn(`[LocalMusic] No accessible handle for song ${song.id} (automix bytes)`);
++    return null;
+ }
+ 
+-// Extracts and persists one song's embedded cover after an explicit playback-time request.
++// Extracts and persists one song's embedded cover after an explicit playback-time request. Takes the
++// already-resolved File rather than a handle: a handle-less import reaches its bytes through the audio
++// store, and the cover path does not care which of the two produced the file.
+ async function extractAndPersistSongCover(
+     song: LocalSong,
+-    fileHandle: FileSystemFileHandle,
++    file: File,
+ ): Promise<LocalSong> {
+-    const file = await fileHandle.getFile();
+     const fileRevision = `${file.size}:${file.lastModified}`;
+     if (songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
+-    const metadata = await extractEmbeddedMetadata(file, true);
+-    if (!metadata.cover || !metadata.coverAssetId) {
++    const { cover, coverAssetId } = await extractEmbeddedMetadata(file, true);
++    if (!cover || !coverAssetId) {
+         songsWithoutEmbeddedCover.set(song.id, fileRevision);
+         return song;
+     }
+     songsWithoutEmbeddedCover.delete(song.id);
+-    stageLocalCoverAsset(metadata.coverAssetId, metadata.cover);
++    stageLocalCoverAsset(coverAssetId, cover);
+ 
+     const updatedSong: LocalSong = {
+         ...song,
+-        localCoverAssetId: metadata.coverAssetId,
++        localCoverAssetId: coverAssetId,
+         localCoverSource: 'embedded',
+-        fileHandle,
+     };
+     Object.assign(song, updatedSong);
+     await saveLocalSong(updatedSong);
+@@ -1714,12 +2022,23 @@ export async function ensureLocalSongCoverAsset(song: LocalSong): Promise<LocalS
+     if (!localCoverAssetRequestMap.has(song.id)) {
+         localCoverAssetRequestMap.set(song.id, (async () => {
+             const fileHandle = await getAccessibleFileHandle(song);
++            // A directory import without a reachable handle has no bytes at all, so there is nothing to
++            // extract; a handle-less import falls through to the store.
+             if (!fileHandle) {
+-                return song;
++                const storedFile = await readStoredLocalSongFile(song);
++                if (!storedFile) return song;
++                try {
++                    return await extractAndPersistSongCover(song, storedFile);
++                } catch (error) {
++                    console.warn(`[LocalMusic] Failed to ensure embedded cover for ${song.fileName}:`, error);
++                    return song;
++                } finally {
++                    localCoverAssetRequestMap.delete(song.id);
++                }
+             }
+ 
+             try {
+-                return await extractAndPersistSongCover(song, fileHandle);
++                return await extractAndPersistSongCover(song, await fileHandle.getFile());
+             } catch (error) {
+                 console.warn(`[LocalMusic] Failed to ensure embedded cover for ${song.fileName}:`, error);
+                 fileHandleMap.delete(song.id);
+@@ -1730,7 +2049,7 @@ export async function ensureLocalSongCoverAsset(song: LocalSong): Promise<LocalS
+                         return song;
+                     }
+ 
+-                    return await extractAndPersistSongCover(song, recoveredHandle);
++                    return await extractAndPersistSongCover(song, await recoveredHandle.getFile());
+                 } catch (recoveryError) {
+                     console.warn(`[LocalMusic] Failed to recover embedded cover for ${song.fileName}:`, recoveryError);
+                     return song;
+@@ -1763,6 +2082,7 @@ export async function deleteSongsByIds(songIds: string[]): Promise<void> {
+             .map(getRootFolderName)
+             .filter((root): root is string => Boolean(root)),
+     );
++    const songsToRemoveBytes = allSongs.filter(song => deletedIdSet.has(song.id));
+     uniqueSongIds.forEach(id => {
+         fileHandleMap.delete(id);
+         localCoverAssetRequestMap.delete(id);
+@@ -1771,6 +2091,7 @@ export async function deleteSongsByIds(songIds: string[]): Promise<void> {
+     await Promise.all([
+         dbDeleteLocalSongs(uniqueSongIds),
+         ...uniqueSongIds.map(id => removeCachedCover(`cover_local_${id}`)),
++        ...songsToRemoveBytes.map(removeLocalSongAudioBytes),
+     ]);
+     await removeDeletedSongIdsFromPlaylists(uniqueSongIds);
+     await Promise.all(Array.from(affectedRoots).map(cleanupDirHandleIfUnused));
+@@ -1794,6 +2115,8 @@ async function removeImportedRootContents(rootFolderName: string): Promise<void>
+         .map(song => song.id);
+ 
+     if (songIds.length > 0) {
++        // Delete-by-id also drops the audio bytes a file-input import persisted, so removing a root
++        // releases its storage instead of leaving unreachable blobs behind.
+         await deleteSongsByIds(songIds);
+     }
+     await Promise.all([
+@@ -1808,6 +2131,13 @@ export async function resyncFolder(folderName: string): Promise<LocalSong[] | nu
+     // Only root imports have persisted directory handles. Derived child folders
+     // should resync through their imported root folder handle.
+     const rootFolderName = folderName.split('/')[0] || folderName;
++    // A file-input import has no handle to re-read, so there is no scan to run. Returning null (the
++    // "nothing was rescanned" answer) keeps callers from reporting a rescan that never happened;
++    // those roots are refreshed by picking files again.
++    if (!(await getDirHandles())[rootFolderName]) {
++        console.log(`[LocalMusic][Import] Skipped resync of "${rootFolderName}": it was imported from files, not a directory.`);
++        return null;
++    }
+     const importedSongs = await importFolder(rootFolderName);
+ 
+     // If user cancelled (empty array), return null to indicate cancellation
+@@ -1824,15 +2154,11 @@ function getLocalSongRootFolderName(song: LocalSong): string | null {
+     return rootFolderName || null;
+ }
+ 
+-// Resyncs all imported local roots once, even when the song list contains nested folders.
++// Resyncs all imported local roots once, even when the song list contains nested folders. Roots that
++// came from a file input have no handle and are skipped rather than reported as rescanned.
+ export async function resyncAllFolders(): Promise<LocalSong[] | null> {
+-    const allSongs = await getLocalSongs();
+     const handles = await getDirHandles();
+-    const rootFolderNames = Array.from(new Set(
+-        [...Object.keys(handles), ...allSongs
+-            .map(getLocalSongRootFolderName)
+-            .filter((rootFolderName): rootFolderName is string => Boolean(rootFolderName))]
+-    ));
++    const rootFolderNames = Array.from(new Set(Object.keys(handles)));
+ 
+     if (rootFolderNames.length === 0) {
+         return null;
+@@ -1884,6 +2210,7 @@ async function deleteFolderContents(folderName: string): Promise<void> {
+     await Promise.all([
+         dbDeleteLocalSongs(songIdsToDelete),
+         ...songIdsToDelete.map(id => removeCachedCover(`cover_local_${id}`)),
++        ...songsToDelete.map(removeLocalSongAudioBytes),
+     ]);
+     await removeDeletedSongIdsFromPlaylists(songIdsToDelete);
+ 
+diff --git a/test/unit/library/core/homeSources.test.ts b/test/unit/library/core/homeSources.test.ts
+index dbffd80..9cdddbb 100644
+--- a/test/unit/library/core/homeSources.test.ts
++++ b/test/unit/library/core/homeSources.test.ts
+@@ -9,6 +9,7 @@ import {
+     onlineHomeTitleKey,
+     resolveHomeOnlineSource,
+     resolveHomeTabs,
++    resolveLocalHomeAvailability,
+     resolveLocalUnavailableReason,
+     resolveOnlineHomeLoading,
+     resolveOnlineTabUnavailableReason,
+@@ -100,6 +101,35 @@ describe('home tabs', () => {
+     const online = source();
+     const supported = { supported: true, reason: null } as const;
+ 
++    it('enables the local tab when only the file input can build a library', () => {
++        // Android Chrome / iOS Safari: no directory picker, but the file input plus the audio byte store
++        // still imports a library, so the tab must not be disabled with the picker's reason.
++        const local = resolveLocalHomeAvailability(
++            { supported: false, reason: 'file-system-api-unavailable' },
++            supported,
++        );
++        const tabs = translateHomeTabs(resolveHomeTabs({
++            visibility: { playlist: true, radio: true, albums: true, local: true },
++            navidromeEnabled: false,
++            online,
++            localAvailability: local,
++        }), t);
++        expect(tabs.find(tab => tab.key === 'local')).toEqual({ key: 'local', label: 'localMusic.folder' });
++    });
++
++    it('keeps the directory picker\'s reason when neither entry can build a library', () => {
++        expect(resolveLocalHomeAvailability(
++            { supported: false, reason: 'insecure-http' },
++            { supported: false, reason: 'insecure-http' },
++        )).toEqual({ supported: false, reason: 'insecure-http' });
++        expect(resolveLocalHomeAvailability(
++            { supported: false, reason: 'file-system-api-unavailable' },
++            { supported: false, reason: 'file-input-unavailable' },
++        )).toEqual({ supported: false, reason: 'file-system-api-unavailable' });
++        expect(resolveLocalHomeAvailability(supported, { supported: false, reason: 'file-input-unavailable' }))
++            .toEqual({ supported: true, reason: null });
++    });
++
+     it('lists playlist, radio, albums, local and navidrome in that order', () => {
+         const tabs = resolveHomeTabs({
+             visibility: { playlist: true, radio: true, albums: true, local: true },
+@@ -176,7 +206,7 @@ describe('online loading and import state', () => {
+     });
+ 
+     it('any import in flight or an active scan makes the import buttons busy', () => {
+-        const idle = { importingFolder: false, refreshingFolders: false, importingPlaylist: false, scan: null };
++        const idle = { importingFolder: false, refreshingFolders: false, importingPlaylist: false, scan: null, canImportFiles: false };
+         expect(isHomeImportBusy(idle)).toBe(false);
+         expect(isHomeImportBusy({ ...idle, importingFolder: true })).toBe(true);
+         expect(isHomeImportBusy({ ...idle, refreshingFolders: true })).toBe(true);
+diff --git a/test/unit/library/core/libraryHomeActions.test.ts b/test/unit/library/core/libraryHomeActions.test.ts
+index d432cc7..2d94c8a 100644
+--- a/test/unit/library/core/libraryHomeActions.test.ts
++++ b/test/unit/library/core/libraryHomeActions.test.ts
+@@ -1,12 +1,18 @@
+-import { describe, expect, it, vi } from 'vitest';
++import { beforeEach, describe, expect, it, vi } from 'vitest';
+ import type { LocalLibraryGroup, SongResult } from '@/types';
+ import type { LibraryHomeNotice, LibraryHomePort, LibraryHomeScanProgress } from '@/library/core/contracts/homeModel';
+ import type { LibraryCollectionDescriptor } from '@/library/core/contracts/collection';
+ import { createLibraryHomeActions } from '@/library/core/services/libraryHomeActions';
++import { getLocalFileImportAvailability } from '@/services/localLibraryAvailability';
+ 
+ // test/unit/library/core/libraryHomeActions.test.ts
+ // 首页动作层（原 Grid3D 的导入、私人 FM、打开卡片）：三个导入共用的「忙」、本地不可用时的提示、有新歌才刷新、
+ // 失败的提示、歌单文件导入的三种结果、扫描进度的订阅生命周期、私人 FM 直接播放、其余卡片交给宿主打开。
++// 文件导入的可用性由 localLibraryAvailability 的第二个判定给出，这里按用例改它。
++
++vi.mock('@/services/localLibraryAvailability', () => ({
++    getLocalFileImportAvailability: vi.fn(() => ({ supported: true, reason: null })),
++}));
+ 
+ const deferred = <T>() => {
+     let resolve!: (value: T) => void;
+@@ -24,6 +30,7 @@ const createPort = (patch: Partial<LibraryHomePort> = {}) => {
+     const port: LibraryHomePort = {
+         localAvailability: () => ({ supported: true, reason: null }),
+         importFolder: vi.fn(async () => 2),
++        importFiles: vi.fn(async () => 2),
+         resyncAllFolders: vi.fn(async () => 1),
+         importPlaylistFile: vi.fn(async () => ({ playlistName: 'List', matchedCount: 3, skippedCount: 0 })),
+         refreshLocalSongs: vi.fn(),
+@@ -48,6 +55,12 @@ const createPort = (patch: Partial<LibraryHomePort> = {}) => {
+ 
+ const file = new File(['#EXTM3U'], 'list.m3u');
+ 
++// 每个用例都从「文件导入可用」的默认判定开始，个别用例再按需改写。
++beforeEach(() => {
++    vi.mocked(getLocalFileImportAvailability).mockReset();
++    vi.mocked(getLocalFileImportAvailability).mockReturnValue({ supported: true, reason: null });
++});
++
+ describe('createLibraryHomeActions — local imports', () => {
+     it('imports a folder and refreshes the library only when songs came in', async () => {
+         const { port } = createPort();
+@@ -93,6 +106,51 @@ describe('createLibraryHomeActions — local imports', () => {
+         expect(port.resyncAllFolders).toHaveBeenCalledTimes(1);
+     });
+ 
++    it('imports picked files through the port and refreshes only when songs came in', async () => {
++        const { port } = createPort();
++        const actions = createLibraryHomeActions(port);
++        expect(await actions.importFiles()).toEqual({ ok: true });
++        expect(port.importFiles).toHaveBeenCalledTimes(1);
++        expect(port.refreshLocalSongs).toHaveBeenCalledTimes(1);
++
++        (port.importFiles as ReturnType<typeof vi.fn>).mockResolvedValueOnce(0);
++        expect(await actions.importFiles()).toEqual({ ok: true });
++        expect(port.refreshLocalSongs).toHaveBeenCalledTimes(1);
++    });
++
++    it('a running folder import also blocks a file import, and reports the busy reason', async () => {
++        const pending = deferred<number>();
++        const { port } = createPort({ importFolder: vi.fn(() => pending.promise) });
++        const actions = createLibraryHomeActions(port);
++        const importing = actions.importFolder();
++        expect(await actions.importFiles()).toEqual({ ok: false, reason: 'busy' });
++        expect(port.importFiles).not.toHaveBeenCalled();
++        pending.resolve(0);
++        await importing;
++    });
++
++    it('a file import alerts and does nothing where the file input is not available', async () => {
++        vi.mocked(getLocalFileImportAvailability).mockReturnValueOnce({ supported: false, reason: 'insecure-http' });
++        const { port, notices } = createPort();
++        const actions = createLibraryHomeActions(port);
++        expect(await actions.importFiles()).toEqual({ ok: false, reason: 'unsupported' });
++        expect(port.importFiles).not.toHaveBeenCalled();
++        expect(notices).toEqual([{ kind: 'alert', message: { key: 'localMusic.insecureHttpDisabled' } }]);
++    });
++
++    it('reports whether the file entry is offered without reading the environment on every snapshot read', () => {
++        vi.mocked(getLocalFileImportAvailability).mockReturnValue({ supported: true, reason: null });
++        const { port } = createPort();
++        const actions = createLibraryHomeActions(port);
++        const first = actions.getSnapshot();
++        expect(first.canImportFiles).toBe(true);
++        // Same object until something actually changes: useSyncExternalStore compares by reference.
++        expect(actions.getSnapshot()).toBe(first);
++
++        vi.mocked(getLocalFileImportAvailability).mockReturnValue({ supported: false, reason: 'file-input-unavailable' });
++        expect(actions.getSnapshot().canImportFiles).toBe(false);
++    });
++
+     it('a failed refresh is only logged', async () => {
+         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+         const { port, notices } = createPort({ resyncAllFolders: vi.fn(async () => { throw new Error('gone'); }) });
+diff --git a/test/unit/library/core/localHomeModel.test.ts b/test/unit/library/core/localHomeModel.test.ts
+index c233d69..b9325c7 100644
+--- a/test/unit/library/core/localHomeModel.test.ts
++++ b/test/unit/library/core/localHomeModel.test.ts
+@@ -100,7 +100,7 @@ describe('local home sections and cards', () => {
+ });
+ 
+ describe('resolveLocalHomeActions', () => {
+-    const idle = { importingFolder: false, refreshingFolders: false, importingPlaylist: false, scan: null };
++    const idle = { importingFolder: false, refreshingFolders: false, importingPlaylist: false, scan: null, canImportFiles: false };
+ 
+     it('offers import folder, refresh and import playlist, all enabled when idle', () => {
+         expect(resolveLocalHomeActions(idle)).toEqual([
+@@ -110,6 +110,16 @@ describe('resolveLocalHomeActions', () => {
+         ]);
+     });
+ 
++    it('replaces the folder entry with a file entry where the directory picker is missing', () => {
++        expect(resolveLocalHomeActions({ ...idle, canImportFiles: true })[0]).toEqual({
++            id: 'import-files',
++            labelKey: 'localMusic.fileImport',
++            titleKey: 'localMusic.fileImport',
++            pending: false,
++            disabled: false,
++        });
++    });
++
+     it('a running import disables all three and relabels its own button', () => {
+         const actions = resolveLocalHomeActions({ ...idle, importingFolder: true });
+         expect(actions.map(action => [action.id, action.labelKey, action.pending, action.disabled])).toEqual([
+@@ -119,6 +129,15 @@ describe('resolveLocalHomeActions', () => {
+         ]);
+     });
+ 
++    it('a running file import relabels the file entry instead', () => {
++        expect(resolveLocalHomeActions({ ...idle, canImportFiles: true, importingFolder: true })[0]).toMatchObject({
++            id: 'import-files',
++            labelKey: 'localMusic.importing',
++            pending: true,
++            disabled: true,
++        });
++    });
++
+     it('a scan shows refresh as scanning', () => {
+         const actions = resolveLocalHomeActions({ ...idle, scan: { active: true, folderName: 'A', totalSongs: 2, completedSongs: 1 } });
+         expect(actions[1]).toMatchObject({ labelKey: 'options.scanning', pending: true, disabled: true });
+diff --git a/test/unit/services/localAudioBinaryStore.test.ts b/test/unit/services/localAudioBinaryStore.test.ts
+new file mode 100644
+index 0000000..f802b60
+--- /dev/null
++++ b/test/unit/services/localAudioBinaryStore.test.ts
+@@ -0,0 +1,252 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import {
++    buildLocalAudioAssetKey,
++    clearLocalAudioBinaries,
++    estimateLocalAudioBinaryUsage,
++    hasLocalAudioBinary,
++    isValidLocalAudioAssetKey,
++    readLocalAudioBinary,
++    removeLocalAudioBinary,
++    writeLocalAudioBinary,
++    isLocalAudioBinaryRuntimeSupported,
++} from '@/services/localAudioBinaryStore';
++
++// test/unit/services/localAudioBinaryStore.test.ts
++// Covers the OPFS-backed audio byte store: the self-describing key, the descriptor being validated
++// against the bytes on disk, and the write / read / has / remove / clear / usage surface.
++
++// A minimal in-memory OPFS: one flat map of entries, the way the store uses it (binary/text reads for a
++// descriptor, a writable for a write, a recursive remove for a clear).
++type FakeEntry = { bytes: Uint8Array };
++
++const concatBytes = (chunks: Uint8Array[]): Uint8Array<ArrayBuffer> => {
++    const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
++    const result = new Uint8Array(new ArrayBuffer(total)) as Uint8Array<ArrayBuffer>;
++    let offset = 0;
++    chunks.forEach((chunk) => {
++        result.set(chunk, offset);
++        offset += chunk.byteLength;
++    });
++    return result;
++};
++
++// A BlobPart as the fake stores it: bytes for a blob, the encoded text for a string.
++const entryBytes = async (value: unknown): Promise<Uint8Array> => {
++    if (typeof value === 'string') return new TextEncoder().encode(value);
++    if (value instanceof Uint8Array) return value;
++    if (value instanceof ArrayBuffer) return new Uint8Array(value);
++    if (value && typeof (value as Blob).arrayBuffer === 'function') {
++        return new Uint8Array(await (value as Blob).arrayBuffer());
++    }
++    return new Uint8Array(0);
++};
++
++class FakeOpfsFileHandle {
++    kind = 'file' as const;
++
++    constructor(public name: string, private readonly entries: Map<string, FakeEntry>) {}
++
++    async getFile() {
++        const entry = this.entries.get(this.name);
++        if (!entry) throw new Error(`Missing file ${this.name}`);
++        const { bytes } = entry;
++        return new File([new Uint8Array(bytes)], this.name, { lastModified: 1234 });
++    }
++
++    async createWritable() {
++        const chunks: Uint8Array[] = [];
++        return {
++            write: async (value: unknown) => {
++                chunks.push(await entryBytes(value));
++            },
++            close: async () => {
++                this.entries.set(this.name, { bytes: concatBytes(chunks) });
++            },
++            abort: async () => undefined,
++        };
++    }
++}
++
++class FakeOpfsDirectoryHandle {
++    kind = 'directory' as const;
++
++    constructor(public name: string, private readonly entries: Map<string, FakeEntry>) {}
++
++    async getDirectoryHandle(name: string, options?: { create?: boolean }) {
++        const isKnown = name === 'folia-cache' || name === 'local-audio-assets';
++        if (!isKnown && !options?.create) throw new Error(`Missing directory ${name}`);
++        return new FakeOpfsDirectoryHandle(name, this.entries);
++    }
++
++    async getFileHandle(name: string, options?: { create?: boolean }) {
++        if (!this.entries.has(name) && !options?.create) throw new Error(`Missing file ${name}`);
++        return new FakeOpfsFileHandle(name, this.entries);
++    }
++
++    async removeEntry(name: string, options?: { recursive?: boolean }) {
++        // The fake keeps every file in one map, so a recursive clear of the audio directory drops them
++        // all - which is what the real, per-directory OPFS layout amounts to.
++        if (name === 'local-audio-assets' && options?.recursive) {
++            this.entries.clear();
++            return;
++        }
++        if (!this.entries.delete(name)) throw new Error(`Missing entry ${name}`);
++    }
++
++    async *values() {
++        for (const name of [...this.entries.keys()]) {
++            yield new FakeOpfsFileHandle(name, this.entries);
++        }
++    }
++}
++
++const KEY = buildLocalAudioAssetKey('local_1700000000000_abcd1234', 'Track 01.mp3')!;
++const storedFile = (content: string, fileName: string, type: string) => new File([content], fileName, { type });
++
++let entries: Map<string, FakeEntry>;
++
++const entriesText = (name: string) => {
++    const entry = entries.get(name);
++    return entry ? new TextDecoder().decode(entry.bytes) : '';
++};
++
++// Overwrites the descriptor half of an entry, to check the validation against the bytes on disk.
++const writeDescriptor = async (key: string, descriptor: Record<string, unknown>) => {
++    entries.set(`${key}.json`, { bytes: new TextEncoder().encode(JSON.stringify(descriptor)) });
++};
++
++const readDescriptor = (key: string) => JSON.parse(entriesText(`${key}.json`));
++
++describe('localAudioBinaryStore', () => {
++    beforeEach(() => {
++        entries = new Map();
++        vi.stubGlobal('window', {
++            isSecureContext: true,
++            location: { protocol: 'https:', hostname: 'example.com' },
++        });
++        Object.defineProperty(navigator, 'storage', {
++            value: { getDirectory: vi.fn(async () => new FakeOpfsDirectoryHandle('root', entries)) },
++            configurable: true,
++        });
++    });
++
++    afterEach(() => {
++        Reflect.deleteProperty(navigator, 'storage');
++        vi.unstubAllGlobals();
++    });
++
++    it('reports an unsupported runtime without the storage directory API', () => {
++        Reflect.deleteProperty(navigator, 'storage');
++        expect(isLocalAudioBinaryRuntimeSupported()).toBe(false);
++    });
++
++    it('reports an unsupported runtime under the Electron bridge', () => {
++        (window as unknown as { electron?: unknown; }).electron = {};
++        expect(isLocalAudioBinaryRuntimeSupported()).toBe(false);
++        Reflect.deleteProperty(window, 'electron');
++    });
++
++    it('builds a self-describing key from the song id and the file name and validates it', () => {
++        expect(KEY).toBe('local-audio:local_1700000000000_abcd1234:Track 01.mp3');
++        expect(isValidLocalAudioAssetKey(KEY)).toBe(true);
++        // A path separator is folded into the entry name instead of creating a nested path.
++        expect(buildLocalAudioAssetKey('local_1700000000000_abcd1234', 'Disc 1/Track.mp3'))
++            .toBe('local-audio:local_1700000000000_abcd1234:Disc 1_Track.mp3');
++        expect(isValidLocalAudioAssetKey('local-audio:not-an-id:Track.mp3')).toBe(false);
++        expect(isValidLocalAudioAssetKey('local-audio:local_1_abc:a/b.mp3')).toBe(false);
++        expect(isValidLocalAudioAssetKey('sha256:' + 'a'.repeat(64))).toBe(false);
++    });
++
++    it('writes bytes plus a descriptor and reads them back with the stored name and type', async () => {
++        const source = storedFile('audio-bytes', 'Track 01.mp3', 'audio/mpeg');
++
++        expect(await writeLocalAudioBinary(KEY, source, 'Track 01.mp3')).toEqual({
++            backend: 'opfs',
++            mimeType: 'audio/mpeg',
++            size: source.size,
++        });
++        expect(entries.has(`${KEY}.bin`)).toBe(true);
++        expect(entries.has(`${KEY}.json`)).toBe(true);
++
++        const read = await readLocalAudioBinary(KEY);
++        expect(read).toBeInstanceOf(File);
++        expect(read!.name).toBe('Track 01.mp3');
++        expect(read!.type).toBe('audio/mpeg');
++        expect(read!.size).toBe(source.size);
++        expect(await read!.text()).toBe('audio-bytes');
++        expect(await hasLocalAudioBinary(KEY)).toBe(true);
++    });
++
++    it('keeps an unknown blob type as a neutral binary label instead of refusing the write', async () => {
++        const source = storedFile('audio-bytes', 'Track.ape', '');
++        expect(await writeLocalAudioBinary(KEY, source, 'Track.ape')).toMatchObject({ mimeType: 'application/octet-stream' });
++        expect((await readLocalAudioBinary(KEY))!.type).toBe('application/octet-stream');
++    });
++
++    it('refuses a key it cannot name an entry with, and empty bytes', async () => {
++        expect(await writeLocalAudioBinary('not-a-key', storedFile('x', 'x.mp3', 'audio/mpeg'), 'x.mp3')).toBeNull();
++        expect(await writeLocalAudioBinary(KEY, new Blob([]), 'x.mp3')).toBeNull();
++        expect(await writeLocalAudioBinary(KEY, 'not a blob', 'x.mp3')).toBeNull();
++        expect(entries.size).toBe(0);
++    });
++
++    it('treats a descriptor that disagrees with the bytes on disk as absent', async () => {
++        await writeLocalAudioBinary(KEY, storedFile('audio-bytes', 'Track 01.mp3', 'audio/mpeg'), 'Track 01.mp3');
++        const validDescriptor = readDescriptor(KEY);
++
++        // Wrong size.
++        await writeDescriptor(KEY, { ...validDescriptor, size: validDescriptor.size + 1 });
++        expect(await hasLocalAudioBinary(KEY)).toBe(false);
++        expect(await readLocalAudioBinary(KEY)).toBeNull();
++
++        // Wrong key.
++        await writeDescriptor(KEY, { ...validDescriptor, key: 'local-audio:local_1700000000001_beef1234:Other.mp3' });
++        expect(await hasLocalAudioBinary(KEY)).toBe(false);
++
++        // MIME type outside the allowlist.
++        await writeDescriptor(KEY, { ...validDescriptor, mimeType: 'text/html' });
++        expect(await hasLocalAudioBinary(KEY)).toBe(false);
++
++        // No file name to rebuild the File with.
++        await writeDescriptor(KEY, { ...validDescriptor, fileName: '' });
++        expect(await hasLocalAudioBinary(KEY)).toBe(false);
++
++        // Restored descriptor: readable again.
++        await writeDescriptor(KEY, validDescriptor);
++        expect(await hasLocalAudioBinary(KEY)).toBe(true);
++    });
++
++    it('reports a missing or unparsable entry as absent instead of throwing', async () => {
++        expect(await readLocalAudioBinary(KEY)).toBeNull();
++        expect(await hasLocalAudioBinary(KEY)).toBe(false);
++
++        entries.set(`${KEY}.bin`, { bytes: new TextEncoder().encode('audio-bytes') });
++        entries.set(`${KEY}.json`, { bytes: new TextEncoder().encode('{ not json') });
++        expect(await readLocalAudioBinary(KEY)).toBeNull();
++    });
++
++    it('removes both halves of an entry and clears the whole directory', async () => {
++        await writeLocalAudioBinary(KEY, storedFile('audio-bytes', 'Track 01.mp3', 'audio/mpeg'), 'Track 01.mp3');
++        await removeLocalAudioBinary(KEY);
++        expect(entries.size).toBe(0);
++        // Removing something already gone is not an error.
++        await expect(removeLocalAudioBinary(KEY)).resolves.toBeUndefined();
++
++        await writeLocalAudioBinary(KEY, storedFile('audio-bytes', 'Track 01.mp3', 'audio/mpeg'), 'Track 01.mp3');
++        await clearLocalAudioBinaries();
++        expect(entries.size).toBe(0);
++    });
++
++    it('estimates the bytes held, descriptors included', async () => {
++        expect(await estimateLocalAudioBinaryUsage()).toBe(0);
++        const otherKey = buildLocalAudioAssetKey('local_1700000000001_beef1234', 'Other.mp3')!;
++        const first = storedFile('audio-bytes', 'Track 01.mp3', 'audio/mpeg');
++        const second = storedFile('more-bytes', 'Other.mp3', 'audio/mpeg');
++        await writeLocalAudioBinary(KEY, first, 'Track 01.mp3');
++        await writeLocalAudioBinary(otherKey, second, 'Other.mp3');
++
++        const expected = [...entries.values()].reduce((total, entry) => total + entry.bytes.byteLength, 0);
++        expect(await estimateLocalAudioBinaryUsage()).toBe(expected);
++        expect(expected).toBeGreaterThan(first.size + second.size);
++    });
++});
+diff --git a/test/unit/services/localMusicService.test.ts b/test/unit/services/localMusicService.test.ts
+index 50ebbc2..498ee89 100644
+--- a/test/unit/services/localMusicService.test.ts
++++ b/test/unit/services/localMusicService.test.ts
+@@ -767,6 +767,8 @@ describe('localMusicService', () => {
+         expect(snapshot!.tree.children[0]).toMatchObject({ ignored: true, files: [], children: [] });
+         expect(deleteDirHandle).not.toHaveBeenCalled();
+ 
++        // The root still has a directory handle, so the rescan runs; the ignored child is skipped, and
++        // nothing is available to return.
+         expect(await resyncAllFolders()).toEqual([]);
+         expect(traverseChild).not.toHaveBeenCalled();
+         expect(snapshot!.tree.children[0]).toMatchObject({ ignored: true, relativePath: 'Music/Disc 1' });
+diff --git a/test/unit/services/localMusicServiceFileImport.test.ts b/test/unit/services/localMusicServiceFileImport.test.ts
+new file mode 100644
+index 0000000..d7680a7
+--- /dev/null
++++ b/test/unit/services/localMusicServiceFileImport.test.ts
+@@ -0,0 +1,309 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import {
++    getAudioFromLocalSong,
++    getFileFromLocalSong,
++    getLocalSongArrayBuffer,
++    importLocalFiles,
++    removeImportedRoot,
++    resyncAllFolders,
++    resyncFolder,
++} from '@/services/localMusicService';
++import {
++    deleteDirHandle,
++    deleteLocalLibrarySnapshot,
++    deleteLocalSong,
++    deleteLocalSongs,
++    getDirHandles,
++    getLocalLibrarySnapshot,
++    getLocalSongs,
++    saveDirHandles,
++    saveLocalLibrarySnapshot,
++    saveLocalSong,
++    saveLocalSongs,
++} from '@/services/db';
++import { parseEmbeddedMetadataAsync } from '@/utils/localMetadataWorkerClient';
++import { prepareLocalCoverBlob } from '@/services/localCoverAssetService';
++import { DEFAULT_LOCAL_LYRIC_FORMAT_ORDER } from '@/utils/lyrics/localLyricFormatOrder';
++import { useLyricSettingsStore } from '@/stores/useLyricSettingsStore';
++import type { LocalSong } from '@/types';
++
++// test/unit/services/localMusicServiceFileImport.test.ts
++// Covers the handle-less import seam: plain File[] in (no FileSystemFileHandle anywhere), grouped roots,
++// sidecar lyrics resolved by base path, audio bytes persisted to the local audio store, playback and
++// cover extraction reading those bytes back, and file-imported roots refusing a disk rescan.
++
++vi.mock('@/services/db', () => ({
++    deleteDirHandle: vi.fn(),
++    deleteLocalLibrarySnapshot: vi.fn(),
++    deleteLocalSong: vi.fn(),
++    deleteLocalSongs: vi.fn(),
++    getDirHandles: vi.fn(),
++    getFromCache: vi.fn(),
++    getLocalLibrarySnapshot: vi.fn(),
++    getLocalSongs: vi.fn(),
++    saveDirHandles: vi.fn(),
++    saveLocalLibrarySnapshot: vi.fn(),
++    saveLocalSong: vi.fn(),
++    saveLocalSongs: vi.fn(),
++    saveToCache: vi.fn(),
++}));
++
++vi.mock('@/services/coverCache', () => ({
++    removeCachedCover: vi.fn(),
++}));
++
++vi.mock('@/utils/localMetadataWorkerClient', () => ({
++    parseEmbeddedMetadataAsync: vi.fn(),
++}));
++
++vi.mock('@/services/localCoverAssetService', () => ({
++    prepareLocalCoverBlob: vi.fn(),
++    stageLocalCoverAsset: vi.fn(),
++}));
++
++// The store itself is exercised by localAudioBinaryStore; here it stands in for the browser's OPFS so the
++// import pipeline can be checked without one. Keys are derived exactly like the real store derives them.
++const storedAudio = new Map<string, File>();
++vi.mock('@/services/localAudioBinaryStore', () => ({
++    buildLocalAudioAssetKey: (songId: string, fileName: string) => `local-audio:${songId}:${fileName}`,
++    readLocalAudioBinary: vi.fn(async (key: string) => storedAudio.get(key) ?? null),
++    writeLocalAudioBinary: vi.fn(async (key: string, value: Blob, fileName: string) => {
++        storedAudio.set(key, new File([value], fileName, { type: value.type || 'application/octet-stream' }));
++        return { backend: 'opfs', mimeType: value.type || 'application/octet-stream', size: value.size };
++    }),
++    removeLocalAudioBinary: vi.fn(async (key: string) => {
++        storedAudio.delete(key);
++    }),
++}));
++
++// Minimal File System Access API stand-ins for the one test that still needs a real handle.
++class FakeFileHandle {
++    kind = 'file' as const;
++    name: string;
++    private readonly file: File;
++
++    constructor(name: string, content = 'audio', type = 'audio/mpeg', lastModified = 1000) {
++        this.name = name;
++        this.file = new File([content], name, { type, lastModified });
++    }
++
++    async getFile() {
++        return this.file;
++    }
++}
++
++class FakeDirectoryHandle {
++    kind = 'directory' as const;
++
++    constructor(public name: string, private readonly entries: Array<FakeDirectoryHandle | FakeFileHandle>) {}
++
++    async *values() {
++        for (const entry of this.entries) yield entry;
++    }
++
++    async getDirectoryHandle(name: string): Promise<FakeDirectoryHandle> {
++        const entry = this.entries.find(item => item.kind === 'directory' && item.name === name);
++        if (!entry || entry.kind !== 'directory') throw new Error(`Missing directory ${name}`);
++        return entry;
++    }
++
++    async getFileHandle(name: string): Promise<FakeFileHandle> {
++        const entry = this.entries.find(item => item.kind === 'file' && item.name === name);
++        if (!entry || entry.kind !== 'file') throw new Error(`Missing file ${name}`);
++        return entry;
++    }
++
++    async queryPermission() {
++        return 'granted' as PermissionState;
++    }
++
++    async requestPermission() {
++        return 'granted' as PermissionState;
++    }
++}
++
++// A picked File: no FileSystemFileHandle exists for it anywhere in this test.
++const pickedFile = (name: string, content = 'audio', type = 'audio/mpeg', relativePath?: string): File => {
++    const file = new File([content], name, { type });
++    if (relativePath) {
++        Object.defineProperty(file, 'webkitRelativePath', { value: relativePath, configurable: true });
++    }
++    return file;
++};
++
++const createSong = (patch: Partial<LocalSong> = {}): LocalSong => ({
++    id: 'local-song',
++    fileName: 'Track.mp3',
++    filePath: 'Music/Track.mp3',
++    title: 'Track',
++    titleOrigin: 'import',
++    importedMetadata: { title: 'Track', titleSource: 'filename', artistNames: [] },
++    duration: 1,
++    fileSize: 5,
++    fileLastModified: 1000,
++    fileSignature: 'Music/Track.mp3::5::1000',
++    mimeType: 'audio/mpeg',
++    addedAt: 1,
++    folderName: 'Music',
++    ...patch,
++});
++
++describe('localMusicService file import', () => {
++    beforeEach(() => {
++        vi.clearAllMocks();
++        storedAudio.clear();
++        vi.mocked(getLocalSongs).mockResolvedValue([]);
++        vi.mocked(getLocalLibrarySnapshot).mockResolvedValue(null);
++        vi.mocked(getDirHandles).mockResolvedValue({});
++        vi.mocked(saveDirHandles).mockResolvedValue(undefined);
++        vi.mocked(saveLocalSongs).mockResolvedValue(undefined);
++        vi.mocked(saveLocalSong).mockResolvedValue(undefined);
++        vi.mocked(saveLocalLibrarySnapshot).mockResolvedValue(undefined);
++        vi.mocked(parseEmbeddedMetadataAsync).mockResolvedValue({ duration: 1, title: 'Parsed' });
++        vi.mocked(prepareLocalCoverBlob).mockResolvedValue(null);
++        useLyricSettingsStore.setState({ localLyricFormatOrder: [...DEFAULT_LOCAL_LYRIC_FORMAT_ORDER] });
++
++        vi.stubGlobal('window', {
++            electron: {},
++            dispatchEvent: vi.fn(),
++        });
++        vi.stubGlobal('CustomEvent', class {
++            constructor(public type: string, public init?: CustomEventInit) {}
++        });
++    });
++
++    it('groups a flat pick under one synthetic root and stores every audio file', async () => {
++        const songs = await importLocalFiles([
++            pickedFile('First.mp3'),
++            pickedFile('Second.mp3'),
++            pickedFile('ignore.txt', 'notes', 'text/plain'),
++        ]);
++
++        expect(songs.map(song => song.filePath)).toEqual(['Local Import/First.mp3', 'Local Import/Second.mp3']);
++        expect(songs.every(song => song.folderName === 'Local Import')).toBe(true);
++        expect(songs.every(song => song.fileHandle === undefined)).toBe(true);
++        expect(saveDirHandles).not.toHaveBeenCalled();
++        expect(saveLocalLibrarySnapshot).not.toHaveBeenCalled();
++        expect(storedAudio.size).toBe(2);
++        expect(vi.mocked(saveLocalSongs).mock.calls[0][0].map(song => song.filePath))
++            .toEqual(['Local Import/First.mp3', 'Local Import/Second.mp3']);
++    });
++
++    it('derives the root and the folder from webkitRelativePath, and reads the sidecar lyric of each track', async () => {
++        const songs = await importLocalFiles([
++            pickedFile('Track 01.mp3', 'audio', 'audio/mpeg', 'My Music/Disc 1/Track 01.mp3'),
++            pickedFile('Track 01.lrc', '[00:00.00]sidecar', 'text/plain', 'My Music/Disc 1/Track 01.lrc'),
++        ]);
++
++        expect(songs).toHaveLength(1);
++        expect(songs[0]).toMatchObject({
++            filePath: 'My Music/Disc 1/Track 01.mp3',
++            folderName: 'My Music/Disc 1',
++            hasLocalLyrics: true,
++            localLyricsContent: '[00:00.00]sidecar',
++            localLyricsOrigin: 'sidecar',
++        });
++        expect(storedAudio.has(`local-audio:${songs[0].id}:Track 01.mp3`)).toBe(true);
++    });
++
++    it('replaces the previous songs of the same root and drops their stored bytes', async () => {
++        const previous = createSong({ id: 'old-song', fileName: 'Old.mp3', filePath: 'Local Import/Old.mp3', folderName: 'Local Import' });
++        storedAudio.set(`local-audio:${previous.id}:Old.mp3`, pickedFile('Old.mp3'));
++        vi.mocked(getLocalSongs).mockResolvedValue([previous]);
++
++        const songs = await importLocalFiles([pickedFile('New.mp3')]);
++
++        expect(songs).toHaveLength(1);
++        expect(songs[0].filePath).toBe('Local Import/New.mp3');
++        expect(deleteLocalSong).toHaveBeenCalledWith('old-song');
++        expect(storedAudio.has(`local-audio:${previous.id}:Old.mp3`)).toBe(false);
++        expect(storedAudio.has(`local-audio:${songs[0].id}:New.mp3`)).toBe(true);
++    });
++
++    it('imports nothing when the pick contains no audio file', async () => {
++        expect(await importLocalFiles([pickedFile('notes.txt', 'notes', 'text/plain')])).toEqual([]);
++        expect(saveLocalSongs).not.toHaveBeenCalled();
++        expect(storedAudio.size).toBe(0);
++    });
++
++    describe('handle-less playback', () => {
++        it('plays, resolves and reads bytes for a song whose only source is the audio store', async () => {
++            const songs = await importLocalFiles([pickedFile('Only.mp3', 'stored-audio-bytes')]);
++            const song = songs[0];
++            vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:local-audio-store');
++            vi.mocked(getDirHandles).mockResolvedValue({});
++
++            expect(await getAudioFromLocalSong(song)).toBe('blob:local-audio-store');
++            const file = await getFileFromLocalSong(song);
++            expect(file?.name).toBe('Only.mp3');
++            expect(await file!.text()).toBe('stored-audio-bytes');
++            const storedBytes = await getLocalSongArrayBuffer(song);
++            expect(storedBytes).not.toBeNull();
++            expect(new TextDecoder().decode(storedBytes!)).toBe('stored-audio-bytes');
++        });
++
++        it('returns null instead of throwing when nothing is stored for the song', async () => {
++            const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
++            const song = createSong({ id: 'never-stored', fileName: 'Gone.mp3', filePath: 'Music/Gone.mp3' });
++
++            expect(await getFileFromLocalSong(song)).toBeNull();
++            expect(await getAudioFromLocalSong(song)).toBeNull();
++            expect(await getLocalSongArrayBuffer(song)).toBeNull();
++            warn.mockRestore();
++        });
++    });
++
++    describe('file-imported roots are not rescan-able', () => {
++        it('refuses a folder resync when no directory handle was ever persisted', async () => {
++            vi.mocked(getLocalSongs).mockResolvedValue([
++                createSong({ id: 'file-song', folderName: 'Local Import', filePath: 'Local Import/Only.mp3' }),
++            ]);
++
++            expect(await resyncFolder('Local Import')).toBeNull();
++            expect(await resyncAllFolders()).toBeNull();
++            expect(saveLocalLibrarySnapshot).not.toHaveBeenCalled();
++        });
++
++        it('skips file-imported roots but still rescans the roots that have a directory handle', async () => {
++            const directoryHandle = new FakeDirectoryHandle('Music', [new FakeFileHandle('Track.mp3')]);
++            vi.mocked(getDirHandles).mockResolvedValue({ Music: directoryHandle as unknown as FileSystemDirectoryHandle });
++            vi.mocked(getLocalSongs).mockResolvedValue([
++                createSong({ id: 'file-song', folderName: 'Local Import', filePath: 'Local Import/Only.mp3' }),
++                createSong({ id: 'folder-song', folderName: 'Music', filePath: 'Music/Track.mp3' }),
++            ]);
++
++            const resynced = await resyncAllFolders();
++
++            expect(resynced?.map(song => song.filePath)).toEqual(['Music/Track.mp3']);
++            expect(vi.mocked(saveLocalLibrarySnapshot).mock.calls[0][0]).toMatchObject({ rootFolderName: 'Music' });
++        });
++    });
++
++    it('releases the persisted bytes of a removed root', async () => {
++        const songs = await importLocalFiles([pickedFile('Only.mp3')]);
++        const song = songs[0];
++        vi.mocked(getLocalSongs).mockResolvedValue([song]);
++        expect(storedAudio.has(`local-audio:${song.id}:Only.mp3`)).toBe(true);
++
++        await removeImportedRoot('Local Import');
++
++        expect(deleteLocalSongs).toHaveBeenCalledWith([song.id]);
++        expect(deleteDirHandle).toHaveBeenCalledWith('Local Import');
++        expect(deleteLocalLibrarySnapshot).toHaveBeenCalledWith('Local Import');
++        expect(storedAudio.has(`local-audio:${song.id}:Only.mp3`)).toBe(false);
++    });
++
++    it('leaves the artwork path alone when the song already has a folder cover', async () => {
++        const folderAssetId = `sha256:${'c'.repeat(64)}`;
++        vi.mocked(prepareLocalCoverBlob).mockResolvedValue({ assetId: folderAssetId, blob: new Blob(['cover'], { type: 'image/jpeg' }) });
++        const songs = await importLocalFiles([pickedFile('Track.mp3', 'audio', 'audio/mpeg', 'Album/Track.mp3'), pickedFile('cover.jpg', 'cover', 'image/jpeg', 'Album/cover.jpg')]);
++        const [song] = songs;
++
++        // A folder cover is resolved from the picked File alone, with no directory handle anywhere.
++        expect(song.localCoverAssetId).toBe(folderAssetId);
++        expect(song.localCoverSource).toBe('folder');
++        expect(storedAudio.has(`local-audio:${song.id}:Track.mp3`)).toBe(true);
++        // Metadata was parsed inline (a file-input import has no later scan to fill it in).
++        expect(vi.mocked(parseEmbeddedMetadataAsync).mock.calls.every(([, includeCover]) => includeCover === false)).toBe(true);
++    });
++});
+diff --git a/test/unit/services/localMusicServiceFileInput.test.ts b/test/unit/services/localMusicServiceFileInput.test.ts
+new file mode 100644
+index 0000000..218fee0
+--- /dev/null
++++ b/test/unit/services/localMusicServiceFileInput.test.ts
+@@ -0,0 +1,165 @@
++// @vitest-environment jsdom
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { importLocalFilesViaInput } from '@/services/localMusicService';
++import {
++    deleteLocalSong,
++    getDirHandles,
++    getLocalLibrarySnapshot,
++    getLocalSongs,
++    saveLocalLibrarySnapshot,
++    saveLocalSongs,
++} from '@/services/db';
++import { parseEmbeddedMetadataAsync } from '@/utils/localMetadataWorkerClient';
++
++// test/unit/services/localMusicServiceFileInput.test.ts
++// Covers the picker itself: the hidden multi-select input it opens (and the directory attributes it must
++// not set), the cancel path that resolves with no songs, and the picked-files path that hands the files
++// to the handle-less import.
++
++vi.mock('@/services/db', () => ({
++    deleteDirHandle: vi.fn(),
++    deleteLocalLibrarySnapshot: vi.fn(),
++    deleteLocalSong: vi.fn(),
++    deleteLocalSongs: vi.fn(),
++    getDirHandles: vi.fn(),
++    getFromCache: vi.fn(),
++    getLocalLibrarySnapshot: vi.fn(),
++    getLocalSongs: vi.fn(),
++    saveDirHandles: vi.fn(),
++    saveLocalLibrarySnapshot: vi.fn(),
++    saveLocalSong: vi.fn(),
++    saveLocalSongs: vi.fn(),
++    saveToCache: vi.fn(),
++}));
++
++vi.mock('@/services/coverCache', () => ({
++    removeCachedCover: vi.fn(),
++}));
++
++vi.mock('@/utils/localMetadataWorkerClient', () => ({
++    parseEmbeddedMetadataAsync: vi.fn(async () => ({ duration: 1 })),
++}));
++
++vi.mock('@/services/localCoverAssetService', () => ({
++    prepareLocalCoverBlob: vi.fn(async () => null),
++    stageLocalCoverAsset: vi.fn(),
++}));
++
++// jsdom has no OPFS; the store is covered on its own, and here it only has to accept the bytes.
++vi.mock('@/services/localAudioBinaryStore', () => ({
++    buildLocalAudioAssetKey: (songId: string, fileName: string) => `local-audio:${songId}:${fileName}`,
++    readLocalAudioBinary: vi.fn(async () => null),
++    writeLocalAudioBinary: vi.fn(async (_key: string, value: Blob) => ({
++        backend: 'opfs',
++        mimeType: value.type || 'application/octet-stream',
++        size: value.size,
++    })),
++    removeLocalAudioBinary: vi.fn(async () => undefined),
++}));
++
++const pickedFile = (name: string): File => new File(['audio'], name, { type: 'audio/mpeg' });
++
++// The component under test appends its input and clicks it; this intercepts both and records each one.
++const openPicker = (): { get input(): HTMLInputElement; } => {
++    const created: HTMLInputElement[] = [];
++    vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
++        const element = document.createElementNS('http://www.w3.org/1999/xhtml', tagName) as HTMLInputElement;
++        if (tagName === 'input') {
++            element.click = () => undefined;
++            created.push(element);
++        }
++        return element;
++    }) as typeof document.createElement);
++    return {
++        get input() {
++            const latest = created.at(-1);
++            if (!latest) throw new Error('The picker did not create an input element.');
++            return latest;
++        },
++    };
++};
++
++describe('importLocalFilesViaInput', () => {
++    let picker: { get input(): HTMLInputElement; };
++
++    beforeEach(() => {
++        vi.clearAllMocks();
++        vi.mocked(getLocalSongs).mockResolvedValue([]);
++        vi.mocked(getLocalLibrarySnapshot).mockResolvedValue(null);
++        vi.mocked(getDirHandles).mockResolvedValue({});
++        vi.mocked(saveLocalSongs).mockResolvedValue(undefined);
++        vi.mocked(saveLocalLibrarySnapshot).mockResolvedValue(undefined);
++        vi.mocked(parseEmbeddedMetadataAsync).mockResolvedValue({ duration: 1 });
++        vi.spyOn(console, 'error').mockImplementation(() => undefined);
++        picker = openPicker();
++    });
++
++    afterEach(() => {
++        vi.restoreAllMocks();
++    });
++
++    it('opens a hidden multi-select input without webkitdirectory', async () => {
++        const pending = importLocalFilesViaInput();
++        const { input } = picker;
++
++        expect(input.type).toBe('file');
++        expect(input.multiple).toBe(true);
++        expect(input.accept).toBe('audio/*,.lrc,.vtt,.ttml,.qrc,.yrc,.krc');
++        // Android Chromium silently ignores webkitdirectory and hands back an unreadable tree, so it
++        // must not be set.
++        expect(input.hasAttribute('webkitdirectory')).toBe(false);
++        expect(input.style.display).toBe('none');
++        expect(document.body.contains(input)).toBe(true);
++
++        input.dispatchEvent(new Event('cancel'));
++        await pending;
++        expect(document.body.contains(input)).toBe(false);
++    });
++
++    it('resolves with no songs when the picker is dismissed', async () => {
++        const pending = importLocalFilesViaInput();
++        const { input } = picker;
++        input.dispatchEvent(new Event('cancel'));
++
++        expect(await pending).toEqual([]);
++        expect(saveLocalSongs).not.toHaveBeenCalled();
++        expect(document.body.contains(input)).toBe(false);
++    });
++
++    it('imports the picked files and resolves with the created songs', async () => {
++        const pending = importLocalFilesViaInput();
++        Object.defineProperty(picker.input, 'files', { value: [pickedFile('First.mp3'), pickedFile('Second.mp3')], configurable: true });
++        picker.input.dispatchEvent(new Event('change'));
++
++        const songs = await pending;
++
++        expect(songs.map(song => song.filePath)).toEqual(['Local Import/First.mp3', 'Local Import/Second.mp3']);
++        expect(vi.mocked(saveLocalSongs).mock.calls[0][0]).toHaveLength(2);
++        expect(deleteLocalSong).not.toHaveBeenCalled();
++        expect(document.body.contains(picker.input)).toBe(false);
++    });
++
++    it('imports once and ignores a later event', async () => {
++        const once = importLocalFilesViaInput();
++        const { input } = picker;
++        Object.defineProperty(input, 'files', { value: [pickedFile('Only.mp3')], configurable: true });
++        input.dispatchEvent(new Event('change'));
++
++        expect((await once).map(song => song.fileName)).toEqual(['Only.mp3']);
++        expect(vi.mocked(saveLocalSongs)).toHaveBeenCalledTimes(1);
++
++        // The input is gone by now, so a second event must not start another import.
++        input.dispatchEvent(new Event('change'));
++        await Promise.resolve();
++        expect(vi.mocked(saveLocalSongs)).toHaveBeenCalledTimes(1);
++    });
++
++    it('imports nothing when the selection is empty', async () => {
++        const empty = importLocalFilesViaInput();
++        Object.defineProperty(picker.input, 'files', { value: [], configurable: true });
++        picker.input.dispatchEvent(new Event('change'));
++
++        expect(await empty).toEqual([]);
++        expect(saveLocalSongs).not.toHaveBeenCalled();
++    });
++});

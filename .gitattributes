@@ -1,0 +1,30 @@
+# Folia Mobile — line ending policy.
+#
+# Git for Windows defaults to converting LF to CRLF on checkout, which corrupts
+# patches/*.patch: `git am` rejects a patch whose context lines carry CRLF. The source tree is
+# therefore pinned to LF, with the two Windows script types kept CRLF because that is what
+# PowerShell and cmd expect when the file is opened or executed locally.
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary payloads: never touch these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.avif binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.jar binary
+*.zip binary
+*.gz binary
+*.7z binary
+*.onnx binary
+*.mp3 binary

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Folia</string>
+    <!-- Shown only when the OS rotation lock overrides the activity's landscape request.
+         Locking landscape cannot be guaranteed, so the app must never leave the user with a
+         wide layout squeezed into a portrait viewport. -->
+    <string name="portrait_hint_title">请横屏使用</string>
+    <string name="portrait_hint_body">Folia 是为宽屏观赏设计的播放器，请旋转设备或关闭系统方向锁定。</string>
+    <string name="notification_channel_name">Folia 播放</string>
+    <string name="notification_channel_description">后台播放控制</string>
+</resources>

@@ -1,0 +1,47 @@
+Folia Mobile — 出处与许可声明
+================================
+
+本仓库包含第三方代码，全部以 GNU Affero General Public License v3.0 发布
+（见 LICENSE）。
+
+1. 上游项目
+-----------
+   folia-major
+   https://github.com/chthollyphile/folia-major
+   许可证：AGPL-3.0
+   版权归其作者与贡献者所有。
+
+   web/ 目录是上游 v0.7.20 的完整源代码，加上本仓库的一处修改
+   （见第 2 节）。它未被重新授权，仍为 AGPL-3.0。
+
+2. 本仓库对上游的修改
+---------------------
+   唯一的修改是给本地曲库增加一条不依赖 File System Access API 目录选择器的
+   导入路径（安卓 Chrome 与 iOS Safari 均无 showDirectoryPicker，因而在手机上
+   整个本地曲库原本不可达）。
+
+   补丁：patches/0001-local-music-file-import.patch
+   基线：chthollyphile/folia-major v0.7.20
+
+   这些修改同样以 AGPL-3.0 授权。
+
+3. 壳
+-----
+   android/ 目录下的 Android 壳为本项目原创，以 AGPL-3.0 发布。
+
+   它通过 WebViewAssetLoader 把 APK 内打包的上游 Web 产物挂在一个虚拟 https
+   源上运行。由于二者以组合形式分发，整体适用 AGPL-3.0。
+
+4. AGPL 源码提供义务
+--------------------
+   AGPL-3.0 第 13 条要求：通过网络向用户提供本软件服务时，必须向其提供对应
+   源码。以 APK 形式分发同样需要提供完整对应源码。
+
+   本仓库即为该源码：web/ 为上游完整源码加补丁，android/ 为壳源码，
+   二者结合即可构建出所分发的二进制。任何 Releases 中的构件都可由本仓库的
+   对应提交构建得到。
+
+5. 图标
+-------
+   启动图标为纯矢量绘制（android/app/src/main/res/drawable/
+   ic_launcher_foreground.xml），本项目原创，未使用上游美术资源。

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the web app's own splash/background colour so there is no flash between the
+         window background and the first painted React frame. -->
+    <color name="window_bg">#17141F</color>
+    <color name="ic_launcher_background">#17141F</color>
+    <color name="portrait_hint_bg">#17141F</color>
+    <color name="portrait_hint_text">#EDEAF5</color>
+    <color name="portrait_hint_accent">#7C6BFF</color>
+</resources>

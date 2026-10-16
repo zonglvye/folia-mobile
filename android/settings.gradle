@@ -1,0 +1,27 @@
+// Folia Mobile shell — Gradle settings.
+// Repositories are pinned to the Aliyun mirrors first: this machine's Windows schannel
+// stack fails certificate-revocation checks against repo1.maven.org, so the official
+// Central endpoint cannot be relied on. google()/mavenCentral() stay as fallbacks.
+pluginManagement {
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'FoliaMobile'
+include ':app'

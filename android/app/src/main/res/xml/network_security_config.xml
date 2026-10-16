@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is denied everywhere. v1 plays local files, so nothing needs it, and opening it
+  globally (as the reference shell did) would weaken every request the WebView ever makes.
+  When online sources are added, permit specific domains here instead of flipping the base.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher glyph: a five-bar equaliser, drawn as a vector so the project needs no bitmap
+     assets at all. minSdk 26 means the adaptive-icon form is always available. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#7C6BFF"
+        android:pathData="M26,39 h8 v30 h-8 z M38,29 h8 v50 h-8 z M50,20 h8 v68 h-8 z M62,32 h8 v44 h-8 z M74,41 h8 v26 h-8 z" />
+</vector>

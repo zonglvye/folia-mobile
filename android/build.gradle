@@ -1,0 +1,5 @@
+// Folia Mobile shell — root build file. Only the Android application plugin is applied here;
+// the app module owns every other setting.
+plugins {
+    id 'com.android.application' version '8.7.3' apply false
+}
