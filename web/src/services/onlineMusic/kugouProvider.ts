@@ -6,6 +6,7 @@ import {
     type JsonValue,
     type MediaId,
     type OnlineMusicProvider,
+    type ProviderCapabilities,
     type ProviderCatalogRef,
     type ProviderCollection,
     type ProviderHistoryEntry,
@@ -27,8 +28,11 @@ import {
 import { removeProviderSessionValue, readProviderSessionValue } from './providerStorage';
 import { attemptChainDecision, attemptFromError, emptyAttempt, summarizePlaybackAttempts } from './playbackAttempts';
 import {
+    createKugouLegacyPaywallError,
     getKugouTransportAvailability,
+    getKugouTransportMode,
     hasKugouAuthenticatedSearchSession,
+    isKugouLegacyPaywallAnswer,
     requestKugouAnonymousSearch,
     requestKugou,
     requestKugouLegacyPlayInfo,
@@ -961,16 +965,52 @@ const getKugouHistoryName = async (date: string): Promise<string> => {
     return kugouHistoryNameByDate.get(date) || date;
 };
 
+/**
+ * 实例 / 桌面模式下的完整能力：KuGouMusicApi 实例与账号后端都在，全部成立。
+ * 作为模块级常量而不是每次构造的新对象，因为界面有按引用比较的 memo。
+ */
+const KUGOU_FULL_CAPABILITIES: ProviderCapabilities = {
+    search: true, playback: true, lyrics: true, auth: true, userLibrary: true,
+    playlists: true, albums: true, artists: true, recommendations: true, mutations: true,
+    wordByWordLyrics: true, userCloud: true, historyRecommendations: true,
+    playlistSubscription: true, playlistTrackMutations: true, likes: true, userAlbums: true,
+};
+
+/**
+ * 匿名公开模式（网页版没有实例、也没有账号后端）下只承诺三件事：检索、播放、歌词——它们由酷狗自己的
+ * 公开接口承担，已对真实端点实测可用。其余能力全部落在实例或账户那一侧，声明为真只会让界面摆出
+ * 点了必然失败的功能。
+ *
+ * `auth` 尤其关键：omni 用它算出 requiresAccount，为真时选中音源会进入二维码登录流程而不是直接切换，
+ * 而这一模式没有可登录的后端，于是活动音源永远切不过去，能用的匿名检索也就无从进入。
+ */
+const KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES: ProviderCapabilities = {
+    ...KUGOU_FULL_CAPABILITIES,
+    auth: false,
+    userLibrary: false,
+    playlists: false,
+    albums: false,
+    artists: false,
+    recommendations: false,
+    mutations: false,
+    userCloud: false,
+    historyRecommendations: false,
+    playlistSubscription: false,
+    playlistTrackMutations: false,
+    likes: false,
+    userAlbums: false,
+};
+
 export const kugouProvider: OnlineMusicProvider = {
     id: 'kugou',
     displayName: 'KuGou Music',
     shortName: '酷狗',
     getAvailability: getKugouTransportAvailability,
-    capabilities: {
-        search: true, playback: true, lyrics: true, auth: true, userLibrary: true,
-        playlists: true, albums: true, artists: true, recommendations: true, mutations: true,
-        wordByWordLyrics: true, userCloud: true, historyRecommendations: true,
-        playlistSubscription: true, playlistTrackMutations: true, likes: true, userAlbums: true,
+    // 能力随取数模式而变，理由见上面两个常量。
+    get capabilities(): ProviderCapabilities {
+        return getKugouTransportMode() === 'anonymous-public'
+            ? KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES
+            : KUGOU_FULL_CAPABILITIES;
     },
     normalizeSong: normalizeKugouSong,
     normalizeUser,
@@ -983,7 +1023,9 @@ export const kugouProvider: OnlineMusicProvider = {
     search: {
         async searchSongs(query, limit, offset) {
             const page = Math.floor(offset / limit) + 1;
-            if (!hasKugouAuthenticatedSearchSession()) {
+            // 匿名公开模式没有实例可登录，签名匿名检索就是这个模式唯一的检索路径；实例 / 桌面版维持原样，
+            // 只在没有已登录会话时才走匿名检索。
+            if (getKugouTransportMode() === 'anonymous-public' || !hasKugouAuthenticatedSearchSession()) {
                 const response = await requestKugouAnonymousSearch(
                     buildKugouLyricSearchQuery(query),
                     page,
@@ -1027,10 +1069,13 @@ export const kugouProvider: OnlineMusicProvider = {
             let lastError: unknown;
             // An auth failure or timeout stops the remaining /song/url qualities and variants; legacy still runs once.
             let songUrlChainStopped = false;
+            // 匿名公开模式没有 KuGouMusicApi 实例：签名 /song/url 与云盘音源接口都在实例那一侧，只有公开的旧版
+            // mobile playInfo 能给出音源，所以这一模式直接走它，不再先打一轮注定失败的实例请求。
+            const anonymousPublicMode = getKugouTransportMode() === 'anonymous-public';
 
             // Tries the preferred KuGou quality first and degrades until a playable URL is returned.
             for (const candidateQuality of qualities) {
-                if (songUrlChainStopped) break;
+                if (anonymousPublicMode || songUrlChainStopped) break;
                 const requestVariants = sourceRef?.variant === 'cloud'
                     ? [{ name: 'cloud', operation: 'user_cloud_url' as const, params: {
                         hash, id: String(sourceRef.providerData?.fileId || ''),
@@ -1150,10 +1195,22 @@ export const kugouProvider: OnlineMusicProvider = {
                         requestedQuality: quality,
                         status: legacyStatus,
                     });
+                    // 旧版接口把付费歌曲答成 status 0 + `需要付费`：这是「这个账号放不了」的结论，证据比
+                    // 「没给链接」强得多，所以按 entitlement-required 抛出，而不是汇总成 not-playable / network。
+                    if (isKugouLegacyPaywallAnswer(legacyResponse)) {
+                        console.warn('[KuGouProvider] playback:paywall', {
+                            hash,
+                            requestedQuality: quality,
+                            upstream: legacyStatus,
+                        });
+                        throw createKugouLegacyPaywallError(legacyResponse, attempts);
+                    }
                     attempts.push(emptyAttempt('legacy_play_info', {
                         detail: legacyStatus === undefined ? undefined : `status=${legacyStatus}`,
                     }));
                 } catch (error) {
+                    // 付费结论不参与「多次尝试」的汇总：它已经是一个确定的原因，不该被其它尝试改写成暂时性失败。
+                    if (error instanceof OnlineProviderError && error.code === 'entitlement-required') throw error;
                     console.warn('[KuGouProvider] playback:legacy-failed', {
                         hash,
                         requestedQuality: quality,
@@ -1166,10 +1223,13 @@ export const kugouProvider: OnlineMusicProvider = {
 
             console.warn('[KuGouProvider] playback:unavailable', { hash, requestedQuality: quality, attemptedQualities: qualities });
             // Without a session and with empty answers, signing in only *may* help (the docs say no more), so this is
-            // a hint, never auth-required.
+            // a hint, never auth-required. Anonymous-public mode has no account backend at all, so there is nothing to
+            // sign in to and the hint would be untrue.
             throw summarizePlaybackAttempts('kugou', attempts, {
                 lastError,
-                signInMayHelp: !hasKugouAuthenticatedSearchSession() && attempts.some(attempt => attempt.outcome === 'empty'),
+                signInMayHelp: !anonymousPublicMode
+                    && !hasKugouAuthenticatedSearchSession()
+                    && attempts.some(attempt => attempt.outcome === 'empty'),
             });
         },
     },

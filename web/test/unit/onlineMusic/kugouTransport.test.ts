@@ -343,13 +343,33 @@ describe('KuGou Web transport', () => {
         await expect(requestKugou('user_detail', {})).rejects.toMatchObject({ code: 'network' });
     });
 
-    it('reports unavailable when neither transport is configured', async () => {
+    it('reports the anonymous public mode when neither the bridge nor an instance is configured', async () => {
         vi.stubGlobal('window', undefined);
         vi.stubEnv('VITE_KUGOU_API_BASE', '');
-        const { getKugouTransportAvailability, requestKugou } = await import('@/services/onlineMusic/kugouTransport');
+        const { getKugouTransportAvailability, getKugouTransportMode, requestKugou } = await import('@/services/onlineMusic/kugouTransport');
 
-        expect(getKugouTransportAvailability()).toEqual({ configured: false, reason: 'not-configured' });
+        // KuGou's own public endpoints (anonymous signed search, legacy mobile playInfo, lyrics) need no
+        // self-hosted gateway, so the provider is usable; the mode says which request path to take.
+        expect(getKugouTransportAvailability()).toEqual({ configured: true, mode: 'anonymous-public' });
+        expect(getKugouTransportMode()).toBe('anonymous-public');
+        // The instance-only operations are still unconfigured, and say so as a persistent config failure.
         await expect(requestKugou('search', { keywords: 'song' })).rejects.toMatchObject({ code: 'unavailable' });
+    });
+
+    it('keeps the configured instance and the Electron bridge as their own modes', async () => {
+        vi.stubGlobal('window', undefined);
+        vi.stubEnv('VITE_KUGOU_API_BASE', 'https://kugou.example.test/');
+        const { getKugouTransportAvailability, getKugouTransportMode } = await import('@/services/onlineMusic/kugouTransport');
+
+        expect(getKugouTransportAvailability()).toEqual({ configured: true, mode: 'instance' });
+        expect(getKugouTransportMode()).toBe('instance');
+
+        vi.resetModules();
+        vi.stubGlobal('window', { electron: { kugouRequest: vi.fn() } });
+        const electronTransport = await import('@/services/onlineMusic/kugouTransport');
+
+        expect(electronTransport.getKugouTransportAvailability()).toEqual({ configured: true, mode: 'electron' });
+        expect(electronTransport.getKugouTransportMode()).toBe('electron');
     });
 
     it('marks the missing Web configuration as a persistent config failure', async () => {
@@ -361,6 +381,53 @@ describe('KuGou Web transport', () => {
             code: 'unavailable',
             providerId: 'kugou',
             details: { stage: 'config', transient: false },
+        });
+    });
+
+    describe('legacy mobile playInfo paywall', () => {
+        it('classifies the measured paywall answer and keeps a delivered URL out of it', async () => {
+            const { isKugouLegacyPaywallAnswer } = await import('@/services/onlineMusic/kugouTransport');
+
+            // The measured m.kugou.com answer for a Privilege 10 hash, verbatim: status 0 plus the
+            // Chinese reason is the only paywall signal, `url` is empty and `bitRate` is 0.
+            expect(isKugouLegacyPaywallAnswer({ status: 0, error: '需要付费', bitRate: 0, url: '' })).toBe(true);
+            expect(isKugouLegacyPaywallAnswer({ status: 0, error: '需要付费' })).toBe(true);
+            // The measured free answer (Privilege 0 / 5 / 8) carries a real URL and 128 kbps.
+            expect(isKugouLegacyPaywallAnswer({
+                status: 1, url: 'https://sharefs.kugou.com/song.mp3', bitRate: 128,
+            })).toBe(false);
+            expect(isKugouLegacyPaywallAnswer({
+                status: 0, error: '需要付费', url: 'https://sharefs.kugou.com/song.mp3',
+            })).toBe(false);
+            // An answer with no URL but no reason is "no link", not a paywall verdict.
+            expect(isKugouLegacyPaywallAnswer({ status: 0, error: '', bitRate: 0, url: '' })).toBe(false);
+            expect(isKugouLegacyPaywallAnswer({ status: 3 })).toBe(false);
+            expect(isKugouLegacyPaywallAnswer(undefined)).toBe(false);
+        });
+
+        it('turns the paywall answer into a non-transient entitlement failure with the upstream text as evidence', async () => {
+            const { createKugouLegacyPaywallError } = await import('@/services/onlineMusic/kugouTransport');
+            const previousAttempt = { stage: 'song_url', outcome: 'empty' as const };
+
+            const error = createKugouLegacyPaywallError({ status: 0, error: '需要付费', bitRate: 0, url: '' }, [previousAttempt]);
+
+            expect(error).toMatchObject({
+                name: 'OnlineProviderError',
+                code: 'entitlement-required',
+                providerId: 'kugou',
+                details: { stage: 'legacy_play_info', transient: false },
+            });
+            expect(error.message).toContain('需要付费');
+            expect(error.details?.attempts).toEqual([
+                previousAttempt,
+                {
+                    stage: 'legacy_play_info',
+                    outcome: 'error',
+                    code: 'entitlement-required',
+                    transient: false,
+                    detail: '需要付费',
+                },
+            ]);
         });
     });
 

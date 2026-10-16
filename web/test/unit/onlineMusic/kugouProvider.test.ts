@@ -5,10 +5,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const requestMock = vi.hoisted(() => vi.fn());
 const anonymousSearchMock = vi.hoisted(() => vi.fn());
 const legacyPlayInfoMock = vi.hoisted(() => vi.fn());
-const transportState = vi.hoisted(() => ({ hasAuthenticatedSearchSession: true }));
+const transportState = vi.hoisted(() => ({
+    hasAuthenticatedSearchSession: true,
+    mode: 'instance' as 'electron' | 'instance' | 'anonymous-public',
+}));
 
-vi.mock('@/services/onlineMusic/kugouTransport', () => ({
-    getKugouTransportAvailability: () => ({ configured: false, reason: 'not-configured' }),
+// 只有请求函数被替换；取数路径与付费分类用真实实现，provider 的模式分岔与付费结论才是被测行为。
+vi.mock('@/services/onlineMusic/kugouTransport', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/services/onlineMusic/kugouTransport')>()),
+    getKugouTransportAvailability: () => ({ configured: true, mode: transportState.mode }),
+    getKugouTransportMode: () => transportState.mode,
     hasKugouAuthenticatedSearchSession: () => transportState.hasAuthenticatedSearchSession,
     requestKugouAnonymousSearch: anonymousSearchMock,
     requestKugou: requestMock,
@@ -46,6 +52,7 @@ describe('kugouProvider', () => {
         anonymousSearchMock.mockReset();
         legacyPlayInfoMock.mockReset();
         transportState.hasAuthenticatedSearchSession = true;
+        transportState.mode = 'instance';
     });
 
     it('uses anonymous signed search when no authenticated KuGou session exists', async () => {
@@ -105,6 +112,131 @@ describe('kugouProvider', () => {
         });
         expect(anonymousSearchMock).not.toHaveBeenCalled();
         expect(page.items[0]?.id).toBe('AUTHENTICATED-HASH');
+    });
+
+    it('reports itself usable in the anonymous public mode', () => {
+        transportState.mode = 'anonymous-public';
+
+        // provider 的 availability 由 transport 决定：网页版没有实例时 configured 仍为 true，取数方式写在 mode 里。
+        expect(kugouProvider.getAvailability?.()).toEqual({ configured: true, mode: 'anonymous-public' });
+    });
+
+    it('keeps anonymous signed search as the only search path in the anonymous public mode', async () => {
+        transportState.mode = 'anonymous-public';
+        transportState.hasAuthenticatedSearchSession = true;
+        anonymousSearchMock.mockResolvedValue({ data: { lists: [{ FileHash: 'anonymous-hash', SongName: '爱河' }] } });
+
+        const page = await kugouProvider.search!.searchSongs('爱河', 50, 0);
+
+        // 没有实例可以承载「已登录检索」，所以即使本地还留着会话，也不打实例接口。
+        expect(anonymousSearchMock).toHaveBeenCalledWith('爱河', 1, 50);
+        expect(requestMock).not.toHaveBeenCalled();
+        expect(page.items[0]?.id).toBe('ANONYMOUS-HASH');
+    });
+
+    it('normalizes the measured anonymous search envelope end to end', async () => {
+        transportState.mode = 'anonymous-public';
+        // 实测的 /v2/search/song 应答：外层 {status, error_code, error_msg, data}，曲目在 data.lists[]，
+        // 字段是 PascalCase。两条都是实测原样（第一条 Privilege 10，第二条 Privilege 8 / PayType 3）。
+        anonymousSearchMock.mockResolvedValue({
+            status: 1,
+            error_code: 0,
+            error_msg: '',
+            data: {
+                pagesize: 20,
+                page: 1,
+                total: 480,
+                lists: [
+                    {
+                        HQFileHash: 'E02829226CCE31796AD5A625194903F9',
+                        HQPrivilege: 10,
+                        SQFileHash: 'EE9F1A1191BAEAC21E413E72C12D1AD0',
+                        SQPrivilege: 10,
+                        SongName: '爱河',
+                        FileName: '神马乐团 - 爱河',
+                        SingerName: '神马乐团',
+                        SingerId: [84958],
+                        Singers: [{ name: '神马乐团', id: 84958, ip_id: 0 }],
+                        AlbumID: '2627540',
+                        AlbumName: '爱河',
+                        AlbumPrivilege: 10,
+                        Duration: 312,
+                        Bitrate: 128,
+                        Privilege: 10,
+                        PayType: 3,
+                        MixSongID: '64849487',
+                        Audioid: 3899666,
+                        SongID: 543155,
+                        Image: 'http://imge.kugou.com/stdmusic/{size}/20260819/20260819211952677624.jpg',
+                        AlbumImage: '',
+                        trans_param: {
+                            union_cover: 'http://imge.kugou.com/stdmusic/{size}/20260819/20260819211952677624.jpg',
+                        },
+                        FileHash: '8351FE77DDD16314F2FE206CECC02336',
+                        FileSize: 5008160,
+                        ExtName: 'mp3',
+                    },
+                    {
+                        SongName: '爱河',
+                        FileName: 'ZaZaZsu咂咂苏 - 爱河',
+                        SingerName: 'ZaZaZsu咂咂苏',
+                        Singers: [{ name: 'ZaZaZsu咂咂苏', id: 1234567, ip_id: 0 }],
+                        AlbumID: '132542485',
+                        AlbumName: '第一千夜',
+                        Duration: 197,
+                        Privilege: 8,
+                        PayType: 3,
+                        MixSongID: '703023728',
+                        SongID: 532651239,
+                        Image: 'http://imge.kugou.com/stdmusic/{size}/20241210/20241210180421581868.jpg',
+                        FileHash: '0E04F174479CD839E1EB8570410781C8',
+                        ExtName: 'mp3',
+                    },
+                ],
+            },
+        });
+
+        const page = await kugouProvider.search!.searchSongs('爱河', 20, 0);
+
+        // 分页读的是 data.total（480），推进用的是这一页的原始条数，不是去重后的条数。
+        expect(page.total).toBe(480);
+        expect(page.hasMore).toBe(true);
+        expect(page.nextOffset).toBe(2);
+        expect(page.items).toHaveLength(2);
+        expect(page.items[0]).toMatchObject({
+            id: '8351FE77DDD16314F2FE206CECC02336',
+            name: '爱河',
+            durationMs: 312_000,
+            artists: [{ name: '神马乐团' }],
+            album: {
+                id: '2627540',
+                name: '爱河',
+                coverUrl: 'https://imge.kugou.com/stdmusic/1024/20260819/20260819211952677624.jpg',
+                catalogRef: { providerId: 'kugou', kind: 'album', id: '2627540' },
+            },
+            sourceRef: {
+                kind: 'online',
+                providerId: 'kugou',
+                mediaId: '8351FE77DDD16314F2FE206CECC02336',
+                providerData: {
+                    hash: '8351FE77DDD16314F2FE206CECC02336',
+                    mixSongId: '64849487',
+                    catalogLookupId: '64849487',
+                    albumId: '2627540',
+                },
+            },
+        });
+        expect(page.items[1]).toMatchObject({
+            id: '0E04F174479CD839E1EB8570410781C8',
+            name: '爱河',
+            durationMs: 197_000,
+            artists: [{ name: 'ZaZaZsu咂咂苏' }],
+            album: {
+                id: '132542485',
+                name: '第一千夜',
+                coverUrl: 'https://imge.kugou.com/stdmusic/1024/20241210/20241210180421581868.jpg',
+            },
+        });
     });
 
     it('normalizes Hash identity and keeps only stable provider data', () => {
@@ -841,6 +973,113 @@ describe('kugouProvider', () => {
                 details: { attempts: [expect.objectContaining({ stage: 'user_cloud_url', variant: 'cloud' })] },
             });
             expect(legacyPlayInfoMock).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('anonymous public playback', () => {
+        const song = () => normalizeKugouSong({ FileHash: 'hash', SongName: 'Song', AlbumID: 164446399, album_audio_id: 500617606 });
+
+        it('resolves the playable URL through the legacy mobile playInfo without touching the instance', async () => {
+            transportState.mode = 'anonymous-public';
+            legacyPlayInfoMock.mockResolvedValue({
+                status: 1,
+                url: 'https://sharefs.kugou.com/song.mp3',
+                bitRate: 128,
+            });
+
+            const source = await kugouProvider.playback!.getAudioSource(song(), 'lossless');
+
+            // 实例侧的签名 /song/url 与云盘接口在这一模式下一个都不打，公开的旧版接口直接给出音源。
+            expect(requestMock).not.toHaveBeenCalled();
+            expect(legacyPlayInfoMock).toHaveBeenCalledWith('HASH');
+            expect(source).toEqual({
+                url: 'https://sharefs.kugou.com/song.mp3',
+                fetchedAt: expect.any(Number),
+                quality: 'standard',
+            });
+        });
+
+        it('classifies the measured paywall answer as a distinct, non-retryable entitlement failure', async () => {
+            transportState.mode = 'anonymous-public';
+            legacyPlayInfoMock.mockResolvedValue({ status: 0, error: '需要付费', bitRate: 0 });
+
+            const error = await kugouProvider.playback!.getAudioSource(song(), 'high').catch(caught => caught);
+
+            expect(error).toMatchObject({
+                name: 'OnlineProviderError',
+                code: 'entitlement-required',
+                providerId: 'kugou',
+                details: {
+                    stage: 'legacy_play_info',
+                    transient: false,
+                    attempts: [{ stage: 'legacy_play_info', outcome: 'error', code: 'entitlement-required', detail: '需要付费' }],
+                },
+            });
+            expect(requestMock).not.toHaveBeenCalled();
+
+            // 播放侧看到的是「账号没有这首歌的权限」，不是可以重试的网络失败。
+            const failure = classifyPlaybackError(error, { stage: 'resolve-url', providerId: 'kugou' });
+            expect(failure).toMatchObject({ reason: 'entitlement-required', providerCode: 'entitlement-required' });
+            const policy = resolvePlaybackFailurePolicy(failure, 'play');
+            expect(policy.messageKey).toBe('status.songEntitlementRequired');
+            expect(policy.autoRetryDelaysMs).toEqual([]);
+            expect(policy.actions).toEqual(['skip']);
+        });
+
+        it('keeps a paywalled legacy answer distinct even when the instance answered first', async () => {
+            requestMock.mockResolvedValue({ status: 3 });
+            legacyPlayInfoMock.mockResolvedValue({ status: 0, error: '需要付费' });
+
+            const error = await kugouProvider.playback!.getAudioSource(song(), 'standard').catch(caught => caught);
+
+            expect(error).toMatchObject({ code: 'entitlement-required', details: { transient: false } });
+            expect(error.details.attempts?.map((attempt: { stage: string }) => attempt.stage)).toEqual([
+                'song_url', 'song_url', 'legacy_play_info',
+            ]);
+        });
+
+        it('takes the verdict from the playInfo answer, never from the search Privilege field', async () => {
+            transportState.mode = 'anonymous-public';
+            // 实测的 Privilege 10 曲目：能不能放只由 playInfo 的应答决定，检索里的 Privilege / PayType 不参与判断。
+            const paywalled = normalizeKugouSong({
+                FileHash: '8351FE77DDD16314F2FE206CECC02336',
+                SongName: '爱河',
+                FileName: '神马乐团 - 爱河',
+                SingerName: '神马乐团',
+                AlbumID: '2627540',
+                AlbumName: '爱河',
+                Duration: 312,
+                Privilege: 10,
+                PayType: 3,
+                MixSongID: '64849487',
+            });
+            legacyPlayInfoMock.mockResolvedValueOnce({
+                status: 1,
+                url: 'https://sharefs.kugou.com/song.mp3',
+                bitRate: 128,
+            });
+
+            await expect(kugouProvider.playback!.getAudioSource(paywalled, 'standard')).resolves.toMatchObject({
+                url: 'https://sharefs.kugou.com/song.mp3',
+                quality: 'standard',
+            });
+
+            legacyPlayInfoMock.mockResolvedValueOnce({ status: 0, error: '需要付费', bitRate: 0, url: '' });
+
+            await expect(kugouProvider.playback!.getAudioSource(paywalled, 'standard')).rejects.toMatchObject({
+                code: 'entitlement-required',
+                details: { transient: false },
+            });
+        });
+
+        it('does not claim that signing in may help when the runtime has no account backend', async () => {
+            transportState.mode = 'anonymous-public';
+            transportState.hasAuthenticatedSearchSession = false;
+            legacyPlayInfoMock.mockResolvedValue({ status: 3 });
+
+            const error = await kugouProvider.playback!.getAudioSource(song(), 'standard').catch(caught => caught);
+
+            expect(error).toMatchObject({ code: 'not-playable', details: { signInMayHelp: false } });
         });
     });
 

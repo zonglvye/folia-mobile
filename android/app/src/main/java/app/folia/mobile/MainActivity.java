@@ -35,7 +35,10 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.webkit.ServiceWorkerClientCompat;
+import androidx.webkit.ServiceWorkerControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
+import androidx.webkit.WebViewFeature;
 
 /**
  * The whole shell: one fullscreen WebView showing the bundled Folia build, plus the pieces a
@@ -75,6 +78,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Order matters: the service worker client has to be installed before any WebView exists,
+        // otherwise a worker that is already running for the origin keeps handling its own requests
+        // through a client that was never set. Everything it needs (assetLoader) is read at request
+        // time, so it is fine for that field to be assigned a few lines later.
+        installServiceWorkerClient();
 
         rootLayout = new FrameLayout(this);
         webView = new WebView(this);
@@ -172,17 +181,8 @@ public class MainActivity extends Activity {
 
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-            Uri url = request.getUrl();
-            if (url != null && VIRTUAL_HOST.equals(url.getHost())) {
-                WebResourceResponse response = assetLoader.shouldInterceptRequest(url);
-                if (response != null) {
-                    return response;
-                }
-                // Reserved hook: an absolute API gateway for /api/* belongs here once online
-                // sources are enabled, so the page keeps talking to a same-origin path and the
-                // shell forwards it without CORS or mixed-content constraints.
-            }
-            return super.shouldInterceptRequest(view, request);
+            WebResourceResponse served = serveRequest(request);
+            return served != null ? served : super.shouldInterceptRequest(view, request);
         }
 
         @Override
@@ -225,6 +225,57 @@ public class MainActivity extends Activity {
             webView = null;
             recreate();
             return true;
+        }
+    }
+
+    // ---- request interception, shared by the page and by its service worker ------------
+
+    /**
+     * Answers a request aimed at the virtual origin, or returns null so it can reach the network.
+     *
+     * The proxy is consulted before the asset loader because /api/ is not a file in the bundle; a
+     * path that matches neither simply fails, which is correct since nothing outside the APK is
+     * meant to be loadable from this origin. (A configurable absolute gateway for the other /api
+     * paths — theme generation, QQ sign-in — would hook in here, but those need a deployed backend
+     * the shell cannot supply on its own.)
+     */
+    private WebResourceResponse serveRequest(WebResourceRequest request) {
+        Uri url = request.getUrl();
+        if (url == null || !VIRTUAL_HOST.equals(url.getHost())) {
+            return null;
+        }
+        WebResourceResponse proxyResponse = LyricProxyHandler.handle(request);
+        if (proxyResponse != null) {
+            return proxyResponse;
+        }
+        return assetLoader == null ? null : assetLoader.shouldInterceptRequest(url);
+    }
+
+    /**
+     * The web build registers a service worker, and a service worker's own requests are NOT routed
+     * through WebViewClient — they need a ServiceWorkerClient. Without one two things break at once:
+     * the page's `/api/lyric-proxy` calls (online search, lyrics, covers) would never reach the
+     * shell's proxy, and the worker's own precache fetches could not read the bundled assets.
+     * This is required for online sources, not an optimisation.
+     */
+    private void installServiceWorkerClient() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_BASIC_USAGE)
+                || !WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_SHOULD_INTERCEPT_REQUEST)) {
+            Log.w(TAG, "Service worker interception unsupported; online lookups may bypass the proxy");
+            return;
+        }
+        try {
+            // Names are the *Compat ones on purpose: androidx.webkit 1.12 dropped the older
+            // ServiceWorkerClient / ServiceWorkerController classes in favour of these.
+            ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(
+                    new ServiceWorkerClientCompat() {
+                        @Override
+                        public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+                            return serveRequest(request);
+                        }
+                    });
+        } catch (Exception error) {
+            Log.e(TAG, "Failed to install the service worker client", error);
         }
     }
 

@@ -9,6 +9,7 @@ import type {
     OmniLyricsResult,
     OmniPage,
     OmniPlaybackReport,
+    OmniProviderAvailability,
     OmniProviderCapabilities,
     OmniProviderId,
     OmniProviderSummary,
@@ -189,7 +190,7 @@ export const omni = {
         return typeof requireOnlineMusicProvider(providerId).recommendations?.getDailySongs === 'function';
     },
 
-    getProviderAvailability(providerId: OmniProviderId) {
+    getProviderAvailability(providerId: OmniProviderId): OmniProviderAvailability {
         return requireOnlineMusicProvider(providerId).getAvailability?.() ?? { configured: true };
     },
 

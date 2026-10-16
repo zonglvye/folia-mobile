@@ -1,0 +1,772 @@
+From 5f89c1558bfc1c95e09552398ac1db20a630f05a Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 01:12:18 +0800
+Subject: [PATCH 2/2] feat(kugou): reach KuGou's public endpoints without a
+ self-hosted gateway
+
+The provider reported itself unconfigured whenever VITE_KUGOU_API_BASE was empty, so on the
+web and inside the Android shell - neither of which bundles a backend, unlike Electron - the
+whole KuGou source was dead. It now has a third, explicit transport mode.
+
+- getKugouTransportMode() resolves one order everywhere: electron -> instance -> anonymous-public
+- availability always reports configured, carrying a mode instead of a not-configured reason
+- search takes the signed anonymous search; playback goes straight to the legacy mobile
+  playInfo, skipping the instance-only request chain that could only fail and could abort
+  the fallback chain before it was reached
+- the legacy paywall answer (status 0 + the Chinese paywall wording + no url) becomes a
+  non-transient entitlement-required failure instead of a retryable network error
+- capabilities are per mode: anonymous-public promises only search/playback/lyrics. With auth
+  true, selecting the provider opened a QR login that cannot succeed in that mode, so the
+  active provider never switched and the working anonymous search was unreachable.
+---
+ src/hooks/useKugouLibrary.ts                 |  16 +-
+ src/services/onlineMusic/kugouProvider.ts    |  78 +++++-
+ src/services/onlineMusic/kugouTransport.ts   |  82 ++++++-
+ src/services/onlineMusic/omni.ts             |   3 +-
+ src/types/onlineMusic.ts                     |  13 +
+ test/unit/onlineMusic/bodianReview.test.ts   |  12 +
+ test/unit/onlineMusic/kugouProvider.test.ts  | 245 ++++++++++++++++++-
+ test/unit/onlineMusic/kugouTransport.test.ts |  73 +++++-
+ 8 files changed, 499 insertions(+), 23 deletions(-)
+
+diff --git a/src/hooks/useKugouLibrary.ts b/src/hooks/useKugouLibrary.ts
+index a735f2a..97b8a1f 100644
+--- a/src/hooks/useKugouLibrary.ts
++++ b/src/hooks/useKugouLibrary.ts
+@@ -3,6 +3,7 @@ import i18n from '../i18n/config';
+ import { omni } from '../services/onlineMusic/omni';
+ import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccountStore';
+ import type { MediaId, ProviderCollection, ProviderUser } from '../types/onlineMusic';
++import { ANONYMOUS_PUBLIC_MODE } from '../types/onlineMusic';
+ import { handleLoginStatusFailure } from '../services/onlineMusic/loginStatusFailure';
+ import {
+     clearProviderAccountSnapshot,
+@@ -118,7 +119,20 @@ export const useKugouLibrary = () => {
+ 
+     const refresh = useCallback(async () => {
+         const availability = omni.getProviderAvailability('kugou');
+-        console.info('[KugouLibrary] refresh:start', { configured: availability.configured });
++        console.info('[KugouLibrary] refresh:start', { configured: availability.configured, mode: availability.mode });
++        // 匿名公开模式（网页版只走酷狗公开接口）没有账户后端：没有可刷新的账号，也没有能求解的登录态，
++        // 所以直接保持匿名，不去读登录状态、也不清任何会话，检索与播放仍由 provider 的公网路径承担。
++        if (availability.mode === ANONYMOUS_PUBLIC_MODE) {
++            updateAccount('kugou', {
++                status: 'anonymous',
++                user: null,
++                error: undefined,
++                hydration: 'ready',
++                freshness: 'fresh',
++            });
++            console.info('[KugouLibrary] refresh:anonymous-public');
++            return false;
++        }
+         if (!omni.getProviderCapabilities('kugou').auth || !availability.configured) {
+             updateAccount('kugou', {
+                 status: availability.configured ? 'error' : 'anonymous',
+diff --git a/src/services/onlineMusic/kugouProvider.ts b/src/services/onlineMusic/kugouProvider.ts
+index 13fd346..025d194 100644
+--- a/src/services/onlineMusic/kugouProvider.ts
++++ b/src/services/onlineMusic/kugouProvider.ts
+@@ -6,6 +6,7 @@ import {
+     type JsonValue,
+     type MediaId,
+     type OnlineMusicProvider,
++    type ProviderCapabilities,
+     type ProviderCatalogRef,
+     type ProviderCollection,
+     type ProviderHistoryEntry,
+@@ -27,8 +28,11 @@ import {
+ import { removeProviderSessionValue, readProviderSessionValue } from './providerStorage';
+ import { attemptChainDecision, attemptFromError, emptyAttempt, summarizePlaybackAttempts } from './playbackAttempts';
+ import {
++    createKugouLegacyPaywallError,
+     getKugouTransportAvailability,
++    getKugouTransportMode,
+     hasKugouAuthenticatedSearchSession,
++    isKugouLegacyPaywallAnswer,
+     requestKugouAnonymousSearch,
+     requestKugou,
+     requestKugouLegacyPlayInfo,
+@@ -961,16 +965,52 @@ const getKugouHistoryName = async (date: string): Promise<string> => {
+     return kugouHistoryNameByDate.get(date) || date;
+ };
+ 
++/**
++ * 实例 / 桌面模式下的完整能力：KuGouMusicApi 实例与账号后端都在，全部成立。
++ * 作为模块级常量而不是每次构造的新对象，因为界面有按引用比较的 memo。
++ */
++const KUGOU_FULL_CAPABILITIES: ProviderCapabilities = {
++    search: true, playback: true, lyrics: true, auth: true, userLibrary: true,
++    playlists: true, albums: true, artists: true, recommendations: true, mutations: true,
++    wordByWordLyrics: true, userCloud: true, historyRecommendations: true,
++    playlistSubscription: true, playlistTrackMutations: true, likes: true, userAlbums: true,
++};
++
++/**
++ * 匿名公开模式（网页版没有实例、也没有账号后端）下只承诺三件事：检索、播放、歌词——它们由酷狗自己的
++ * 公开接口承担，已对真实端点实测可用。其余能力全部落在实例或账户那一侧，声明为真只会让界面摆出
++ * 点了必然失败的功能。
++ *
++ * `auth` 尤其关键：omni 用它算出 requiresAccount，为真时选中音源会进入二维码登录流程而不是直接切换，
++ * 而这一模式没有可登录的后端，于是活动音源永远切不过去，能用的匿名检索也就无从进入。
++ */
++const KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES: ProviderCapabilities = {
++    ...KUGOU_FULL_CAPABILITIES,
++    auth: false,
++    userLibrary: false,
++    playlists: false,
++    albums: false,
++    artists: false,
++    recommendations: false,
++    mutations: false,
++    userCloud: false,
++    historyRecommendations: false,
++    playlistSubscription: false,
++    playlistTrackMutations: false,
++    likes: false,
++    userAlbums: false,
++};
++
+ export const kugouProvider: OnlineMusicProvider = {
+     id: 'kugou',
+     displayName: 'KuGou Music',
+     shortName: '酷狗',
+     getAvailability: getKugouTransportAvailability,
+-    capabilities: {
+-        search: true, playback: true, lyrics: true, auth: true, userLibrary: true,
+-        playlists: true, albums: true, artists: true, recommendations: true, mutations: true,
+-        wordByWordLyrics: true, userCloud: true, historyRecommendations: true,
+-        playlistSubscription: true, playlistTrackMutations: true, likes: true, userAlbums: true,
++    // 能力随取数模式而变，理由见上面两个常量。
++    get capabilities(): ProviderCapabilities {
++        return getKugouTransportMode() === 'anonymous-public'
++            ? KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES
++            : KUGOU_FULL_CAPABILITIES;
+     },
+     normalizeSong: normalizeKugouSong,
+     normalizeUser,
+@@ -983,7 +1023,9 @@ export const kugouProvider: OnlineMusicProvider = {
+     search: {
+         async searchSongs(query, limit, offset) {
+             const page = Math.floor(offset / limit) + 1;
+-            if (!hasKugouAuthenticatedSearchSession()) {
++            // 匿名公开模式没有实例可登录，签名匿名检索就是这个模式唯一的检索路径；实例 / 桌面版维持原样，
++            // 只在没有已登录会话时才走匿名检索。
++            if (getKugouTransportMode() === 'anonymous-public' || !hasKugouAuthenticatedSearchSession()) {
+                 const response = await requestKugouAnonymousSearch(
+                     buildKugouLyricSearchQuery(query),
+                     page,
+@@ -1027,10 +1069,13 @@ export const kugouProvider: OnlineMusicProvider = {
+             let lastError: unknown;
+             // An auth failure or timeout stops the remaining /song/url qualities and variants; legacy still runs once.
+             let songUrlChainStopped = false;
++            // 匿名公开模式没有 KuGouMusicApi 实例：签名 /song/url 与云盘音源接口都在实例那一侧，只有公开的旧版
++            // mobile playInfo 能给出音源，所以这一模式直接走它，不再先打一轮注定失败的实例请求。
++            const anonymousPublicMode = getKugouTransportMode() === 'anonymous-public';
+ 
+             // Tries the preferred KuGou quality first and degrades until a playable URL is returned.
+             for (const candidateQuality of qualities) {
+-                if (songUrlChainStopped) break;
++                if (anonymousPublicMode || songUrlChainStopped) break;
+                 const requestVariants = sourceRef?.variant === 'cloud'
+                     ? [{ name: 'cloud', operation: 'user_cloud_url' as const, params: {
+                         hash, id: String(sourceRef.providerData?.fileId || ''),
+@@ -1150,10 +1195,22 @@ export const kugouProvider: OnlineMusicProvider = {
+                         requestedQuality: quality,
+                         status: legacyStatus,
+                     });
++                    // 旧版接口把付费歌曲答成 status 0 + `需要付费`：这是「这个账号放不了」的结论，证据比
++                    // 「没给链接」强得多，所以按 entitlement-required 抛出，而不是汇总成 not-playable / network。
++                    if (isKugouLegacyPaywallAnswer(legacyResponse)) {
++                        console.warn('[KuGouProvider] playback:paywall', {
++                            hash,
++                            requestedQuality: quality,
++                            upstream: legacyStatus,
++                        });
++                        throw createKugouLegacyPaywallError(legacyResponse, attempts);
++                    }
+                     attempts.push(emptyAttempt('legacy_play_info', {
+                         detail: legacyStatus === undefined ? undefined : `status=${legacyStatus}`,
+                     }));
+                 } catch (error) {
++                    // 付费结论不参与「多次尝试」的汇总：它已经是一个确定的原因，不该被其它尝试改写成暂时性失败。
++                    if (error instanceof OnlineProviderError && error.code === 'entitlement-required') throw error;
+                     console.warn('[KuGouProvider] playback:legacy-failed', {
+                         hash,
+                         requestedQuality: quality,
+@@ -1166,10 +1223,13 @@ export const kugouProvider: OnlineMusicProvider = {
+ 
+             console.warn('[KuGouProvider] playback:unavailable', { hash, requestedQuality: quality, attemptedQualities: qualities });
+             // Without a session and with empty answers, signing in only *may* help (the docs say no more), so this is
+-            // a hint, never auth-required.
++            // a hint, never auth-required. Anonymous-public mode has no account backend at all, so there is nothing to
++            // sign in to and the hint would be untrue.
+             throw summarizePlaybackAttempts('kugou', attempts, {
+                 lastError,
+-                signInMayHelp: !hasKugouAuthenticatedSearchSession() && attempts.some(attempt => attempt.outcome === 'empty'),
++                signInMayHelp: !anonymousPublicMode
++                    && !hasKugouAuthenticatedSearchSession()
++                    && attempts.some(attempt => attempt.outcome === 'empty'),
+             });
+         },
+     },
+diff --git a/src/services/onlineMusic/kugouTransport.ts b/src/services/onlineMusic/kugouTransport.ts
+index bd743ac..dadc2c1 100644
+--- a/src/services/onlineMusic/kugouTransport.ts
++++ b/src/services/onlineMusic/kugouTransport.ts
+@@ -1,5 +1,5 @@
+ import md5 from 'blueimp-md5';
+-import { OnlineProviderError } from '../../types/onlineMusic';
++import { ANONYMOUS_PUBLIC_MODE, OnlineProviderError, type ProviderPlaybackAttempt } from '../../types/onlineMusic';
+ import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from './providerStorage';
+ 
+ // src/services/onlineMusic/kugouTransport.ts
+@@ -399,6 +399,53 @@ export const requestKugouLegacyPlayInfo = async (hash: string): Promise<any> =>
+     }
+ };
+ 
++// 旧版 mobile playInfo 用中文措辞说明为什么没给链接（实测付费歌曲是 `需要付费`），没有结构化错误码，
++// 所以只能按原文判定；命中前提是这条应答自己没给任何 url（给了链接就是能放，措辞作废）。
++const KUGOU_LEGACY_PAYWALL_TEXT = /需要付费|付费(?:歌曲|专辑|下载|收听)|购买(?:后|才能|才可)/;
++
++const legacyAnswerText = (body: any): string => String(
++    body?.error ?? body?.error_msg ?? body?.msg ?? body?.errmsg ?? body?.reason ?? '',
++).trim();
++
++/** 旧版 playInfo 的付费拒绝：这是「这个账号放不了这首歌」的结论，不是「这一次没拿到链接」。 */
++export const isKugouLegacyPaywallAnswer = (body: unknown): boolean => {
++    if (!body || typeof body !== 'object') return false;
++    const payload = body as Record<string, unknown>;
++    if (typeof payload.url === 'string' && payload.url.trim()) return false;
++    // status 1 是「有音源」的成功应答；付费结论只可能出现在非成功应答里。
++    if (Number(payload.status) === 1) return false;
++    return KUGOU_LEGACY_PAYWALL_TEXT.test(legacyAnswerText(payload));
++};
++
++/**
++ * 付费拒绝的错误。上游只说了「要付费」，没区分会员还是单曲购买，所以用 entitlement-required
++ * （缺少播放权限，平台未区分会员与购买），而不是 network / not-playable；重试不会变好，transient 为 false。
++ * 已经发生过的其它尝试作为诊断证据一起带上。
++ */
++export const createKugouLegacyPaywallError = (
++    body: unknown,
++    attempts: readonly ProviderPlaybackAttempt[] = [],
++): OnlineProviderError => {
++    const detail = legacyAnswerText(body) || '需要付费';
++    return new OnlineProviderError(
++        'entitlement-required',
++        `KuGou legacy playInfo requires payment: ${detail}`,
++        'kugou',
++        undefined,
++        undefined,
++        undefined,
++        {
++            stage: 'legacy_play_info',
++            transient: false,
++            // 这条拒绝本身也是一次尝试记录，诊断报告里能直接看到上游原文。
++            attempts: [
++                ...attempts,
++                { stage: 'legacy_play_info', outcome: 'error', code: 'entitlement-required', transient: false, detail },
++            ],
++        },
++    );
++};
++
+ const clearWebDeviceIdentity = (): void => {
+     removeProviderSessionValue('kugou', 'dfid');
+     const storedCookie = readProviderSessionValue('kugou', 'cookie');
+@@ -440,13 +487,36 @@ const persistElectronAccountHint = (operation: KugouOperation, response: any): v
+     if (userId) writeProviderSessionValue('kugou', 'userid', String(userId));
+ };
+ 
+-export const getKugouTransportAvailability = () => {
+-    if (typeof window !== 'undefined' && window.electron?.kugouRequest) return { configured: true } as const;
+-    return getWebApiBase()
+-        ? { configured: true } as const
+-        : { configured: false, reason: 'not-configured' as const };
++/**
++ * How this runtime reaches KuGou. `electron` is the desktop IPC bridge, `instance` is a self-hosted
++ * KuGouMusicApi (VITE_KUGOU_API_BASE), and `anonymous-public` is KuGou's own public side: the
++ * anonymous signed search, the legacy mobile playInfo and the lyric endpoints all live on kugou.com
++ * and already reach the page through the shared lyric proxy, so no gateway has to be hosted.
++ */
++export type KugouTransportMode = 'electron' | 'instance' | typeof ANONYMOUS_PUBLIC_MODE;
++
++/**
++ * 酷狗取数路径的可用性。`configured` 只回答「这个 runtime 有没有一条能用的取数路径」——匿名公开模式也算
++ * 能用，所以网页版不再因为缺 VITE_KUGOU_API_BASE 就报未配置；`mode` 是唯一判定依据，调用方按它选请求方式。
++ */
++export type KugouTransportAvailability = {
++    configured: true;
++    mode: KugouTransportMode;
++};
++
++// 一条解析顺序，availability 与 provider 的请求分岔共用：桌面 IPC 优先，其次是显式配置的 KuGouMusicApi
++// 实例，两者都没有时用酷狗自己的公开接口。
++export const getKugouTransportMode = (): KugouTransportMode => {
++    if (typeof window !== 'undefined' && window.electron?.kugouRequest) return 'electron';
++    return getWebApiBase() ? 'instance' : ANONYMOUS_PUBLIC_MODE;
+ };
+ 
++/** 当前 runtime 的取数路径；匿名公开模式可用，所以这里不再有未配置的返回值。 */
++export const getKugouTransportAvailability = (): KugouTransportAvailability => ({
++    configured: true,
++    mode: getKugouTransportMode(),
++});
++
+ // Routes one provider request through Electron IPC or an explicitly configured Web backend.
+ export const requestKugou = async <T = unknown>(operation: KugouOperation, params: KugouParams = {}): Promise<T> => {
+     if (typeof window !== 'undefined' && window.electron?.kugouRequest) {
+diff --git a/src/services/onlineMusic/omni.ts b/src/services/onlineMusic/omni.ts
+index 4915763..6ce8802 100644
+--- a/src/services/onlineMusic/omni.ts
++++ b/src/services/onlineMusic/omni.ts
+@@ -9,6 +9,7 @@ import type {
+     OmniLyricsResult,
+     OmniPage,
+     OmniPlaybackReport,
++    OmniProviderAvailability,
+     OmniProviderCapabilities,
+     OmniProviderId,
+     OmniProviderSummary,
+@@ -189,7 +190,7 @@ export const omni = {
+         return typeof requireOnlineMusicProvider(providerId).recommendations?.getDailySongs === 'function';
+     },
+ 
+-    getProviderAvailability(providerId: OmniProviderId) {
++    getProviderAvailability(providerId: OmniProviderId): OmniProviderAvailability {
+         return requireOnlineMusicProvider(providerId).getAvailability?.() ?? { configured: true };
+     },
+ 
+diff --git a/src/types/onlineMusic.ts b/src/types/onlineMusic.ts
+index 0db5515..3251449 100644
+--- a/src/types/onlineMusic.ts
++++ b/src/types/onlineMusic.ts
+@@ -52,9 +52,22 @@ export interface ProviderCapabilities {
+     playbackReports?: boolean;
+ }
+ 
++/**
++ * `availability.mode` 的取值之一：这个 provider 在当前 runtime 只有自己的公开接口可用——检索、播放、歌词能走，
++ * 但没有自建后端，也就没有可登录的账户后端。UI 据此不把这一项当成一个可登录的平台。
++ * 由 provider 的 transport 声明（酷狗见 kugouTransport.ts 的 KugouTransportMode）。
++ */
++export const ANONYMOUS_PUBLIC_MODE = 'anonymous-public';
++
+ export interface ProviderAvailability {
+     configured: boolean;
+     reason?: 'not-configured' | 'runtime-unavailable';
++    /**
++     * provider 自己命名的取数方式，只在它明确给出时才读；缺省表示这个 provider 只有一种取数方式。
++     * 酷狗网页版用 `ANONYMOUS_PUBLIC_MODE` 表示只走酷狗自己的公开接口（无自建实例、无账户后端），
++     * 界面据此不把它当成一个可登录的账号后端。
++     */
++    mode?: string;
+ }
+ 
+ export interface ProviderAccountSummary {
+diff --git a/test/unit/onlineMusic/bodianReview.test.ts b/test/unit/onlineMusic/bodianReview.test.ts
+index deaece6..f610cc8 100644
+--- a/test/unit/onlineMusic/bodianReview.test.ts
++++ b/test/unit/onlineMusic/bodianReview.test.ts
+@@ -10,6 +10,9 @@ import type { ProviderCollection } from '@/types/onlineMusic';
+ vi.mock('@/services/onlineMusic/providerAccountCache', () => ({ saveProviderAccountSnapshot: vi.fn() }));
+ afterEach(() => {
+     vi.restoreAllMocks();
++    // Not covered by restoreAllMocks, and this file stubs VITE_KUGOU_API_BASE to pick a transport
++    // mode; a leaked value would silently move later tests into the wrong mode.
++    vi.unstubAllEnvs();
+     useOnlineProviderAccountStore.setState({ accounts: {}, activeProviderId: 'netease' });
+     omni.invalidateActiveRequests();
+ });
+@@ -54,6 +57,15 @@ describe('liked playlist refresh', () => {
+     });
+ 
+     it.each(['bodian', 'kugou'])('does not delay %s mutation success while fetching the liked list', async providerId => {
++        // This scenario needs an account-backed KuGou: it puts a signed-in user and a liked list on
++        // the account store. KuGou now reports its capabilities per transport mode, and with no API
++        // base configured the web runtime is in anonymous-public mode, where `likes` is false because
++        // there is no account backend at all — so the refresh this test is about does not exist there.
++        // Naming an instance base puts the provider back in the mode the scenario describes; the
++        // assertions below are unchanged.
++        if (providerId === 'kugou') {
++            vi.stubEnv('VITE_KUGOU_API_BASE', 'https://kugou.example.test/');
++        }
+         const { song, playlist, readLikes } = prepareLikedAddition(providerId);
+         let finish!: (ids: string[]) => void;
+         readLikes.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+diff --git a/test/unit/onlineMusic/kugouProvider.test.ts b/test/unit/onlineMusic/kugouProvider.test.ts
+index 0281fd3..80b4fe6 100644
+--- a/test/unit/onlineMusic/kugouProvider.test.ts
++++ b/test/unit/onlineMusic/kugouProvider.test.ts
+@@ -5,10 +5,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
+ const requestMock = vi.hoisted(() => vi.fn());
+ const anonymousSearchMock = vi.hoisted(() => vi.fn());
+ const legacyPlayInfoMock = vi.hoisted(() => vi.fn());
+-const transportState = vi.hoisted(() => ({ hasAuthenticatedSearchSession: true }));
++const transportState = vi.hoisted(() => ({
++    hasAuthenticatedSearchSession: true,
++    mode: 'instance' as 'electron' | 'instance' | 'anonymous-public',
++}));
+ 
+-vi.mock('@/services/onlineMusic/kugouTransport', () => ({
+-    getKugouTransportAvailability: () => ({ configured: false, reason: 'not-configured' }),
++// 只有请求函数被替换；取数路径与付费分类用真实实现，provider 的模式分岔与付费结论才是被测行为。
++vi.mock('@/services/onlineMusic/kugouTransport', async importOriginal => ({
++    ...(await importOriginal<typeof import('@/services/onlineMusic/kugouTransport')>()),
++    getKugouTransportAvailability: () => ({ configured: true, mode: transportState.mode }),
++    getKugouTransportMode: () => transportState.mode,
+     hasKugouAuthenticatedSearchSession: () => transportState.hasAuthenticatedSearchSession,
+     requestKugouAnonymousSearch: anonymousSearchMock,
+     requestKugou: requestMock,
+@@ -46,6 +52,7 @@ describe('kugouProvider', () => {
+         anonymousSearchMock.mockReset();
+         legacyPlayInfoMock.mockReset();
+         transportState.hasAuthenticatedSearchSession = true;
++        transportState.mode = 'instance';
+     });
+ 
+     it('uses anonymous signed search when no authenticated KuGou session exists', async () => {
+@@ -107,6 +114,131 @@ describe('kugouProvider', () => {
+         expect(page.items[0]?.id).toBe('AUTHENTICATED-HASH');
+     });
+ 
++    it('reports itself usable in the anonymous public mode', () => {
++        transportState.mode = 'anonymous-public';
++
++        // provider 的 availability 由 transport 决定：网页版没有实例时 configured 仍为 true，取数方式写在 mode 里。
++        expect(kugouProvider.getAvailability?.()).toEqual({ configured: true, mode: 'anonymous-public' });
++    });
++
++    it('keeps anonymous signed search as the only search path in the anonymous public mode', async () => {
++        transportState.mode = 'anonymous-public';
++        transportState.hasAuthenticatedSearchSession = true;
++        anonymousSearchMock.mockResolvedValue({ data: { lists: [{ FileHash: 'anonymous-hash', SongName: '爱河' }] } });
++
++        const page = await kugouProvider.search!.searchSongs('爱河', 50, 0);
++
++        // 没有实例可以承载「已登录检索」，所以即使本地还留着会话，也不打实例接口。
++        expect(anonymousSearchMock).toHaveBeenCalledWith('爱河', 1, 50);
++        expect(requestMock).not.toHaveBeenCalled();
++        expect(page.items[0]?.id).toBe('ANONYMOUS-HASH');
++    });
++
++    it('normalizes the measured anonymous search envelope end to end', async () => {
++        transportState.mode = 'anonymous-public';
++        // 实测的 /v2/search/song 应答：外层 {status, error_code, error_msg, data}，曲目在 data.lists[]，
++        // 字段是 PascalCase。两条都是实测原样（第一条 Privilege 10，第二条 Privilege 8 / PayType 3）。
++        anonymousSearchMock.mockResolvedValue({
++            status: 1,
++            error_code: 0,
++            error_msg: '',
++            data: {
++                pagesize: 20,
++                page: 1,
++                total: 480,
++                lists: [
++                    {
++                        HQFileHash: 'E02829226CCE31796AD5A625194903F9',
++                        HQPrivilege: 10,
++                        SQFileHash: 'EE9F1A1191BAEAC21E413E72C12D1AD0',
++                        SQPrivilege: 10,
++                        SongName: '爱河',
++                        FileName: '神马乐团 - 爱河',
++                        SingerName: '神马乐团',
++                        SingerId: [84958],
++                        Singers: [{ name: '神马乐团', id: 84958, ip_id: 0 }],
++                        AlbumID: '2627540',
++                        AlbumName: '爱河',
++                        AlbumPrivilege: 10,
++                        Duration: 312,
++                        Bitrate: 128,
++                        Privilege: 10,
++                        PayType: 3,
++                        MixSongID: '64849487',
++                        Audioid: 3899666,
++                        SongID: 543155,
++                        Image: 'http://imge.kugou.com/stdmusic/{size}/20260819/20260819211952677624.jpg',
++                        AlbumImage: '',
++                        trans_param: {
++                            union_cover: 'http://imge.kugou.com/stdmusic/{size}/20260819/20260819211952677624.jpg',
++                        },
++                        FileHash: '8351FE77DDD16314F2FE206CECC02336',
++                        FileSize: 5008160,
++                        ExtName: 'mp3',
++                    },
++                    {
++                        SongName: '爱河',
++                        FileName: 'ZaZaZsu咂咂苏 - 爱河',
++                        SingerName: 'ZaZaZsu咂咂苏',
++                        Singers: [{ name: 'ZaZaZsu咂咂苏', id: 1234567, ip_id: 0 }],
++                        AlbumID: '132542485',
++                        AlbumName: '第一千夜',
++                        Duration: 197,
++                        Privilege: 8,
++                        PayType: 3,
++                        MixSongID: '703023728',
++                        SongID: 532651239,
++                        Image: 'http://imge.kugou.com/stdmusic/{size}/20241210/20241210180421581868.jpg',
++                        FileHash: '0E04F174479CD839E1EB8570410781C8',
++                        ExtName: 'mp3',
++                    },
++                ],
++            },
++        });
++
++        const page = await kugouProvider.search!.searchSongs('爱河', 20, 0);
++
++        // 分页读的是 data.total（480），推进用的是这一页的原始条数，不是去重后的条数。
++        expect(page.total).toBe(480);
++        expect(page.hasMore).toBe(true);
++        expect(page.nextOffset).toBe(2);
++        expect(page.items).toHaveLength(2);
++        expect(page.items[0]).toMatchObject({
++            id: '8351FE77DDD16314F2FE206CECC02336',
++            name: '爱河',
++            durationMs: 312_000,
++            artists: [{ name: '神马乐团' }],
++            album: {
++                id: '2627540',
++                name: '爱河',
++                coverUrl: 'https://imge.kugou.com/stdmusic/1024/20260819/20260819211952677624.jpg',
++                catalogRef: { providerId: 'kugou', kind: 'album', id: '2627540' },
++            },
++            sourceRef: {
++                kind: 'online',
++                providerId: 'kugou',
++                mediaId: '8351FE77DDD16314F2FE206CECC02336',
++                providerData: {
++                    hash: '8351FE77DDD16314F2FE206CECC02336',
++                    mixSongId: '64849487',
++                    catalogLookupId: '64849487',
++                    albumId: '2627540',
++                },
++            },
++        });
++        expect(page.items[1]).toMatchObject({
++            id: '0E04F174479CD839E1EB8570410781C8',
++            name: '爱河',
++            durationMs: 197_000,
++            artists: [{ name: 'ZaZaZsu咂咂苏' }],
++            album: {
++                id: '132542485',
++                name: '第一千夜',
++                coverUrl: 'https://imge.kugou.com/stdmusic/1024/20241210/20241210180421581868.jpg',
++            },
++        });
++    });
++
+     it('normalizes Hash identity and keeps only stable provider data', () => {
+         const song = normalizeKugouSong({
+             FileHash: 'ab12cd',
+@@ -844,6 +976,113 @@ describe('kugouProvider', () => {
+         });
+     });
+ 
++    describe('anonymous public playback', () => {
++        const song = () => normalizeKugouSong({ FileHash: 'hash', SongName: 'Song', AlbumID: 164446399, album_audio_id: 500617606 });
++
++        it('resolves the playable URL through the legacy mobile playInfo without touching the instance', async () => {
++            transportState.mode = 'anonymous-public';
++            legacyPlayInfoMock.mockResolvedValue({
++                status: 1,
++                url: 'https://sharefs.kugou.com/song.mp3',
++                bitRate: 128,
++            });
++
++            const source = await kugouProvider.playback!.getAudioSource(song(), 'lossless');
++
++            // 实例侧的签名 /song/url 与云盘接口在这一模式下一个都不打，公开的旧版接口直接给出音源。
++            expect(requestMock).not.toHaveBeenCalled();
++            expect(legacyPlayInfoMock).toHaveBeenCalledWith('HASH');
++            expect(source).toEqual({
++                url: 'https://sharefs.kugou.com/song.mp3',
++                fetchedAt: expect.any(Number),
++                quality: 'standard',
++            });
++        });
++
++        it('classifies the measured paywall answer as a distinct, non-retryable entitlement failure', async () => {
++            transportState.mode = 'anonymous-public';
++            legacyPlayInfoMock.mockResolvedValue({ status: 0, error: '需要付费', bitRate: 0 });
++
++            const error = await kugouProvider.playback!.getAudioSource(song(), 'high').catch(caught => caught);
++
++            expect(error).toMatchObject({
++                name: 'OnlineProviderError',
++                code: 'entitlement-required',
++                providerId: 'kugou',
++                details: {
++                    stage: 'legacy_play_info',
++                    transient: false,
++                    attempts: [{ stage: 'legacy_play_info', outcome: 'error', code: 'entitlement-required', detail: '需要付费' }],
++                },
++            });
++            expect(requestMock).not.toHaveBeenCalled();
++
++            // 播放侧看到的是「账号没有这首歌的权限」，不是可以重试的网络失败。
++            const failure = classifyPlaybackError(error, { stage: 'resolve-url', providerId: 'kugou' });
++            expect(failure).toMatchObject({ reason: 'entitlement-required', providerCode: 'entitlement-required' });
++            const policy = resolvePlaybackFailurePolicy(failure, 'play');
++            expect(policy.messageKey).toBe('status.songEntitlementRequired');
++            expect(policy.autoRetryDelaysMs).toEqual([]);
++            expect(policy.actions).toEqual(['skip']);
++        });
++
++        it('keeps a paywalled legacy answer distinct even when the instance answered first', async () => {
++            requestMock.mockResolvedValue({ status: 3 });
++            legacyPlayInfoMock.mockResolvedValue({ status: 0, error: '需要付费' });
++
++            const error = await kugouProvider.playback!.getAudioSource(song(), 'standard').catch(caught => caught);
++
++            expect(error).toMatchObject({ code: 'entitlement-required', details: { transient: false } });
++            expect(error.details.attempts?.map((attempt: { stage: string }) => attempt.stage)).toEqual([
++                'song_url', 'song_url', 'legacy_play_info',
++            ]);
++        });
++
++        it('takes the verdict from the playInfo answer, never from the search Privilege field', async () => {
++            transportState.mode = 'anonymous-public';
++            // 实测的 Privilege 10 曲目：能不能放只由 playInfo 的应答决定，检索里的 Privilege / PayType 不参与判断。
++            const paywalled = normalizeKugouSong({
++                FileHash: '8351FE77DDD16314F2FE206CECC02336',
++                SongName: '爱河',
++                FileName: '神马乐团 - 爱河',
++                SingerName: '神马乐团',
++                AlbumID: '2627540',
++                AlbumName: '爱河',
++                Duration: 312,
++                Privilege: 10,
++                PayType: 3,
++                MixSongID: '64849487',
++            });
++            legacyPlayInfoMock.mockResolvedValueOnce({
++                status: 1,
++                url: 'https://sharefs.kugou.com/song.mp3',
++                bitRate: 128,
++            });
++
++            await expect(kugouProvider.playback!.getAudioSource(paywalled, 'standard')).resolves.toMatchObject({
++                url: 'https://sharefs.kugou.com/song.mp3',
++                quality: 'standard',
++            });
++
++            legacyPlayInfoMock.mockResolvedValueOnce({ status: 0, error: '需要付费', bitRate: 0, url: '' });
++
++            await expect(kugouProvider.playback!.getAudioSource(paywalled, 'standard')).rejects.toMatchObject({
++                code: 'entitlement-required',
++                details: { transient: false },
++            });
++        });
++
++        it('does not claim that signing in may help when the runtime has no account backend', async () => {
++            transportState.mode = 'anonymous-public';
++            transportState.hasAuthenticatedSearchSession = false;
++            legacyPlayInfoMock.mockResolvedValue({ status: 3 });
++
++            const error = await kugouProvider.playback!.getAudioSource(song(), 'standard').catch(caught => caught);
++
++            expect(error).toMatchObject({ code: 'not-playable', details: { signInMayHelp: false } });
++        });
++    });
++
+     it('hydrates canonical album and artist ids through hash-verified KRM metadata once', async () => {
+         requestMock.mockResolvedValue({
+             data: [{
+diff --git a/test/unit/onlineMusic/kugouTransport.test.ts b/test/unit/onlineMusic/kugouTransport.test.ts
+index 8f76162..c6e53b1 100644
+--- a/test/unit/onlineMusic/kugouTransport.test.ts
++++ b/test/unit/onlineMusic/kugouTransport.test.ts
+@@ -343,15 +343,35 @@ describe('KuGou Web transport', () => {
+         await expect(requestKugou('user_detail', {})).rejects.toMatchObject({ code: 'network' });
+     });
+ 
+-    it('reports unavailable when neither transport is configured', async () => {
++    it('reports the anonymous public mode when neither the bridge nor an instance is configured', async () => {
+         vi.stubGlobal('window', undefined);
+         vi.stubEnv('VITE_KUGOU_API_BASE', '');
+-        const { getKugouTransportAvailability, requestKugou } = await import('@/services/onlineMusic/kugouTransport');
++        const { getKugouTransportAvailability, getKugouTransportMode, requestKugou } = await import('@/services/onlineMusic/kugouTransport');
+ 
+-        expect(getKugouTransportAvailability()).toEqual({ configured: false, reason: 'not-configured' });
++        // KuGou's own public endpoints (anonymous signed search, legacy mobile playInfo, lyrics) need no
++        // self-hosted gateway, so the provider is usable; the mode says which request path to take.
++        expect(getKugouTransportAvailability()).toEqual({ configured: true, mode: 'anonymous-public' });
++        expect(getKugouTransportMode()).toBe('anonymous-public');
++        // The instance-only operations are still unconfigured, and say so as a persistent config failure.
+         await expect(requestKugou('search', { keywords: 'song' })).rejects.toMatchObject({ code: 'unavailable' });
+     });
+ 
++    it('keeps the configured instance and the Electron bridge as their own modes', async () => {
++        vi.stubGlobal('window', undefined);
++        vi.stubEnv('VITE_KUGOU_API_BASE', 'https://kugou.example.test/');
++        const { getKugouTransportAvailability, getKugouTransportMode } = await import('@/services/onlineMusic/kugouTransport');
++
++        expect(getKugouTransportAvailability()).toEqual({ configured: true, mode: 'instance' });
++        expect(getKugouTransportMode()).toBe('instance');
++
++        vi.resetModules();
++        vi.stubGlobal('window', { electron: { kugouRequest: vi.fn() } });
++        const electronTransport = await import('@/services/onlineMusic/kugouTransport');
++
++        expect(electronTransport.getKugouTransportAvailability()).toEqual({ configured: true, mode: 'electron' });
++        expect(electronTransport.getKugouTransportMode()).toBe('electron');
++    });
++
+     it('marks the missing Web configuration as a persistent config failure', async () => {
+         vi.stubGlobal('window', undefined);
+         vi.stubEnv('VITE_KUGOU_API_BASE', '');
+@@ -364,6 +384,53 @@ describe('KuGou Web transport', () => {
+         });
+     });
+ 
++    describe('legacy mobile playInfo paywall', () => {
++        it('classifies the measured paywall answer and keeps a delivered URL out of it', async () => {
++            const { isKugouLegacyPaywallAnswer } = await import('@/services/onlineMusic/kugouTransport');
++
++            // The measured m.kugou.com answer for a Privilege 10 hash, verbatim: status 0 plus the
++            // Chinese reason is the only paywall signal, `url` is empty and `bitRate` is 0.
++            expect(isKugouLegacyPaywallAnswer({ status: 0, error: '需要付费', bitRate: 0, url: '' })).toBe(true);
++            expect(isKugouLegacyPaywallAnswer({ status: 0, error: '需要付费' })).toBe(true);
++            // The measured free answer (Privilege 0 / 5 / 8) carries a real URL and 128 kbps.
++            expect(isKugouLegacyPaywallAnswer({
++                status: 1, url: 'https://sharefs.kugou.com/song.mp3', bitRate: 128,
++            })).toBe(false);
++            expect(isKugouLegacyPaywallAnswer({
++                status: 0, error: '需要付费', url: 'https://sharefs.kugou.com/song.mp3',
++            })).toBe(false);
++            // An answer with no URL but no reason is "no link", not a paywall verdict.
++            expect(isKugouLegacyPaywallAnswer({ status: 0, error: '', bitRate: 0, url: '' })).toBe(false);
++            expect(isKugouLegacyPaywallAnswer({ status: 3 })).toBe(false);
++            expect(isKugouLegacyPaywallAnswer(undefined)).toBe(false);
++        });
++
++        it('turns the paywall answer into a non-transient entitlement failure with the upstream text as evidence', async () => {
++            const { createKugouLegacyPaywallError } = await import('@/services/onlineMusic/kugouTransport');
++            const previousAttempt = { stage: 'song_url', outcome: 'empty' as const };
++
++            const error = createKugouLegacyPaywallError({ status: 0, error: '需要付费', bitRate: 0, url: '' }, [previousAttempt]);
++
++            expect(error).toMatchObject({
++                name: 'OnlineProviderError',
++                code: 'entitlement-required',
++                providerId: 'kugou',
++                details: { stage: 'legacy_play_info', transient: false },
++            });
++            expect(error.message).toContain('需要付费');
++            expect(error.details?.attempts).toEqual([
++                previousAttempt,
++                {
++                    stage: 'legacy_play_info',
++                    outcome: 'error',
++                    code: 'entitlement-required',
++                    transient: false,
++                    detail: '需要付费',
++                },
++            ]);
++        });
++    });
++
+     describe('Electron failure details', () => {
+         const rejectWith = async (bridgeMessage: string) => {
+             const ipcError = new Error(`Error invoking remote method 'kugou-api-request': KuGouApiError: ${bridgeMessage}`);

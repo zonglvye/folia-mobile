@@ -13,12 +13,31 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$toolchain = 'D:\folia-toolchain'
-$env:JAVA_HOME = Join-Path $toolchain 'jdk'
-$env:ANDROID_HOME = Join-Path $toolchain 'sdk'
-$env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
+# Toolchain resolution. FOLIA_TOOLCHAIN points at a portable JDK + Gradle + Android SDK laid out
+# as jdk/ gradle/ sdk/ (how this project is built locally, in an ASCII-only path because AGP
+# refuses non-ASCII project paths). Without it the script falls back to whatever JDK and SDK are
+# already on the machine, so it stays usable elsewhere instead of hardcoding one machine's paths.
+$toolchain = $env:FOLIA_TOOLCHAIN
+if ($toolchain -and (Test-Path -LiteralPath $toolchain)) {
+    $env:JAVA_HOME = Join-Path $toolchain 'jdk'
+    $env:ANDROID_HOME = Join-Path $toolchain 'sdk'
+    $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
+    $gradle = Join-Path $toolchain 'gradle\bin\gradle.bat'
+} else {
+    if (-not $env:ANDROID_HOME -and $env:ANDROID_SDK_ROOT) { $env:ANDROID_HOME = $env:ANDROID_SDK_ROOT }
+    $gradleOnPath = Get-Command gradle -ErrorAction SilentlyContinue
+    if (-not $gradleOnPath) {
+        throw 'No toolchain found. Set FOLIA_TOOLCHAIN to a jdk/gradle/sdk layout, or install Gradle and set JAVA_HOME + ANDROID_HOME.'
+    }
+    $gradle = $gradleOnPath.Source
+}
+if (-not $env:JAVA_HOME) { throw 'Set JAVA_HOME (JDK 17) or FOLIA_TOOLCHAIN.' }
+if (-not $env:ANDROID_HOME) { throw 'Set ANDROID_HOME (Android SDK 35) or FOLIA_TOOLCHAIN.' }
 
-$gradle = Join-Path $toolchain 'gradle\bin\gradle.bat'
+# Force English diagnostics. On a zh-CN Windows host javac and Gradle emit GBK-encoded messages
+# that the console codepage renders as mojibake, which makes a compile error unreadable exactly
+# when it matters most.
+$env:JAVA_TOOL_OPTIONS = '-Duser.language=en -Duser.country=US'
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 
 foreach ($required in @($gradle, (Join-Path $env:JAVA_HOME 'bin\java.exe'))) {

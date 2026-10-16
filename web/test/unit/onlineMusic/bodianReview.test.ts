@@ -10,6 +10,9 @@ import type { ProviderCollection } from '@/types/onlineMusic';
 vi.mock('@/services/onlineMusic/providerAccountCache', () => ({ saveProviderAccountSnapshot: vi.fn() }));
 afterEach(() => {
     vi.restoreAllMocks();
+    // Not covered by restoreAllMocks, and this file stubs VITE_KUGOU_API_BASE to pick a transport
+    // mode; a leaked value would silently move later tests into the wrong mode.
+    vi.unstubAllEnvs();
     useOnlineProviderAccountStore.setState({ accounts: {}, activeProviderId: 'netease' });
     omni.invalidateActiveRequests();
 });
@@ -54,6 +57,15 @@ describe('liked playlist refresh', () => {
     });
 
     it.each(['bodian', 'kugou'])('does not delay %s mutation success while fetching the liked list', async providerId => {
+        // This scenario needs an account-backed KuGou: it puts a signed-in user and a liked list on
+        // the account store. KuGou now reports its capabilities per transport mode, and with no API
+        // base configured the web runtime is in anonymous-public mode, where `likes` is false because
+        // there is no account backend at all — so the refresh this test is about does not exist there.
+        // Naming an instance base puts the provider back in the mode the scenario describes; the
+        // assertions below are unchanged.
+        if (providerId === 'kugou') {
+            vi.stubEnv('VITE_KUGOU_API_BASE', 'https://kugou.example.test/');
+        }
         const { song, playlist, readLikes } = prepareLikedAddition(providerId);
         let finish!: (ids: string[]) => void;
         readLikes.mockReturnValue(new Promise(resolve => { finish = resolve; }));

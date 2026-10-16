@@ -52,9 +52,22 @@ export interface ProviderCapabilities {
     playbackReports?: boolean;
 }
 
+/**
+ * `availability.mode` 的取值之一：这个 provider 在当前 runtime 只有自己的公开接口可用——检索、播放、歌词能走，
+ * 但没有自建后端，也就没有可登录的账户后端。UI 据此不把这一项当成一个可登录的平台。
+ * 由 provider 的 transport 声明（酷狗见 kugouTransport.ts 的 KugouTransportMode）。
+ */
+export const ANONYMOUS_PUBLIC_MODE = 'anonymous-public';
+
 export interface ProviderAvailability {
     configured: boolean;
     reason?: 'not-configured' | 'runtime-unavailable';
+    /**
+     * provider 自己命名的取数方式，只在它明确给出时才读；缺省表示这个 provider 只有一种取数方式。
+     * 酷狗网页版用 `ANONYMOUS_PUBLIC_MODE` 表示只走酷狗自己的公开接口（无自建实例、无账户后端），
+     * 界面据此不把它当成一个可登录的账号后端。
+     */
+    mode?: string;
 }
 
 export interface ProviderAccountSummary {

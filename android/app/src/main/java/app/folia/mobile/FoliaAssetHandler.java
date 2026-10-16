@@ -52,10 +52,19 @@ public final class FoliaAssetHandler implements WebViewAssetLoader.PathHandler {
             return null;
         }
         WebResourceResponse response = open(relative);
-        if (response == null && !relative.contains(".")) {
+        if (response == null && !relative.contains(".") && !isApiPath(relative)) {
             response = open(SPA_FALLBACK);
         }
         return response;
+    }
+
+    /**
+     * `/api/*` must never fall back to the SPA shell. Those paths are answered by the proxy or by a
+     * gateway, and handing the caller an HTML document instead of an error turns a clear "endpoint
+     * unavailable" into an opaque JSON parse failure on the page.
+     */
+    private static boolean isApiPath(String relative) {
+        return relative.equals("api") || relative.startsWith("api/");
     }
 
     /** Strips the leading slash and rejects anything that could escape the asset root. */

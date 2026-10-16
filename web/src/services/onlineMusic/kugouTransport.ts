@@ -1,5 +1,5 @@
 import md5 from 'blueimp-md5';
-import { OnlineProviderError } from '../../types/onlineMusic';
+import { ANONYMOUS_PUBLIC_MODE, OnlineProviderError, type ProviderPlaybackAttempt } from '../../types/onlineMusic';
 import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from './providerStorage';
 
 // src/services/onlineMusic/kugouTransport.ts
@@ -399,6 +399,53 @@ export const requestKugouLegacyPlayInfo = async (hash: string): Promise<any> => 
     }
 };
 
+// 旧版 mobile playInfo 用中文措辞说明为什么没给链接（实测付费歌曲是 `需要付费`），没有结构化错误码，
+// 所以只能按原文判定；命中前提是这条应答自己没给任何 url（给了链接就是能放，措辞作废）。
+const KUGOU_LEGACY_PAYWALL_TEXT = /需要付费|付费(?:歌曲|专辑|下载|收听)|购买(?:后|才能|才可)/;
+
+const legacyAnswerText = (body: any): string => String(
+    body?.error ?? body?.error_msg ?? body?.msg ?? body?.errmsg ?? body?.reason ?? '',
+).trim();
+
+/** 旧版 playInfo 的付费拒绝：这是「这个账号放不了这首歌」的结论，不是「这一次没拿到链接」。 */
+export const isKugouLegacyPaywallAnswer = (body: unknown): boolean => {
+    if (!body || typeof body !== 'object') return false;
+    const payload = body as Record<string, unknown>;
+    if (typeof payload.url === 'string' && payload.url.trim()) return false;
+    // status 1 是「有音源」的成功应答；付费结论只可能出现在非成功应答里。
+    if (Number(payload.status) === 1) return false;
+    return KUGOU_LEGACY_PAYWALL_TEXT.test(legacyAnswerText(payload));
+};
+
+/**
+ * 付费拒绝的错误。上游只说了「要付费」，没区分会员还是单曲购买，所以用 entitlement-required
+ * （缺少播放权限，平台未区分会员与购买），而不是 network / not-playable；重试不会变好，transient 为 false。
+ * 已经发生过的其它尝试作为诊断证据一起带上。
+ */
+export const createKugouLegacyPaywallError = (
+    body: unknown,
+    attempts: readonly ProviderPlaybackAttempt[] = [],
+): OnlineProviderError => {
+    const detail = legacyAnswerText(body) || '需要付费';
+    return new OnlineProviderError(
+        'entitlement-required',
+        `KuGou legacy playInfo requires payment: ${detail}`,
+        'kugou',
+        undefined,
+        undefined,
+        undefined,
+        {
+            stage: 'legacy_play_info',
+            transient: false,
+            // 这条拒绝本身也是一次尝试记录，诊断报告里能直接看到上游原文。
+            attempts: [
+                ...attempts,
+                { stage: 'legacy_play_info', outcome: 'error', code: 'entitlement-required', transient: false, detail },
+            ],
+        },
+    );
+};
+
 const clearWebDeviceIdentity = (): void => {
     removeProviderSessionValue('kugou', 'dfid');
     const storedCookie = readProviderSessionValue('kugou', 'cookie');
@@ -440,12 +487,35 @@ const persistElectronAccountHint = (operation: KugouOperation, response: any): v
     if (userId) writeProviderSessionValue('kugou', 'userid', String(userId));
 };
 
-export const getKugouTransportAvailability = () => {
-    if (typeof window !== 'undefined' && window.electron?.kugouRequest) return { configured: true } as const;
-    return getWebApiBase()
-        ? { configured: true } as const
-        : { configured: false, reason: 'not-configured' as const };
+/**
+ * How this runtime reaches KuGou. `electron` is the desktop IPC bridge, `instance` is a self-hosted
+ * KuGouMusicApi (VITE_KUGOU_API_BASE), and `anonymous-public` is KuGou's own public side: the
+ * anonymous signed search, the legacy mobile playInfo and the lyric endpoints all live on kugou.com
+ * and already reach the page through the shared lyric proxy, so no gateway has to be hosted.
+ */
+export type KugouTransportMode = 'electron' | 'instance' | typeof ANONYMOUS_PUBLIC_MODE;
+
+/**
+ * 酷狗取数路径的可用性。`configured` 只回答「这个 runtime 有没有一条能用的取数路径」——匿名公开模式也算
+ * 能用，所以网页版不再因为缺 VITE_KUGOU_API_BASE 就报未配置；`mode` 是唯一判定依据，调用方按它选请求方式。
+ */
+export type KugouTransportAvailability = {
+    configured: true;
+    mode: KugouTransportMode;
 };
+
+// 一条解析顺序，availability 与 provider 的请求分岔共用：桌面 IPC 优先，其次是显式配置的 KuGouMusicApi
+// 实例，两者都没有时用酷狗自己的公开接口。
+export const getKugouTransportMode = (): KugouTransportMode => {
+    if (typeof window !== 'undefined' && window.electron?.kugouRequest) return 'electron';
+    return getWebApiBase() ? 'instance' : ANONYMOUS_PUBLIC_MODE;
+};
+
+/** 当前 runtime 的取数路径；匿名公开模式可用，所以这里不再有未配置的返回值。 */
+export const getKugouTransportAvailability = (): KugouTransportAvailability => ({
+    configured: true,
+    mode: getKugouTransportMode(),
+});
 
 // Routes one provider request through Electron IPC or an explicitly configured Web backend.
 export const requestKugou = async <T = unknown>(operation: KugouOperation, params: KugouParams = {}): Promise<T> => {

@@ -1,9 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Cleartext is denied everywhere. v1 plays local files, so nothing needs it, and opening it
-  globally (as the reference shell did) would weaken every request the WebView ever makes.
-  When online sources are added, permit specific domains here instead of flipping the base.
+  Cleartext policy.
+
+  The page itself never needs cleartext: it is served from the virtual https origin, and the
+  audio CDN it streams from is https. So the base config stays closed.
+
+  The exception below exists for one caller only: the shell's native /api/lyric-proxy. The web
+  build specifies some upstream lookups as plain http — KuGou's signed search is
+  `http://complexsearch.kugou.com/v2/search/song` and its search results hand out
+  `http://imge.kugou.com/...` cover URLs — and Android enforces the cleartext policy inside
+  HttpURLConnection itself, so without this the proxy would fail on exactly those requests.
+  This mirrors what the deployed serverless version of the same proxy does, where no such policy
+  exists. Scope it to the proxied music domains rather than opening the base config: unlike a
+  global switch, nothing else in the app gains cleartext.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">kugou.com</domain>
+        <domain includeSubdomains="true">qq.com</domain>
+        <domain includeSubdomains="true">y.gtimg.cn</domain>
+    </domain-config>
 </network-security-config>

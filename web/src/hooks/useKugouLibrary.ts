@@ -3,6 +3,7 @@ import i18n from '../i18n/config';
 import { omni } from '../services/onlineMusic/omni';
 import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccountStore';
 import type { MediaId, ProviderCollection, ProviderUser } from '../types/onlineMusic';
+import { ANONYMOUS_PUBLIC_MODE } from '../types/onlineMusic';
 import { handleLoginStatusFailure } from '../services/onlineMusic/loginStatusFailure';
 import {
     clearProviderAccountSnapshot,
@@ -118,7 +119,20 @@ export const useKugouLibrary = () => {
 
     const refresh = useCallback(async () => {
         const availability = omni.getProviderAvailability('kugou');
-        console.info('[KugouLibrary] refresh:start', { configured: availability.configured });
+        console.info('[KugouLibrary] refresh:start', { configured: availability.configured, mode: availability.mode });
+        // 匿名公开模式（网页版只走酷狗公开接口）没有账户后端：没有可刷新的账号，也没有能求解的登录态，
+        // 所以直接保持匿名，不去读登录状态、也不清任何会话，检索与播放仍由 provider 的公网路径承担。
+        if (availability.mode === ANONYMOUS_PUBLIC_MODE) {
+            updateAccount('kugou', {
+                status: 'anonymous',
+                user: null,
+                error: undefined,
+                hydration: 'ready',
+                freshness: 'fresh',
+            });
+            console.info('[KugouLibrary] refresh:anonymous-public');
+            return false;
+        }
         if (!omni.getProviderCapabilities('kugou').auth || !availability.configured) {
             updateAccount('kugou', {
                 status: availability.configured ? 'error' : 'anonymous',
