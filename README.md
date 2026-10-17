@@ -193,6 +193,7 @@ patches/0006-perf-runtime-default-the-frame-rate-gate-to-60-on-th.patch
 patches/0007-feat-debug-read-frame-timings-on-the-screen-because-.patch
 patches/0008-feat-netease-port-the-eapi-and-weapi-request-ciphers.patch
 patches/0009-feat-netease-answer-the-NetEase-API-routes-inside-th.patch
+patches/0010-fix-mobile-keep-one-upcoming-lyric-line-and-let-the-.patch
 ```
 
 - **0001 无句柄本地导入**：新增 OPFS 音频字节仓、`importLocalFiles(File[])` 与文件选择器入口、让 `FileEntryForImport.handle` 可选、三个播放访问器加字节仓回退、无句柄根目录不可重扫、以及让本地页签在只有文件导入可用时也可进入。
@@ -205,7 +206,9 @@ patches/0009-feat-netease-answer-the-NetEase-API-routes-inside-th.patch
 - **0008 网易请求加密**：`neteaseCrypto` 移植 eapi（AES-128-ECB + MD5 摘要签名）与 weapi（双层 AES-CBC + 教科书式 RSA）。WebCrypto 没有 ECB，也没有无填充 RSA，所以 ECB 用单块零 IV CBC 拼出来，`encSecKey` 用 BigInt 做平方-乘。单测向量由参考实现生成后钉死，常量一漂就红。
 - **0009 网易路由内置**：`neteaseDeviceProfile`（跨会话稳定的设备身份）、`neteaseEapiTransport`（请求组装与投递）、`neteaseLocalApi`（路由表 + cookie jar + 二维码本地生成 + 游客凭证十分钟重试窗口）、`neteaseQrImage`。`netease.ts` 的 `fetchWithCreds` 在 `isAndroidShell()` 且没有配置实例地址时走本地实现，桌面与网页版路径不变。壳侧新增 `NeteaseProxyHandler.java`。
 
-`web/` 的内容等于「上游 v0.7.20 + 这九个补丁」，可据此审计。
+- **0010 手机端两处界面修正**：字幕层的「下一句预览」在手机壳上只保留紧跟的一句并去掉椭圆底色（实测那块 298×122px 的区域正好是两行 + `-inset-x-10`/`-inset-y-6` 的光晕：它本来就已经贴着进度条上方，让它看着像悬在画面中间的是自身高度）；墙面工具面板从 `flex: none` + `overflow: hidden` 改成可收缩（120px 下界）+ 纵向滚动，矮视口下不再顶出屏幕上沿被裁掉。桌面构建维持原样。
+
+`web/` 的内容等于「上游 v0.7.20 + 这十个补丁」，可据此审计。
 
 ## 为什么壳里绝不申请音频焦点
 
