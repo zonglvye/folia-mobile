@@ -51,6 +51,8 @@ export const SETTINGS_ANCHOR_DEFINITIONS = {
     lyricApi: { section: 'integration', labelKey: 'options.lyricApi', electronOnly: true },
     stageMode: { section: 'integration', labelKey: 'options.stageMode' },
     navidrome: { section: 'integration', labelKey: 'navidrome.settings' },
+    // 只对网页/壳形态有意义：桌面版的网易后端是内置的，没有地址可填。
+    neteaseApi: { section: 'integration', labelKey: 'options.neteaseApiBase' },
 
     // StorageSettingsSection (LocalLibraryWatchSection renders inside it)
     cacheDetails: { section: 'storage', labelKey: 'options.cacheDetails' },

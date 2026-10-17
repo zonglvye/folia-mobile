@@ -15,6 +15,7 @@ import { resolveObsCopyHintKey } from '../../../services/obs/visualSettingsConfi
 import type { LyricApiStatus } from '../../../types/lyricApi';
 import { SettingsAnchor } from './navigation/SettingsAnchorContext';
 import SettingsSectionHeading from './navigation/SettingsSectionHeading';
+import NeteaseApiSettingsSection from './NeteaseApiSettingsSection';
 import { setStatusMessage } from '../../../stores/useStatusMessageStore';
 import { useThemeSettingsStore } from '../../../stores/useThemeSettingsStore';
 import { useStageSettingsStore } from '../../../stores/useStageSettingsStore';
@@ -923,6 +924,8 @@ const IntegrationSettingsSubview: React.FC<IntegrationSettingsSubviewProps> = ({
                     )}
                 </div>
             </SettingsAnchor>
+
+            <NeteaseApiSettingsSection />
         </>
     );
 };

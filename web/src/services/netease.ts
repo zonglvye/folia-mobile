@@ -1,5 +1,6 @@
 import { NeteaseUser, NeteasePlaylist, NoCopyrightRecommendation, SongPrivilege, SongResult } from "../types";
 import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from './onlineMusic/providerStorage';
+import { getBuildTimeApiBase, getProviderApiBaseOverride } from './onlineMusic/providerApiBase';
 import type { PersonalFmRequestOptions } from '../types/onlineMusic';
 import {
   isNeteaseRouteMissingResponse,
@@ -28,18 +29,9 @@ const getElectronBridge = () => {
 const isElectronRuntime = () =>
   Boolean(getElectronBridge() && typeof getElectronBridge()?.getNeteasePort === 'function');
 
-const getConfiguredApiBase = () => {
-  const viteEnv = typeof import.meta !== 'undefined' ? (import.meta as any).env : undefined;
-  if (viteEnv && typeof viteEnv.VITE_NETEASE_API_BASE === 'string' && viteEnv.VITE_NETEASE_API_BASE) {
-    return viteEnv.VITE_NETEASE_API_BASE;
-  }
-
-  if (typeof process !== 'undefined' && typeof process.env.VITE_NETEASE_API_BASE === 'string' && process.env.VITE_NETEASE_API_BASE) {
-    return process.env.VITE_NETEASE_API_BASE;
-  }
-
-  return null;
-};
+// 构建期注入的网关地址现在由 providerApiBase 单独持有——"哪个网关生效"是那一个模块的问题，
+// 这里只消费它，不再自己读一遍环境变量。
+const getConfiguredApiBase = () => getBuildTimeApiBase('netease');
 
 /** 网页版配置的远端 API 地址（自检与诊断报告用）；桌面版走内嵌后端，返回 null。 */
 export const getNeteaseRemoteApiBase = (): string | null => (isElectronRuntime() ? null : getConfiguredApiBase());
@@ -93,6 +85,11 @@ const getApiBase = async () => {
     // 有公网 IPv6 的机器上 localhost 会先解析到 ::1。
     return `http://127.0.0.1:${port}`;
   }
+
+  // 本机覆盖值排在最前，而且刻意不写进 API_BASE 缓存：它能在设置里随时被改，
+  // 缓存住第一次读到的值会让改完地址之后仍然打老网关。
+  const override = getProviderApiBaseOverride('netease');
+  if (override) return override;
 
   if (API_BASE) return API_BASE;
 
