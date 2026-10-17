@@ -1,0 +1,176 @@
+From 1966466b241bd55915975bcfafb198539adbc239 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 10:58:00 +0800
+Subject: [PATCH 6/7] perf(runtime): default the frame-rate gate to 60 on the
+ Android shell
+
+The gate existed but nothing turned it on. With no stored choice the parser
+returns "off", so every draw loop ran at the display's rate - on a 120Hz phone
+that is twice the frames and twice the work, which is the largest lever this app
+has before any individual renderer is touched.
+
+- platform.isAndroidShell: presence of the shell's `window.foliaAndroid` bridge
+  rather than a user agent, so the same build in a phone browser is not mistaken
+  for the packaged app.
+- frameRateLimiter.ensureVisualizerFrameRateDefault seeds the value into storage
+  instead of handing it straight to the limiter, so the graphics setting and the
+  gate cannot disagree - that setting reads the same key. The check is for the
+  key's presence, not its truthiness: an explicit "off" is still a choice.
+- index.tsx seeds it before installing the limiter. Desktop and browser builds
+  are untouched and keep unlimited frames.
+---
+ src/index.tsx                            |  8 +++-
+ src/utils/frameRateLimiter.ts            | 24 ++++++++++
+ src/utils/platform.ts                    | 10 ++++
+ test/unit/utils/frameRateLimiter.test.ts | 58 +++++++++++++++++++++++-
+ 4 files changed, 98 insertions(+), 2 deletions(-)
+
+diff --git a/src/index.tsx b/src/index.tsx
+index 1913f8d..e1ec34e 100644
+--- a/src/index.tsx
++++ b/src/index.tsx
+@@ -1,5 +1,6 @@
+ import { Buffer } from 'buffer';
+-import { installGlobalVisualizerFrameRateLimiter } from './utils/frameRateLimiter';
++import { ensureVisualizerFrameRateDefault, installGlobalVisualizerFrameRateLimiter } from './utils/frameRateLimiter';
++import { isAndroidShell } from './utils/platform';
+ import { installConsoleLogCapture } from './utils/consoleLogBuffer';
+ import { installDebugModule } from './services/debug/debugModule';
+ import { installMemorySampleFeed } from './services/debug/memorySamples';
+@@ -20,6 +21,11 @@ installMemorySampleFeed();
+ // only even then: a packaged build has nothing to do with the answer, so it should not pay the
+ // observer or the rows it retains.
+ // if (import.meta.env.DEV) installCoverSizeAudit();
++// 手机壳上首启默认 60 帧：没有这道闸时每个 draw loop 都跟着屏幕刷新率跑，120Hz 机器上
++// 可视化器和网格过场就是两倍的帧、两倍的开销。用户在图形设置里改过就永远听用户的。
++if (isAndroidShell()) {
++    ensureVisualizerFrameRateDefault(60);
++}
+ installGlobalVisualizerFrameRateLimiter();
+ 
+ void import('./bootstrap');
+diff --git a/src/utils/frameRateLimiter.ts b/src/utils/frameRateLimiter.ts
+index 110730a..a0d4432 100644
+--- a/src/utils/frameRateLimiter.ts
++++ b/src/utils/frameRateLimiter.ts
+@@ -39,6 +39,30 @@ export const parseVisualizerFrameRate = (value: string | null): VisualizerFrameR
+     return isVisualizerFrameRate(parsed) ? parsed : 'off';
+ };
+ 
++/**
++ * Seeds a first-run frame rate into storage, never overriding a choice the user already made.
++ *
++ * Written to storage rather than handed straight to the limiter so the graphics setting and the
++ * gate agree: that setting reads the same key, and a session whose limiter is capped while the UI
++ * still says "off" is impossible for the user to reason about or undo. An explicit "off" is a
++ * choice too, hence the presence check instead of a truthiness one.
++ */
++export const ensureVisualizerFrameRateDefault = (frameRate: VisualizerFrameRate): void => {
++    if (typeof window === 'undefined') {
++        return;
++    }
++
++    try {
++        if (window.localStorage.getItem(VISUALIZER_FRAME_RATE_STORAGE_KEY) !== null) {
++            return;
++        }
++        window.localStorage.setItem(VISUALIZER_FRAME_RATE_STORAGE_KEY, String(frameRate));
++    } catch {
++        // Storage can be unavailable (private mode, quota). Losing the default costs one startup
++        // worth of uncapped frames; throwing here would take the whole boot path down.
++    }
++};
++
+ // Decides whether a RAF tick should run under the configured FPS cap.
+ export const shouldProcessFrameAtRate = (
+     timestampMs: number,
+diff --git a/src/utils/platform.ts b/src/utils/platform.ts
+index c90ccbf..d8fba15 100644
+--- a/src/utils/platform.ts
++++ b/src/utils/platform.ts
+@@ -22,3 +22,13 @@ export const isSecondaryModifierPressed = (event: KeyboardEvent): boolean => (
+ 
+ /** Label for the primary modifier, for shortcut hints shown in the UI. */
+ export const PRIMARY_MODIFIER_LABEL = isMacPlatform ? 'Cmd' : 'Ctrl';
++
++/**
++ * Whether this build is running inside the Android shell that bundles the web app into the APK.
++ * The shell injects `window.foliaAndroid` (see services/deviceAudioLibrary.ts); a browser and the
++ * Electron main window both lack it. Detected by presence rather than user agent, so a phone
++ * browser visiting the same build is not mistaken for the packaged app.
++ */
++export const isAndroidShell = (): boolean => (
++    typeof window !== 'undefined' && Boolean((window as { foliaAndroid?: unknown }).foliaAndroid)
++);
+diff --git a/test/unit/utils/frameRateLimiter.test.ts b/test/unit/utils/frameRateLimiter.test.ts
+index 8e01c37..2ea229e 100644
+--- a/test/unit/utils/frameRateLimiter.test.ts
++++ b/test/unit/utils/frameRateLimiter.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from 'vitest';
+-import { createFrameRateLimitedRaf, installGlobalVisualizerFrameRateLimiter, parseVisualizerFrameRate, setGlobalVisualizerFrameRate, shouldProcessFrameAtRate } from '../../../src/utils/frameRateLimiter';
++import { createFrameRateLimitedRaf, ensureVisualizerFrameRateDefault, installGlobalVisualizerFrameRateLimiter, parseVisualizerFrameRate, setGlobalVisualizerFrameRate, shouldProcessFrameAtRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../../../src/utils/frameRateLimiter';
+ 
+ // test/unit/utils/frameRateLimiter.test.ts
+ 
+@@ -172,4 +172,60 @@ describe('frameRateLimiter', () => {
+             });
+         }
+     });
++
++    it('seeds the mobile default only when no frame rate was ever chosen', () => {
++        const previousWindow = (globalThis as { window?: Window; }).window;
++        const store = new Map<string, string>();
++        Object.defineProperty(globalThis, 'window', {
++            configurable: true,
++            value: {
++                requestAnimationFrame: () => 1,
++                cancelAnimationFrame: () => undefined,
++                localStorage: {
++                    getItem: (key: string) => store.get(key) ?? null,
++                    setItem: (key: string, value: string) => { store.set(key, value); },
++                },
++            },
++        });
++
++        try {
++            ensureVisualizerFrameRateDefault(60);
++            expect(store.get(VISUALIZER_FRAME_RATE_STORAGE_KEY)).toBe('60');
++
++            // An explicit choice is respected even when it is the "off" value, which is why the
++            // guard tests for presence instead of truthiness.
++            store.set(VISUALIZER_FRAME_RATE_STORAGE_KEY, 'off');
++            ensureVisualizerFrameRateDefault(60);
++            expect(store.get(VISUALIZER_FRAME_RATE_STORAGE_KEY)).toBe('off');
++        } finally {
++            Object.defineProperty(globalThis, 'window', {
++                configurable: true,
++                value: previousWindow,
++            });
++        }
++    });
++
++    it('survives a storage that refuses to read or write', () => {
++        const previousWindow = (globalThis as { window?: Window; }).window;
++        Object.defineProperty(globalThis, 'window', {
++            configurable: true,
++            value: {
++                requestAnimationFrame: () => 1,
++                cancelAnimationFrame: () => undefined,
++                localStorage: {
++                    getItem: () => { throw new Error('denied'); },
++                    setItem: () => { throw new Error('denied'); },
++                },
++            },
++        });
++
++        try {
++            expect(() => ensureVisualizerFrameRateDefault(60)).not.toThrow();
++        } finally {
++            Object.defineProperty(globalThis, 'window', {
++                configurable: true,
++                value: previousWindow,
++            });
++        }
++    });
+ });

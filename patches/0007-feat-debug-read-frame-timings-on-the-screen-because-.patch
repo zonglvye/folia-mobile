@@ -1,0 +1,499 @@
+From 450943566362773d0ed6c67d0bd783ccef7a92b4 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 10:58:00 +0800
+Subject: [PATCH 7/7] feat(debug): read frame timings on the screen, because
+ adb cannot reach this device
+
+The phone this ships to runs HarmonyOS, whose USB debug function is HDC on the
+vendor interface (ff/50) rather than the Android debug interface adb looks for
+(ff/42), and whose wireless debugging offers no pairing entry. `dumpsys gfxinfo`
+is therefore unavailable on the device that matters, so the numbers have to come
+from the only clock left and be read off the screen.
+
+- frameSamples: samples native rAF deltas into a preallocated ring buffer - one
+  float per frame, no allocation, no React - and reports p50/p90/p99, worst, jank
+  share, long tasks and heap. It samples through the limiter's saved native rAF,
+  otherwise it would measure our own cap instead of the device. Gaps over 250ms
+  are excluded: those are the app being backgrounded, not dropped frames.
+- FrameStatsHud: polls the sampler twice a second and draws the result. Toggled
+  by holding the top-left corner, because a landscape phone has no keyboard to
+  reach Alt+Shift+D with. The listener sits in the window capture phase and never
+  prevents the event, so it cannot steal input from the player.
+---
+ src/components/FrameStatsHud.tsx              | 152 ++++++++++++
+ src/components/app/overlays/AppOverlays.tsx   |   5 +
+ src/services/debug/frameSamples.ts            | 234 ++++++++++++++++++
+ test/unit/services/debug/frameSamples.test.ts |  41 +++
+ 4 files changed, 432 insertions(+)
+ create mode 100644 src/components/FrameStatsHud.tsx
+ create mode 100644 src/services/debug/frameSamples.ts
+ create mode 100644 test/unit/services/debug/frameSamples.test.ts
+
+diff --git a/src/components/FrameStatsHud.tsx b/src/components/FrameStatsHud.tsx
+new file mode 100644
+index 0000000..7c49d42
+--- /dev/null
++++ b/src/components/FrameStatsHud.tsx
+@@ -0,0 +1,152 @@
++import React, { useEffect, useState, useSyncExternalStore } from 'react';
++import {
++    EMPTY_FRAME_STATS,
++    isFrameHudVisible,
++    readFrameStats,
++    resetFrameSamples,
++    setFrameHudVisible,
++    subscribeToFrameHud,
++    type FrameStats,
++} from '../services/debug/frameSamples';
++import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
++
++// src/components/FrameStatsHud.tsx
++// The only performance readout that works on the phone this app ships to.
++//
++// adb is not available there (see services/debug/frameSamples.ts for why), so the numbers have to be
++// read off the screen. Toggled by holding the top-left corner for HOLD_MS: a phone in landscape has
++// no keyboard, so the Alt+Shift+D chord that opens DevDebugOverlay is out of reach, and the corner
++// hold is a gesture nothing else in the player claims.
++//
++// Polls at POLL_MS instead of subscribing to frames. Two updates a second is far below anything
++// React notices, and it keeps the sampler's per-frame path free of React entirely.
++
++const POLL_MS = 500;
++const HOLD_MS = 800;
++/** The hold only counts when it starts in this square of the top-left corner. */
++const CORNER_PX = 64;
++
++const fmt = (value: number, digits = 1) => value.toFixed(digits);
++
++const jankTone = (ms: number): string => {
++    if (ms > 50) return '#fb7185';
++    if (ms > 33.4) return '#fbbf24';
++    return '#a3e635';
++};
++
++const Row: React.FC<{ label: string; value: string; tone?: string }> = ({ label, value, tone }) => (
++    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
++        <span style={{ opacity: 0.55 }}>{label}</span>
++        <span style={{ color: tone ?? '#f8fafc', fontVariantNumeric: 'tabular-nums' }}>{value}</span>
++    </div>
++);
++
++const FrameStatsHud: React.FC = () => {
++    const visible = useSyncExternalStore(subscribeToFrameHud, isFrameHudVisible);
++    const [stats, setStats] = useState<FrameStats>(EMPTY_FRAME_STATS);
++    const [frameCap, setFrameCap] = useState('off');
++
++    // The corner hold. Registered at the window in the capture phase and never prevented, so the tap
++    // that starts it still reaches whatever is underneath: this may not steal input from the player.
++    useEffect(() => {
++        let timer: number | null = null;
++        const cancel = () => {
++            if (timer !== null) {
++                window.clearTimeout(timer);
++                timer = null;
++            }
++        };
++        const onPointerDown = (event: PointerEvent) => {
++            if (event.clientX > CORNER_PX || event.clientY > CORNER_PX) return;
++            cancel();
++            timer = window.setTimeout(() => {
++                timer = null;
++                setFrameHudVisible(!isFrameHudVisible());
++            }, HOLD_MS);
++        };
++        const options: AddEventListenerOptions = { capture: true, passive: true };
++        window.addEventListener('pointerdown', onPointerDown, options);
++        window.addEventListener('pointerup', cancel, options);
++        window.addEventListener('pointercancel', cancel, options);
++        return () => {
++            cancel();
++            window.removeEventListener('pointerdown', onPointerDown, options);
++            window.removeEventListener('pointerup', cancel, options);
++            window.removeEventListener('pointercancel', cancel, options);
++        };
++    }, []);
++
++    useEffect(() => {
++        if (!visible) return undefined;
++        const readCap = () => {
++            try {
++                setFrameCap(String(parseVisualizerFrameRate(window.localStorage.getItem(VISUALIZER_FRAME_RATE_STORAGE_KEY))));
++            } catch {
++                setFrameCap('unknown');
++            }
++        };
++        readCap();
++        setStats(readFrameStats());
++        const id = window.setInterval(() => {
++            setStats(readFrameStats());
++            readCap();
++        }, POLL_MS);
++        return () => window.clearInterval(id);
++    }, [visible]);
++
++    if (!visible) return null;
++
++    const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
++
++    return (
++        <div
++            style={{
++                position: 'fixed',
++                top: 8,
++                left: 8,
++                zIndex: 2147483000,
++                padding: '8px 10px',
++                borderRadius: 10,
++                background: 'rgba(2, 6, 23, 0.82)',
++                border: '1px solid rgba(148, 163, 184, 0.35)',
++                color: '#e2e8f0',
++                font: '500 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
++                minWidth: 214,
++                pointerEvents: 'auto',
++            }}
++        >
++            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
++                <span style={{ letterSpacing: '0.08em', opacity: 0.75 }}>FRAME</span>
++                <span style={{ display: 'flex', gap: 6 }}>
++                    <button
++                        type="button"
++                        onClick={() => resetFrameSamples()}
++                        style={{ cursor: 'pointer', color: '#93c5fd', background: 'none', border: 0, font: 'inherit', padding: 0 }}
++                    >
++                        reset
++                    </button>
++                    <button
++                        type="button"
++                        onClick={() => setFrameHudVisible(false)}
++                        style={{ cursor: 'pointer', color: '#fca5a5', background: 'none', border: 0, font: 'inherit', padding: 0 }}
++                    >
++                        close
++                    </button>
++                </span>
++            </div>
++            <Row label="fps" value={fmt(stats.fps)} tone={jankTone(1000 / Math.max(stats.fps, 0.01) / 2)} />
++            <Row label="p50" value={`${fmt(stats.p50)} ms`} />
++            <Row label="p90" value={`${fmt(stats.p90)} ms`} tone={jankTone(stats.p90)} />
++            <Row label="p99" value={`${fmt(stats.p99)} ms`} tone={jankTone(stats.p99)} />
++            <Row label="worst" value={`${fmt(stats.worst)} ms`} tone={jankTone(stats.worst)} />
++            <Row label="jank" value={`${fmt(stats.jankRatio * 100)} %`} tone={jankTone(stats.p90)} />
++            <Row label="frames" value={`${stats.frames} / ${fmt(stats.windowMs / 1000)}s`} />
++            <Row label="longtasks" value={`${stats.longTaskCount} · max ${fmt(stats.longestTaskMs, 0)} ms`} />
++            <Row label="heap" value={stats.heapMB === null ? 'n/a' : `${fmt(stats.heapMB, 0)} MB`} />
++            <Row label="dpr / cap" value={`${fmt(dpr)} / ${frameCap}`} />
++            <div style={{ marginTop: 4, opacity: 0.4, fontSize: 9 }}>hold top-left corner to toggle</div>
++        </div>
++    );
++};
++
++export default React.memo(FrameStatsHud);
+diff --git a/src/components/app/overlays/AppOverlays.tsx b/src/components/app/overlays/AppOverlays.tsx
+index ad3461d..84c13f7 100644
+--- a/src/components/app/overlays/AppOverlays.tsx
++++ b/src/components/app/overlays/AppOverlays.tsx
+@@ -4,6 +4,7 @@ import SearchWorkspace from '../search/SearchWorkspace';
+ import DevDebugOverlay from '../../DevDebugOverlay';
+ import MemoryMonitorWindow from '../../debug/MemoryMonitorWindow';
+ import NowPlayingToast from './NowPlayingToast';
++import FrameStatsHud from '../../FrameStatsHud';
+ import type { AppOverlaysModel } from './buildAppOverlaysModel';
+ import { countRender } from '../../../dev/renderCount';
+ import { useLatticeControlsStore } from '../../../stores/useLatticeControlsStore';
+@@ -37,6 +38,10 @@ const AppOverlays: React.FC<AppOverlaysProps> = ({ model }) => {
+                 && <FloatingPlayerControls {...floatingControls} />}
+ 
+             {nowPlayingToast && <NowPlayingToast {...nowPlayingToast} />}
++
++            {/* Mounted unconditionally: its corner-hold listener is the only way to turn it on
++                where there is no keyboard, so it has to be listening before it is visible. */}
++            <FrameStatsHud />
+         </>
+     );
+ };
+diff --git a/src/services/debug/frameSamples.ts b/src/services/debug/frameSamples.ts
+new file mode 100644
+index 0000000..4003ef8
+--- /dev/null
++++ b/src/services/debug/frameSamples.ts
+@@ -0,0 +1,234 @@
++// src/services/debug/frameSamples.ts
++// Frame-time sampling for the in-app performance HUD.
++//
++// The phone this ships to has no adb channel (HarmonyOS exposes HDC on the USB vendor interface,
++// not the Android debug interface), so `dumpsys gfxinfo` cannot be used on the device that actually
++// matters. The only clock left is successive requestAnimationFrame timestamps, and it answers the
++// question that was being asked anyway: did the compositor deliver the frames? A frame that never
++// arrived shows up as a doubled delta whether the delay came from the main thread or from the GPU.
++//
++// Cost discipline, because this exists to diagnose overhead and must not add any:
++// - the deltas live in a preallocated ring buffer, so a frame writes one float and no allocation;
++// - nothing here touches React. The HUD polls `readFrameStats` a couple of times a second, which is
++//   when the single array copy happens;
++// - sampling only runs while the HUD is visible.
++
++/** A frame slower than this is two missed 60 Hz vsyncs, i.e. the user saw a stutter. */
++export const FRAME_JANK_MS = 33.4;
++
++/**
++ * Gaps longer than this are not dropped frames: they are the WebView being backgrounded, the screen
++ * going off, or a debugger pause. Folding those into the percentiles would report a 60% jank ratio
++ * every time the user switched apps.
++ */
++const MAX_SAMPLE_MS = 250;
++
++/** ~10 s at 60 Hz, ~5 s at 120 Hz. Longer than a scroll gesture, short enough to stay current. */
++const FRAME_CAPACITY = 900;
++
++const FRAME_HUD_STORAGE_KEY = 'folia-frame-hud-visible';
++
++export interface FrameStats {
++    frames: number;
++    /** Total measured time covered by the samples, ms. */
++    windowMs: number;
++    fps: number;
++    p50: number;
++    p90: number;
++    p99: number;
++    worst: number;
++    /** Share of measured frames slower than FRAME_JANK_MS, 0..1. */
++    jankRatio: number;
++    longTaskCount: number;
++    longestTaskMs: number;
++    /** `performance.memory` is Chrome-only, so this is null where the runtime hides it. */
++    heapMB: number | null;
++}
++
++export const EMPTY_FRAME_STATS: FrameStats = {
++    frames: 0,
++    windowMs: 0,
++    fps: 0,
++    p50: 0,
++    p90: 0,
++    p99: 0,
++    worst: 0,
++    jankRatio: 0,
++    longTaskCount: 0,
++    longestTaskMs: 0,
++    heapMB: null,
++};
++
++/**
++ * Turns raw deltas into the numbers the HUD shows. Pure and exported so the percentile and
++ * jank-threshold behaviour is covered by a unit test instead of by reading the HUD on a phone.
++ */
++export const computeFrameStats = (
++    deltas: readonly number[],
++    longTask: { count: number; longestMs: number },
++    heapMB: number | null,
++): FrameStats => {
++    const frames = deltas.length;
++    if (frames === 0) {
++        return { ...EMPTY_FRAME_STATS, longTaskCount: longTask.count, longestTaskMs: longTask.longestMs, heapMB };
++    }
++
++    const sorted = deltas.slice().sort((a, b) => a - b);
++    let totalMs = 0;
++    let jankFrames = 0;
++    for (const delta of deltas) {
++        totalMs += delta;
++        if (delta > FRAME_JANK_MS) jankFrames += 1;
++    }
++    const percentile = (p: number) => sorted[Math.min(frames - 1, Math.max(0, Math.ceil(p * frames) - 1))];
++
++    return {
++        frames,
++        windowMs: totalMs,
++        fps: totalMs > 0 ? (frames * 1000) / totalMs : 0,
++        p50: percentile(0.5),
++        p90: percentile(0.9),
++        p99: percentile(0.99),
++        worst: sorted[frames - 1],
++        jankRatio: jankFrames / frames,
++        longTaskCount: longTask.count,
++        longestTaskMs: longTask.longestMs,
++        heapMB,
++    };
++};
++
++// ---- ring buffer -----------------------------------------------------------
++
++const deltas = new Float32Array(FRAME_CAPACITY);
++let head = 0;
++let count = 0;
++let lastTimestamp = 0;
++let rafHandle = 0;
++let longTaskCount = 0;
++let longestTaskMs = 0;
++let observer: PerformanceObserver | null = null;
++
++/**
++ * The limiter patches `window.requestAnimationFrame`; measuring through the patch would report the
++ * cap instead of the device. The limiter stashes the original here, so sample the real one.
++ */
++const nativeRequestAnimationFrame = (): ((callback: FrameRequestCallback) => number) => {
++    const patch = window as Window & { __foliaNativeRequestAnimationFrame?: (callback: FrameRequestCallback) => number };
++    return patch.__foliaNativeRequestAnimationFrame ?? window.requestAnimationFrame.bind(window);
++};
++
++/** Paired with `nativeRequestAnimationFrame`: a handle from one patch must be cancelled by it too. */
++const nativeCancelAnimationFrame = (): ((handle: number) => void) => {
++    const patch = window as Window & { __foliaNativeCancelAnimationFrame?: (handle: number) => void };
++    return patch.__foliaNativeCancelAnimationFrame ?? window.cancelAnimationFrame.bind(window);
++};
++
++const step = (timestamp: number) => {
++    if (lastTimestamp > 0) {
++        const delta = timestamp - lastTimestamp;
++        if (delta > 0 && delta < MAX_SAMPLE_MS) {
++            deltas[head] = delta;
++            head = (head + 1) % FRAME_CAPACITY;
++            if (count < FRAME_CAPACITY) count += 1;
++        }
++    }
++    lastTimestamp = timestamp;
++    rafHandle = nativeRequestAnimationFrame()(step);
++};
++
++const startSampling = () => {
++    if (rafHandle !== 0 || typeof window === 'undefined') return;
++    lastTimestamp = 0;
++    rafHandle = nativeRequestAnimationFrame()(step);
++
++    // Long tasks are the JS half of the story: a frame can be late because a task blocked the main
++    // thread for 200 ms. Not every engine has the entry type, and a throw here must not disable the
++    // frame sampling that does work.
++    try {
++        observer = new PerformanceObserver(list => {
++            for (const entry of list.getEntries()) {
++                longTaskCount += 1;
++                if (entry.duration > longestTaskMs) longestTaskMs = entry.duration;
++            }
++        });
++        observer.observe({ entryTypes: ['longtask'] });
++    } catch {
++        observer = null;
++    }
++};
++
++const stopSampling = () => {
++    if (rafHandle !== 0) {
++        nativeCancelAnimationFrame()(rafHandle);
++        rafHandle = 0;
++    }
++    observer?.disconnect();
++    observer = null;
++};
++
++/** Drops the window and the long-task counters. The next `readFrameStats` starts from empty. */
++export const resetFrameSamples = () => {
++    head = 0;
++    count = 0;
++    lastTimestamp = 0;
++    longTaskCount = 0;
++    longestTaskMs = 0;
++    notify();
++};
++
++export const readFrameStats = (): FrameStats => {
++    const samples: number[] = [];
++    const first = count === FRAME_CAPACITY ? head : 0;
++    for (let index = 0; index < count; index += 1) {
++        samples.push(deltas[(first + index) % FRAME_CAPACITY]);
++    }
++    const heap = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
++    const heapMB = heap?.usedJSHeapSize ? heap.usedJSHeapSize / (1024 * 1024) : null;
++    return computeFrameStats(samples, { count: longTaskCount, longestMs: longestTaskMs }, heapMB);
++};
++
++// ---- visibility ------------------------------------------------------------
++
++let visible = false;
++const listeners = new Set<() => void>();
++
++const notify = () => listeners.forEach(listener => listener());
++
++const readStoredVisibility = (): boolean => {
++    if (typeof window === 'undefined') return false;
++    try {
++        return window.localStorage.getItem(FRAME_HUD_STORAGE_KEY) === '1';
++    } catch {
++        return false;
++    }
++};
++
++visible = readStoredVisibility();
++if (visible) startSampling();
++
++export const isFrameHudVisible = () => visible;
++
++export const subscribeToFrameHud = (listener: () => void) => {
++    listeners.add(listener);
++    return () => { listeners.delete(listener); };
++};
++
++/** Persisted so the HUD survives the reload a phone brings back with the app. */
++export const setFrameHudVisible = (next: boolean) => {
++    if (visible === next) return;
++    visible = next;
++    try {
++        window.localStorage.setItem(FRAME_HUD_STORAGE_KEY, next ? '1' : '0');
++    } catch {
++        // Session-only: the switch still works, it just will not come back after a reload.
++    }
++    if (next) {
++        resetFrameSamples();
++        startSampling();
++    } else {
++        stopSampling();
++    }
++    notify();
++};
++
++export const toggleFrameHudVisible = () => setFrameHudVisible(!visible);
+diff --git a/test/unit/services/debug/frameSamples.test.ts b/test/unit/services/debug/frameSamples.test.ts
+new file mode 100644
+index 0000000..f9bc870
+--- /dev/null
++++ b/test/unit/services/debug/frameSamples.test.ts
+@@ -0,0 +1,41 @@
++import { describe, expect, it } from 'vitest';
++import { computeFrameStats, EMPTY_FRAME_STATS, FRAME_JANK_MS } from '../../../../src/services/debug/frameSamples';
++
++// test/unit/services/debug/frameSamples.test.ts
++
++describe('computeFrameStats', () => {
++    it('reports an empty window without dividing by zero', () => {
++        expect(computeFrameStats([], { count: 0, longestMs: 0 }, null)).toEqual(EMPTY_FRAME_STATS);
++    });
++
++    it('derives fps from the measured span rather than assuming 60', () => {
++        // Five frames spanning 116.8 ms, i.e. one 50 ms stall among healthy ones.
++        const stats = computeFrameStats([16.7, 16.7, 16.7, 16.7, 50], { count: 0, longestMs: 0 }, null);
++        expect(stats.frames).toBe(5);
++        expect(stats.windowMs).toBeCloseTo(116.8, 5);
++        expect(stats.fps).toBeCloseTo(42.8, 1);
++    });
++
++    it('counts only frames slower than the jank threshold', () => {
++        // Exactly at the threshold is not jank; one millisecond over is.
++        const stats = computeFrameStats([16.7, 16.7, FRAME_JANK_MS, FRAME_JANK_MS + 1], { count: 0, longestMs: 0 }, null);
++        expect(stats.jankRatio).toBeCloseTo(0.25, 5);
++    });
++
++    it('keeps percentiles ordered and carries long-task and heap readings through', () => {
++        const stats = computeFrameStats([16.7, 16.7, 16.7, 16.7, 50], { count: 2, longestMs: 120 }, 148.2);
++        expect(stats.p50).toBeCloseTo(16.7, 5);
++        expect(stats.p90).toBe(50);
++        expect(stats.p99).toBe(50);
++        expect(stats.worst).toBe(50);
++        expect(stats.longTaskCount).toBe(2);
++        expect(stats.longestTaskMs).toBe(120);
++        expect(stats.heapMB).toBeCloseTo(148.2, 5);
++    });
++
++    it('does not reorder the array it was given', () => {
++        const deltas = [30, 10, 20];
++        computeFrameStats(deltas, { count: 0, longestMs: 0 }, null);
++        expect(deltas).toEqual([30, 10, 20]);
++    });
++});

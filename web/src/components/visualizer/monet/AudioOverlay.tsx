@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import type { AudioBands, MonetAudioStyle, Theme } from '../../../types';
 import { colorWithAlpha } from '../colorMix';
+import { resolveCanvasPixelRatio } from '../../../utils/canvasPixelRatio';
 
 // src/components/visualizer/monet/AudioOverlay.tsx
 // Renders the bottom audio rail for Monet with a lightweight canvas loop in player mode and a static placeholder in preview mode.
@@ -179,7 +180,7 @@ const AudioOverlay: React.FC<AudioOverlayProps> = ({
 
         const resizeCanvas = () => {
             const rect = canvas.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
+            const dpr = resolveCanvasPixelRatio(window.devicePixelRatio);
             const nextWidth = Math.max(1, Math.floor(rect.width * dpr));
             const nextHeight = Math.max(1, Math.floor(rect.height * dpr));
             canvasWidth = rect.width;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createFrameRateLimitedRaf, installGlobalVisualizerFrameRateLimiter, parseVisualizerFrameRate, setGlobalVisualizerFrameRate, shouldProcessFrameAtRate } from '../../../src/utils/frameRateLimiter';
+import { createFrameRateLimitedRaf, ensureVisualizerFrameRateDefault, installGlobalVisualizerFrameRateLimiter, parseVisualizerFrameRate, setGlobalVisualizerFrameRate, shouldProcessFrameAtRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../../../src/utils/frameRateLimiter';
 
 // test/unit/utils/frameRateLimiter.test.ts
 
@@ -165,6 +165,62 @@ describe('frameRateLimiter', () => {
             setGlobalVisualizerFrameRate('off');
             expect(globalThis.window.requestAnimationFrame).toBe(originalRequestAnimationFrame);
             expect(globalThis.window.cancelAnimationFrame).toBe(originalCancelAnimationFrame);
+        } finally {
+            Object.defineProperty(globalThis, 'window', {
+                configurable: true,
+                value: previousWindow,
+            });
+        }
+    });
+
+    it('seeds the mobile default only when no frame rate was ever chosen', () => {
+        const previousWindow = (globalThis as { window?: Window; }).window;
+        const store = new Map<string, string>();
+        Object.defineProperty(globalThis, 'window', {
+            configurable: true,
+            value: {
+                requestAnimationFrame: () => 1,
+                cancelAnimationFrame: () => undefined,
+                localStorage: {
+                    getItem: (key: string) => store.get(key) ?? null,
+                    setItem: (key: string, value: string) => { store.set(key, value); },
+                },
+            },
+        });
+
+        try {
+            ensureVisualizerFrameRateDefault(60);
+            expect(store.get(VISUALIZER_FRAME_RATE_STORAGE_KEY)).toBe('60');
+
+            // An explicit choice is respected even when it is the "off" value, which is why the
+            // guard tests for presence instead of truthiness.
+            store.set(VISUALIZER_FRAME_RATE_STORAGE_KEY, 'off');
+            ensureVisualizerFrameRateDefault(60);
+            expect(store.get(VISUALIZER_FRAME_RATE_STORAGE_KEY)).toBe('off');
+        } finally {
+            Object.defineProperty(globalThis, 'window', {
+                configurable: true,
+                value: previousWindow,
+            });
+        }
+    });
+
+    it('survives a storage that refuses to read or write', () => {
+        const previousWindow = (globalThis as { window?: Window; }).window;
+        Object.defineProperty(globalThis, 'window', {
+            configurable: true,
+            value: {
+                requestAnimationFrame: () => 1,
+                cancelAnimationFrame: () => undefined,
+                localStorage: {
+                    getItem: () => { throw new Error('denied'); },
+                    setItem: () => { throw new Error('denied'); },
+                },
+            },
+        });
+
+        try {
+            expect(() => ensureVisualizerFrameRateDefault(60)).not.toThrow();
         } finally {
             Object.defineProperty(globalThis, 'window', {
                 configurable: true,

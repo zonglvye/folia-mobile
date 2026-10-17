@@ -22,3 +22,13 @@ export const isSecondaryModifierPressed = (event: KeyboardEvent): boolean => (
 
 /** Label for the primary modifier, for shortcut hints shown in the UI. */
 export const PRIMARY_MODIFIER_LABEL = isMacPlatform ? 'Cmd' : 'Ctrl';
+
+/**
+ * Whether this build is running inside the Android shell that bundles the web app into the APK.
+ * The shell injects `window.foliaAndroid` (see services/deviceAudioLibrary.ts); a browser and the
+ * Electron main window both lack it. Detected by presence rather than user agent, so a phone
+ * browser visiting the same build is not mistaken for the packaged app.
+ */
+export const isAndroidShell = (): boolean => (
+    typeof window !== 'undefined' && Boolean((window as { foliaAndroid?: unknown }).foliaAndroid)
+);

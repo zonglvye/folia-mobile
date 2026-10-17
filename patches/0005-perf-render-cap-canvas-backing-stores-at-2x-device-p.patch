@@ -1,0 +1,180 @@
+From fa8f2382d10f6ce0e1960084734bf79e60bd9568 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 10:58:00 +0800
+Subject: [PATCH 5/7] perf(render): cap canvas backing stores at 2x device
+ pixels
+
+A 3x phone was giving these canvases nine times the CSS-pixel area, and canvas
+cost scales with pixels: nine times the fill, nine times the texture upload. The
+visualizers that draw with motion, glow and blur cannot show the difference
+between 2x and 3x, but the frame time doubles. lumiere already made this trade
+(LUMIERE_MAX_RENDER_RESOLUTION = 2); this extends the same cap to the renderers
+that missed it.
+
+- src/utils/canvasPixelRatio: resolveCanvasPixelRatio clamps to 1..2, one place
+  for the cap and one place to change it.
+- cadenza's text canvas, monet's audio overlay, pendolo's clockwork canvas and
+  fume's stage now size their backing store and setTransform from it. Both
+  numbers come from the same helper on purpose: a backing store sized by one
+  ratio and transformed by another stretches the picture.
+---
+ .../visualizer/cadenza/VisualizerCadenza.tsx  |  3 ++-
+ .../visualizer/fume/useFumeCanvasStage.ts     |  5 ++--
+ .../visualizer/monet/AudioOverlay.tsx         |  3 ++-
+ .../pendolo/PendoloClockworkCanvas.tsx        |  3 ++-
+ src/utils/canvasPixelRatio.ts                 | 18 +++++++++++++
+ test/unit/utils/canvasPixelRatio.test.ts      | 27 +++++++++++++++++++
+ 6 files changed, 54 insertions(+), 5 deletions(-)
+ create mode 100644 src/utils/canvasPixelRatio.ts
+ create mode 100644 test/unit/utils/canvasPixelRatio.test.ts
+
+diff --git a/src/components/visualizer/cadenza/VisualizerCadenza.tsx b/src/components/visualizer/cadenza/VisualizerCadenza.tsx
+index c2d0d6f..c66308f 100644
+--- a/src/components/visualizer/cadenza/VisualizerCadenza.tsx
++++ b/src/components/visualizer/cadenza/VisualizerCadenza.tsx
+@@ -5,6 +5,7 @@ import { DEFAULT_CADENZA_TUNING, Line } from '../../../types';
+ import { getLineRenderEndTime } from '../../../utils/lyrics/renderHints';
+ import { colorWithAlpha, mixColors } from '../colorMix';
+ import { isGlowBlurQuantized } from '../../../utils/glowBlurQuantize';
++import { resolveCanvasPixelRatio } from '../../../utils/canvasPixelRatio';
+ import { prepareActiveAndUpcoming, useVisualizerRuntime } from '../runtime';
+ import { type VisualizerSharedProps } from '../definition';
+ import VisualizerShell from '../VisualizerShell';
+@@ -255,7 +256,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
+             lastFrameTimeRef.current = now;
+             const width = Math.max(Math.floor(viewport.width), 1);
+             const height = Math.max(Math.floor(viewport.height), 1);
+-            const dpr = window.devicePixelRatio || 1;
++            const dpr = resolveCanvasPixelRatio(window.devicePixelRatio);
+ 
+             if (textCanvas.width !== Math.floor(width * dpr) || textCanvas.height !== Math.floor(height * dpr)) {
+                 textCanvas.width = Math.floor(width * dpr);
+diff --git a/src/components/visualizer/fume/useFumeCanvasStage.ts b/src/components/visualizer/fume/useFumeCanvasStage.ts
+index 35d6641..b19006b 100644
+--- a/src/components/visualizer/fume/useFumeCanvasStage.ts
++++ b/src/components/visualizer/fume/useFumeCanvasStage.ts
+@@ -1,6 +1,7 @@
+ import { useEffect, useRef, type RefObject } from 'react';
+ import { drawFumeBackground } from '../FumeBackground';
+ import { isGlowBlurQuantized } from '../../../utils/glowBlurQuantize';
++import { resolveCanvasPixelRatio } from '../../../utils/canvasPixelRatio';
+ import type { StaticBlockSnapshot } from './fumeTypes';
+ import { resolveFumeBackgroundView, stepFumeCamera, syncFumeCameraToArticle } from './fumeCameraStep';
+ import { isFumeBlockOnScreen, resolveFumeBlockTiming, resolveFumeGlowBases, resolveFumeStaticLayers, type FumeStaticLayerInput } from './fumeBlockFrame';
+@@ -72,7 +73,7 @@ export const useFumeCanvasStage = (
+ 
+         const width = Math.max(Math.floor(viewport.width), 1);
+         const height = Math.max(Math.floor(viewport.height), 1);
+-        const dpr = window.devicePixelRatio || 1;
++        const dpr = resolveCanvasPixelRatio(window.devicePixelRatio);
+ 
+         if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+             canvas.width = Math.floor(width * dpr);
+@@ -97,7 +98,7 @@ export const useFumeCanvasStage = (
+ 
+             const currentWidth = Math.max(Math.floor(viewport.width), 1);
+             const currentHeight = Math.max(Math.floor(viewport.height), 1);
+-            const currentDpr = window.devicePixelRatio || 1;
++            const currentDpr = resolveCanvasPixelRatio(window.devicePixelRatio);
+ 
+             if (canvas.width !== Math.floor(currentWidth * currentDpr) || canvas.height !== Math.floor(currentHeight * currentDpr)) {
+                 canvas.width = Math.floor(currentWidth * currentDpr);
+diff --git a/src/components/visualizer/monet/AudioOverlay.tsx b/src/components/visualizer/monet/AudioOverlay.tsx
+index 9da0093..e9d39f0 100644
+--- a/src/components/visualizer/monet/AudioOverlay.tsx
++++ b/src/components/visualizer/monet/AudioOverlay.tsx
+@@ -1,6 +1,7 @@
+ import React, { useEffect, useRef } from 'react';
+ import type { AudioBands, MonetAudioStyle, Theme } from '../../../types';
+ import { colorWithAlpha } from '../colorMix';
++import { resolveCanvasPixelRatio } from '../../../utils/canvasPixelRatio';
+ 
+ // src/components/visualizer/monet/AudioOverlay.tsx
+ // Renders the bottom audio rail for Monet with a lightweight canvas loop in player mode and a static placeholder in preview mode.
+@@ -179,7 +180,7 @@ const AudioOverlay: React.FC<AudioOverlayProps> = ({
+ 
+         const resizeCanvas = () => {
+             const rect = canvas.getBoundingClientRect();
+-            const dpr = window.devicePixelRatio || 1;
++            const dpr = resolveCanvasPixelRatio(window.devicePixelRatio);
+             const nextWidth = Math.max(1, Math.floor(rect.width * dpr));
+             const nextHeight = Math.max(1, Math.floor(rect.height * dpr));
+             canvasWidth = rect.width;
+diff --git a/src/components/visualizer/pendolo/PendoloClockworkCanvas.tsx b/src/components/visualizer/pendolo/PendoloClockworkCanvas.tsx
+index c3d2281..4da6c9c 100644
+--- a/src/components/visualizer/pendolo/PendoloClockworkCanvas.tsx
++++ b/src/components/visualizer/pendolo/PendoloClockworkCanvas.tsx
+@@ -1,6 +1,7 @@
+ import React, { useEffect, useMemo, useRef } from 'react';
+ import type { MotionValue } from 'framer-motion';
+ import { colorWithAlpha } from '../colorMix';
++import { resolveCanvasPixelRatio } from '../../../utils/canvasPixelRatio';
+ import { drawPendoloClockwork2d } from './pendoloClockworkDraw2d';
+ import {
+     createPendoloClockworkMotionState,
+@@ -252,7 +253,7 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
+                 animationFrameId = window.requestAnimationFrame(render);
+                 return;
+             }
+-            const dpr = window.devicePixelRatio || 1;
++            const dpr = resolveCanvasPixelRatio(window.devicePixelRatio);
+ 
+             const renderer = rendererRef.current;
+             if (useWebglRef.current && !renderer?.isReady) useWebglRef.current = false;
+diff --git a/src/utils/canvasPixelRatio.ts b/src/utils/canvasPixelRatio.ts
+new file mode 100644
+index 0000000..55ea89b
+--- /dev/null
++++ b/src/utils/canvasPixelRatio.ts
+@@ -0,0 +1,18 @@
++/**
++ * 画布后备缓冲的像素倍率。
++ *
++ * 3 倍屏上直接乘 devicePixelRatio 会得到 9 倍像素量，而画布开销按像素数涨：一遍填充要写 9 倍内存，
++ * 合成时再传 9 倍贴图。可视化画面本身在动、带发光与模糊，2 倍和 3 倍的清晰度差别看不出来，
++ * 帧时间却差一倍以上。上限取 2 与 lumiere 的既有取舍保持一致
++ * （components/visualizer/lumiere/lumiereRuntimeTuning.ts 的 LUMIERE_MAX_RENDER_RESOLUTION）。
++ */
++export const CANVAS_MAX_PIXEL_RATIO = 2;
++
++/**
++ * 把 devicePixelRatio 钳到 1..CANVAS_MAX_PIXEL_RATIO。
++ * 调用方必须用它同时算后备缓冲尺寸和 setTransform：两者取不同的值会把画面拉花。
++ */
++export const resolveCanvasPixelRatio = (devicePixelRatio: number | undefined): number => {
++    const ratio = typeof devicePixelRatio === 'number' && Number.isFinite(devicePixelRatio) ? devicePixelRatio : 1;
++    return Math.min(CANVAS_MAX_PIXEL_RATIO, Math.max(1, ratio));
++};
+diff --git a/test/unit/utils/canvasPixelRatio.test.ts b/test/unit/utils/canvasPixelRatio.test.ts
+new file mode 100644
+index 0000000..100717b
+--- /dev/null
++++ b/test/unit/utils/canvasPixelRatio.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'vitest';
++import { CANVAS_MAX_PIXEL_RATIO, resolveCanvasPixelRatio } from '../../../src/utils/canvasPixelRatio';
++
++// test/unit/utils/canvasPixelRatio.test.ts
++
++describe('resolveCanvasPixelRatio', () => {
++    it('leaves 1x and 2x screens untouched', () => {
++        expect(resolveCanvasPixelRatio(1)).toBe(1);
++        expect(resolveCanvasPixelRatio(1.5)).toBe(1.5);
++        expect(resolveCanvasPixelRatio(2)).toBe(2);
++    });
++
++    it('caps denser screens at the shared maximum, so a 3x phone gets a 4x backing store instead of 9x', () => {
++        expect(resolveCanvasPixelRatio(3)).toBe(CANVAS_MAX_PIXEL_RATIO);
++        expect(resolveCanvasPixelRatio(3.5)).toBe(CANVAS_MAX_PIXEL_RATIO);
++        expect(resolveCanvasPixelRatio(4)).toBe(CANVAS_MAX_PIXEL_RATIO);
++    });
++
++    it('never drops below 1 for missing, zero, negative or non-finite input', () => {
++        expect(resolveCanvasPixelRatio(undefined)).toBe(1);
++        expect(resolveCanvasPixelRatio(Number.NaN)).toBe(1);
++        expect(resolveCanvasPixelRatio(Number.POSITIVE_INFINITY)).toBe(1);
++        expect(resolveCanvasPixelRatio(0)).toBe(1);
++        expect(resolveCanvasPixelRatio(0.5)).toBe(1);
++        expect(resolveCanvasPixelRatio(-2)).toBe(1);
++    });
++});

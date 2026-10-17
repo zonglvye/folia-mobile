@@ -17,9 +17,11 @@
 > - **v0.3.0 已在真机上确认可用：能检测到手机里的音乐，也能正常出声播放。**流式播放这条链路（含原生 Range 支持）是实测通过的。
 > - **v0.2.0 已在真机上确认可以启动**，但它的**手动导入本地音乐没有成功**：本地页签停在「未检测到任何本地音乐」。这条路径目前不可信，原因仍在排查——设备音乐库不经过它。
 > - **v0.3.1 的网易设置项尚未在真机上验证过**（它只是新增一个设置输入框与命令面板条目，不改变既有播放路径）。
+> - **v0.4.0 的三项改动尚未在真机上验证过**：画布像素倍率封顶、首启默认 60 帧、帧率 HUD。前两项只改渲染参数，第三项是一个可关闭的浮层，都不动播放链路。
 > - v0.3.0 以来**封面仍未接通**：设备音乐库里的歌显示占位图。
+> - **本仓库没有可用的 adb 通道**：目标机型跑 HarmonyOS，它的 USB 调试功能是 HDC（厂商接口 `ff/50`），不是 adb 认的 `ff/42`，无线调试也没有配对入口。`dumpsys gfxinfo` 在这台设备上取不到，性能数据只能靠 v0.4.0 新增的应用内帧率 HUD 读。
 >
-> 装上后如果有问题，欢迎带 `adb logcat -s FoliaShell` 的输出开 issue。
+> 装上后如果有问题，欢迎开 issue；能连 adb 的设备（非 HarmonyOS）可以附上 `adb logcat -s FoliaShell` 的输出。
 
 系统要求：Android 8.0+（minSdk 26）。
 
@@ -35,6 +37,7 @@
 - **设备音乐库（v0.3.0）**：直接读取手机自己的音乐收藏（MediaStore），**打开应用就能看到歌**，不需要手动挑文件。见下节。
 - **在线音源（酷狗）**：搜索、播放、歌词、封面，**不需要任何服务器**（见下节）。
 - **网易云 API 地址（v0.3.1）**：可在应用内填写自部署实例的地址，改完立即生效、无需重新打包（见下节）。
+- **性能（v0.4.0）**：画布后备缓冲的像素倍率封顶到 2 倍（3 倍屏从 9 倍像素量降到 4 倍）；手机壳首启默认把 rAF 限到 60 帧（图形设置里可改回 90/120 或关闭）；新增**应用内帧率 HUD**——长按屏幕左上角 0.8 秒开关，显示 p50/p90/p99、jank 比例、长任务与堆占用。
 
 **未完成**
 
@@ -156,14 +159,20 @@ patches/0001-feat-local-music-import-a-library-from-plain-File-ob.patch
 patches/0002-feat-kugou-reach-KuGou-s-public-endpoints-without-a-.patch
 patches/0003-feat-device-library-list-and-stream-the-phone-s-own-.patch
 patches/0004-feat-netease-make-the-API-gateway-address-configurab.patch
+patches/0005-perf-render-cap-canvas-backing-stores-at-2x-device-p.patch
+patches/0006-perf-runtime-default-the-frame-rate-gate-to-60-on-th.patch
+patches/0007-feat-debug-read-frame-timings-on-the-screen-because-.patch
 ```
 
 - **0001 无句柄本地导入**：新增 OPFS 音频字节仓、`importLocalFiles(File[])` 与文件选择器入口、让 `FileEntryForImport.handle` 可选、三个播放访问器加字节仓回退、无句柄根目录不可重扫、以及让本地页签在只有文件导入可用时也可进入。
 - **0002 酷狗免服务器路径**：传输层增加 `anonymous-public` 模式与能力声明，使音源在匿名模式下真正可选。
 - **0003 设备音乐库**：新增 `deviceAudioLibrary` / `deviceAudioSync` 两个服务，`LocalSong` 增加 `deviceAudioId`，播放来源解析为流地址。
 - **0004 网易 API 地址运行时可配置**：新增 `providerApiBase` 服务持有"哪个网关生效"，`netease.ts` 反向委托；集成设置新增输入项与连通性测试，并接入命令面板与三份 i18n。
+- **0005 画布像素倍率封顶**：新增 `canvasPixelRatio` 把 `devicePixelRatio` 钳到 1..2，cadenza / monet / pendolo / fume 四处画布的后备缓冲与 `setTransform` 同步改用同一倍率。上游 `lumiere` 早有同样取舍（`LUMIERE_MAX_RENDER_RESOLUTION`），这里只是补齐遗漏的渲染器。
+- **0006 手机壳首启默认 60 帧**：新增 `isAndroidShell`（看 `window.foliaAndroid` 是否存在，不看 UA）与 `ensureVisualizerFrameRateDefault`（只在存储里没有记录时播种，写进存储而不是只交给限帧器，保证图形设置与实际生效一致），启动期在装上限帧器之前调用。桌面与浏览器构建不受影响。
+- **0007 应用内帧率 HUD**：新增 `frameSamples` 采样器（预分配环形缓冲、每帧零分配、不碰 React；采样走限帧器保存的原生 rAF，否则只会测到我们自己的上限；超过 250ms 的间隔不计入，那是切后台而非掉帧）与 `FrameStatsHud`（500ms 轮询，长按左上角开关，监听挂在 window 捕获阶段且不 `preventDefault`，不会抢走播放器的输入）。
 
-`web/` 的内容等于「上游 v0.7.20 + 这四个补丁」，可据此审计。
+`web/` 的内容等于「上游 v0.7.20 + 这七个补丁」，可据此审计。
 
 ## 为什么壳里绝不申请音频焦点
 

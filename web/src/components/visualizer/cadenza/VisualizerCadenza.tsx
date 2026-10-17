@@ -5,6 +5,7 @@ import { DEFAULT_CADENZA_TUNING, Line } from '../../../types';
 import { getLineRenderEndTime } from '../../../utils/lyrics/renderHints';
 import { colorWithAlpha, mixColors } from '../colorMix';
 import { isGlowBlurQuantized } from '../../../utils/glowBlurQuantize';
+import { resolveCanvasPixelRatio } from '../../../utils/canvasPixelRatio';
 import { prepareActiveAndUpcoming, useVisualizerRuntime } from '../runtime';
 import { type VisualizerSharedProps } from '../definition';
 import VisualizerShell from '../VisualizerShell';
@@ -255,7 +256,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
             lastFrameTimeRef.current = now;
             const width = Math.max(Math.floor(viewport.width), 1);
             const height = Math.max(Math.floor(viewport.height), 1);
-            const dpr = window.devicePixelRatio || 1;
+            const dpr = resolveCanvasPixelRatio(window.devicePixelRatio);
 
             if (textCanvas.width !== Math.floor(width * dpr) || textCanvas.height !== Math.floor(height * dpr)) {
                 textCanvas.width = Math.floor(width * dpr);

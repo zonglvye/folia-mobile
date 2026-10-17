@@ -39,6 +39,30 @@ export const parseVisualizerFrameRate = (value: string | null): VisualizerFrameR
     return isVisualizerFrameRate(parsed) ? parsed : 'off';
 };
 
+/**
+ * Seeds a first-run frame rate into storage, never overriding a choice the user already made.
+ *
+ * Written to storage rather than handed straight to the limiter so the graphics setting and the
+ * gate agree: that setting reads the same key, and a session whose limiter is capped while the UI
+ * still says "off" is impossible for the user to reason about or undo. An explicit "off" is a
+ * choice too, hence the presence check instead of a truthiness one.
+ */
+export const ensureVisualizerFrameRateDefault = (frameRate: VisualizerFrameRate): void => {
+    if (typeof window === 'undefined') {
+        return;
+    }
+
+    try {
+        if (window.localStorage.getItem(VISUALIZER_FRAME_RATE_STORAGE_KEY) !== null) {
+            return;
+        }
+        window.localStorage.setItem(VISUALIZER_FRAME_RATE_STORAGE_KEY, String(frameRate));
+    } catch {
+        // Storage can be unavailable (private mode, quota). Losing the default costs one startup
+        // worth of uncapped frames; throwing here would take the whole boot path down.
+    }
+};
+
 // Decides whether a RAF tick should run under the configured FPS cap.
 export const shouldProcessFrameAtRate = (
     timestampMs: number,
