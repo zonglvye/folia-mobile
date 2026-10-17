@@ -1,0 +1,523 @@
+From 124c3c8ff6f8f4fe9688b5e303facecbaef5ea6b Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 14:49:08 +0800
+Subject: [PATCH 17/20] perf(debug): attribute a long task to the app phase it
+ started in
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The phone's engine has no `long-animation-frame` entry type - the 0.5.7 HUD
+reported `loaf: n/a` there - so the script / style+layout / render split is
+unavailable exactly where it was needed, and a reading like "19 long tasks,
+max 591 ms" stays unexplained. `longtask` is supported, and it does carry a
+start time, so the question the HUD can answer on this engine is "what was the
+app doing at that moment" - which the app can say about itself.
+
+services/debug/perfPhases.ts keeps a small ring of named intervals:
+
+- `beginPerfPhase(name)` opens one and closes it when the current task ends
+  (`setTimeout(0)` runs after the task and its microtasks), so the React commit
+  that follows a store update stays INSIDE the phase instead of after it;
+- `recordPerfPhase(name, start, end)` records an already-measured span;
+- `attributePerfPhase(time)` returns the phase a task starting at `time`
+  belongs to: containment first, then the nearest boundary within 60 ms, since
+  a phase's close timer and a task's start never line up exactly.
+
+The long-task observer now groups stalls by that phase and the HUD shows the
+worst one (`block  song change 591 ms · 2x`). Marked so far: a new song, a new
+lyric line (both at the playback store, where every path converges), the latent
+background's palette change, the wall's re-cull, and the cover palette sample.
+
+Also: the palette sampler now decodes with `img.decode()` before drawing. `onload`
+only means the bytes arrived; the decode itself happens inside the first
+`drawImage`, on the main thread, and a 1500 px cover decoded synchronously to
+produce a 50x50 sample is a long task nobody suspects. The pixels sampled are
+unchanged.
+---
+ src/components/FrameStatsHud.tsx              | 15 +++-
+ src/components/app/lattice/PosterWall.tsx     |  3 +
+ .../backgrounds/latent/LatentBackground.tsx   |  3 +
+ src/services/debug/frameSamples.ts            | 46 ++++++++++
+ src/services/debug/perfPhases.ts              | 83 ++++++++++++++++++
+ src/stores/usePlaybackStore.ts                | 17 +++-
+ src/utils/colorExtractor.ts                   | 20 ++++-
+ test/unit/services/debug/perfPhases.test.ts   | 84 +++++++++++++++++++
+ 8 files changed, 263 insertions(+), 8 deletions(-)
+ create mode 100644 src/services/debug/perfPhases.ts
+ create mode 100644 test/unit/services/debug/perfPhases.test.ts
+
+diff --git a/src/components/FrameStatsHud.tsx b/src/components/FrameStatsHud.tsx
+index 03027e8..62e2925 100644
+--- a/src/components/FrameStatsHud.tsx
++++ b/src/components/FrameStatsHud.tsx
+@@ -37,10 +37,10 @@ const fmt = (value: number, digits = 1) => value.toFixed(digits);
+ 
+ /** Keeps a script name inside the panel: the interesting part is the prefix, not the chunk hash. */
+ const SCRIPT_LABEL_MAX = 26;
+-const clipScriptLabel = (script: { name: string; file: string }, max: number) => {
+-    const full = script.file ? `${script.name} @ ${script.file}` : script.name;
+-    return full.length > max ? `${full.slice(0, max - 1)}…` : full;
+-};
++const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
++const clipScriptLabel = (script: { name: string; file: string }, max: number) => (
++    clip(script.file ? `${script.name} @ ${script.file}` : script.name, max)
++);
+ 
+ const jankTone = (ms: number): string => {
+     if (ms > 50) return '#fb7185';
+@@ -187,6 +187,13 @@ const FrameStatsHud: React.FC = () => {
+             ) : (
+                 <Row label="loaf" value="n/a" />
+             )}
++            {stats.stallSources.length > 0 && (
++                <Row
++                    label="block"
++                    tone={jankTone(stats.stallSources[0].worstMs)}
++                    value={`${clip(stats.stallSources[0].phase, 18)} ${fmt(stats.stallSources[0].worstMs, 0)} ms · ${stats.stallSources[0].count}x`}
++                />
++            )}
+             <div style={{ marginTop: 4, opacity: 0.4, fontSize: 9 }}>hold top-left corner to toggle</div>
+         </div>
+     );
+diff --git a/src/components/app/lattice/PosterWall.tsx b/src/components/app/lattice/PosterWall.tsx
+index 45bd412..34b3539 100644
+--- a/src/components/app/lattice/PosterWall.tsx
++++ b/src/components/app/lattice/PosterWall.tsx
+@@ -15,6 +15,7 @@ import { useLatticePosterSelection } from './useLatticePosterSelection';
+ import { useWallKeyboardFocus } from './useWallKeyboardFocus';
+ import { useWallPointerPan } from '../../wall/useWallPointerPan';
+ import { formatWorldTransform } from '../../wall/wallView';
++import { beginPerfPhase } from '../../../services/debug/perfPhases';
+ import type { LatticeTile } from './latticeModel';
+ import LatticePoster from './LatticePoster';
+ import { countRender } from '../../../dev/renderCount';
+@@ -125,6 +126,8 @@ export default function PosterWall({
+         publishCurrentPosterVisibility(next);
+         if (!updateBounds || frameRef.current !== null) return;
+         frameRef.current = requestAnimationFrame(() => {
++            // Re-culling mounts and unmounts posters, which is the wall's one per-gesture commit.
++            beginPerfPhase('wall cull');
+             setBounds(getWorldBounds(cameraRef.current, viewportRef.current));
+             frameRef.current = null;
+         });
+diff --git a/src/components/visualizer/backgrounds/latent/LatentBackground.tsx b/src/components/visualizer/backgrounds/latent/LatentBackground.tsx
+index b1beb6f..9a48453 100644
+--- a/src/components/visualizer/backgrounds/latent/LatentBackground.tsx
++++ b/src/components/visualizer/backgrounds/latent/LatentBackground.tsx
+@@ -13,6 +13,7 @@ import { extractRepresentativeColors } from '../../../../utils/colorExtractor';
+ import { updatePaperShaderUniforms } from '../../../../utils/paperShaderUniforms';
+ import { createPaperShaderReleaseRef, PAPER_SHADER_CONTEXT_ATTRIBUTES } from '../../../../utils/paperShaderContext';
+ import { isAndroidRuntime } from '../../../../utils/platform';
++import { beginPerfPhase } from '../../../../services/debug/perfPhases';
+ 
+ // src/components/visualizer/backgrounds/latent/LatentBackground.tsx
+ // Layers two cover-colored Paper shaders and drives their uniforms without React frame updates.
+@@ -153,6 +154,8 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
+ 
+         void extractRepresentativeColors(coverUrl, 6).then(colors => {
+             if (active) {
++                // The palette change re-renders both shader layers and rewrites their uniforms.
++                beginPerfPhase('bg palette');
+                 setCoverColors(colors);
+             }
+         });
+diff --git a/src/services/debug/frameSamples.ts b/src/services/debug/frameSamples.ts
+index 9696eba..8ce0ed0 100644
+--- a/src/services/debug/frameSamples.ts
++++ b/src/services/debug/frameSamples.ts
+@@ -6,6 +6,8 @@
+ // matters. The only clock left is successive requestAnimationFrame timestamps, and it answers the
+ // question that was being asked anyway: did the compositor deliver the frames? A frame that never
+ // arrived shows up as a doubled delta whether the delay came from the main thread or from the GPU.
++
++import { attributePerfPhase, resetPerfPhases } from './perfPhases';
+ //
+ // Cost discipline, because this exists to diagnose overhead and must not add any:
+ // - the deltas live in a preallocated ring buffer, so a frame writes one float and no allocation;
+@@ -46,6 +48,18 @@ export interface FrameStats {
+     /** Long animation frames seen since the last reset, and the cost split of the worst one. */
+     loafCount: number;
+     loafWorst: LongFrameBreakdown | null;
++    /**
++     * Long tasks grouped by the app phase they started in, worst first. The fallback for engines
++     * without `long-animation-frame`: it cannot say "script or paint", but it can say "this was the
++     * song change", which is the next question one would ask anyway.
++     */
++    stallSources: readonly StallSource[];
++}
++
++export interface StallSource {
++    phase: string;
++    count: number;
++    worstMs: number;
+ }
+ 
+ /**
+@@ -156,6 +170,7 @@ export const EMPTY_FRAME_STATS: FrameStats = {
+     heapMB: null,
+     loafCount: 0,
+     loafWorst: null,
++    stallSources: [],
+ };
+ 
+ /**
+@@ -167,6 +182,7 @@ export const computeFrameStats = (
+     longTask: { count: number; longestMs: number },
+     heapMB: number | null,
+     loaf: { count: number; worst: LongFrameBreakdown | null } = { count: 0, worst: null },
++    stallSources: readonly StallSource[] = [],
+ ): FrameStats => {
+     const frames = deltas.length;
+     if (frames === 0) {
+@@ -177,6 +193,7 @@ export const computeFrameStats = (
+             heapMB,
+             loafCount: loaf.count,
+             loafWorst: loaf.worst,
++            stallSources,
+         };
+     }
+ 
+@@ -203,6 +220,7 @@ export const computeFrameStats = (
+         heapMB,
+         loafCount: loaf.count,
+         loafWorst: loaf.worst,
++        stallSources,
+     };
+ };
+ 
+@@ -219,6 +237,28 @@ let observer: PerformanceObserver | null = null;
+ let loafCount = 0;
+ let loafWorst: LongFrameBreakdown | null = null;
+ let loafObserver: PerformanceObserver | null = null;
++/** Long tasks grouped by the phase they started in, keyed by phase name. */
++const stallByPhase = new Map<string, { count: number; worstMs: number }>();
++/** What a long task is attributed to when no phase was open: the app was idle by its own account. */
++const UNATTRIBUTED_STALL = '(no phase)';
++const MAX_STALL_SOURCES = 4;
++
++const recordStall = (phaseName: string | null, durationMs: number) => {
++    const key = phaseName ?? UNATTRIBUTED_STALL;
++    const current = stallByPhase.get(key);
++    if (current) {
++        current.count += 1;
++        if (durationMs > current.worstMs) current.worstMs = durationMs;
++        return;
++    }
++    stallByPhase.set(key, { count: 1, worstMs: durationMs });
++};
++
++/** Worst first, capped: the HUD has room for one line but a test wants to see the order. */
++const readStallSources = (): StallSource[] => [...stallByPhase.entries()]
++    .map(([phase, value]) => ({ phase, count: value.count, worstMs: value.worstMs }))
++    .sort((left, right) => right.worstMs - left.worstMs)
++    .slice(0, MAX_STALL_SOURCES);
+ 
+ /**
+  * The limiter patches `window.requestAnimationFrame`; measuring through the patch would report the
+@@ -261,6 +301,9 @@ const startSampling = () => {
+             for (const entry of list.getEntries()) {
+                 longTaskCount += 1;
+                 if (entry.duration > longestTaskMs) longestTaskMs = entry.duration;
++                // `longtask.attribution` names a container, not a cause. The app's own phase marks
++                // know what it was doing, so ask them about the moment the task started.
++                recordStall(attributePerfPhase(entry.startTime), entry.duration);
+             }
+         });
+         observer.observe({ entryTypes: ['longtask'] });
+@@ -307,6 +350,8 @@ export const resetFrameSamples = () => {
+     longestTaskMs = 0;
+     loafCount = 0;
+     loafWorst = null;
++    stallByPhase.clear();
++    resetPerfPhases();
+     notify();
+ };
+ 
+@@ -323,6 +368,7 @@ export const readFrameStats = (): FrameStats => {
+         { count: longTaskCount, longestMs: longestTaskMs },
+         heapMB,
+         { count: loafCount, worst: loafWorst },
++        readStallSources(),
+     );
+ };
+ 
+diff --git a/src/services/debug/perfPhases.ts b/src/services/debug/perfPhases.ts
+new file mode 100644
+index 0000000..28db8c2
+--- /dev/null
++++ b/src/services/debug/perfPhases.ts
+@@ -0,0 +1,83 @@
++// src/services/debug/perfPhases.ts
++// Names the main-thread work that was running when a stall began.
++//
++// The engine this app ships to does not support the `long-animation-frame` entry type (the frame HUD
++// reports `loaf: n/a` there), so the script / style+layout / render split is unavailable exactly where
++// it would be most useful. What is available is `longtask`, which says a task blocked the main thread
++// and when it started - so the question becomes "what was the app doing at that moment", and that is
++// something the app can answer about itself.
++//
++// A phase is deliberately coarse-grained: it is opened where something user-visible happens (a song
++// change, a lyric line change, the wall re-culling) and stays open until the current task ends, which
++// keeps the React commit that follows a state update INSIDE the phase instead of after it.
++
++export interface PerfPhaseMark {
++    name: string;
++    startTime: number;
++    endTime: number;
++}
++
++/** Bounded: this only has to cover whatever happened in the last few seconds. */
++const MAX_MARKS = 64;
++/** A stall that begins this soon after a phase closed is still that phase's work. */
++const ATTRIBUTION_TOLERANCE_MS = 60;
++
++let marks: PerfPhaseMark[] = [];
++
++const now = () => (typeof performance === 'undefined' ? 0 : performance.now());
++
++/**
++ * Opens a phase that closes when the current task ends. `setTimeout(0)` runs after the task and its
++ * microtasks, so work React commits synchronously at the end of an update stays inside the phase.
++ */
++export const beginPerfPhase = (name: string): void => {
++    if (typeof window === 'undefined') return;
++    const mark: PerfPhaseMark = { name, startTime: now(), endTime: Number.POSITIVE_INFINITY };
++    marks.push(mark);
++    if (marks.length > MAX_MARKS) marks = marks.slice(marks.length - MAX_MARKS);
++    setTimeout(() => {
++        mark.endTime = now();
++    }, 0);
++};
++
++/** A phase whose duration is already known (wrapping a synchronous call). */
++export const recordPerfPhase = (name: string, startTime: number, endTime: number): void => {
++    marks.push({ name, startTime, endTime });
++    if (marks.length > MAX_MARKS) marks = marks.slice(marks.length - MAX_MARKS);
++};
++
++/**
++ * Which phase a task that started at `startTime` belongs to, or null when nothing was close.
++ *
++ * Containment first, then the nearest boundary: a phase that begins a couple of milliseconds after
++ * the task did is still that task's work (it started, then a named call was entered), and a phase
++ * that ended just before it is the tail of the same work (the close timer is itself a task).
++ */
++export const attributePerfPhase = (startTime: number, toleranceMs = ATTRIBUTION_TOLERANCE_MS): string | null => {
++    let innermost: PerfPhaseMark | null = null;
++    let nearest: PerfPhaseMark | null = null;
++    let nearestGap = Number.POSITIVE_INFINITY;
++
++    for (const mark of marks) {
++        if (startTime >= mark.startTime && startTime <= mark.endTime) {
++            // Several phases can be open at once; the one that opened last is the most specific.
++            if (!innermost || mark.startTime > innermost.startTime) innermost = mark;
++            continue;
++        }
++        const gap = startTime < mark.startTime
++            ? mark.startTime - startTime
++            : startTime - (Number.isFinite(mark.endTime) ? mark.endTime : startTime);
++        if (gap > toleranceMs || gap > nearestGap) continue;
++        if (gap === nearestGap && nearest && mark.startTime <= nearest.startTime) continue;
++        nearest = mark;
++        nearestGap = gap;
++    }
++
++    return innermost?.name ?? nearest?.name ?? null;
++};
++
++export const recentPerfPhases = (): readonly PerfPhaseMark[] => marks;
++
++export const resetPerfPhases = (): void => {
++    marks = [];
++};
+diff --git a/src/stores/usePlaybackStore.ts b/src/stores/usePlaybackStore.ts
+index 6a4e48f..0932c28 100644
+--- a/src/stores/usePlaybackStore.ts
++++ b/src/stores/usePlaybackStore.ts
+@@ -2,6 +2,7 @@ import { create } from 'zustand';
+ import type React from 'react';
+ import { PlayerState, type ActiveLocalLyricsSource, type LyricData, type PlaybackContext, type ReplayGainMode, type SongResult } from '../types';
+ import { createCoverUrlResolver } from '../components/app/playback/createCoverUrlResolver';
++import { beginPerfPhase } from '../services/debug/perfPhases';
+ 
+ /** The now-playing picture, frozen for as long as a transition is running. */
+ export interface TransitionDisplay {
+@@ -98,7 +99,15 @@ export const usePlaybackStore = create<PlaybackStoreState>((set, get) => ({
+     lyricTimelineOffsetMs: 0,
+     transitionDisplay: null,
+ 
+-    setCurrentSong: (next) => set({ currentSong: resolve(next, get().currentSong) }),
++    // The two updates that a whole scene hangs off: a new song rebuilds the visualizer's cover, palette
++    // and shader colours, and a new lyric line rebuilds the word layers. Both mark a debug phase so a
++    // long task observed right afterwards can be attributed to one of them instead of staying a number
++    // (see services/debug/perfPhases.ts; the phone's engine has no `long-animation-frame`).
++    setCurrentSong: (next) => {
++        const resolved = resolve(next, get().currentSong);
++        if (resolved !== get().currentSong) beginPerfPhase('song change');
++        set({ currentSong: resolved });
++    },
+     setAudioSrc: (next) => set({ audioSrc: resolve(next, get().audioSrc) }),
+     // Plain setter: the extension transform (Folium `lyrics.transform`) runs in the lyrics
+     // pipeline (createLyricsSetter), so functional updates here never re-transform.
+@@ -107,7 +116,11 @@ export const usePlaybackStore = create<PlaybackStoreState>((set, get) => ({
+     setCachedCoverUrl: (next) => set({ cachedCoverUrl: resolve(next, get().cachedCoverUrl) }),
+     setDuration: (next) => set({ duration: resolve(next, get().duration) }),
+     setPlayerState: (next) => set({ playerState: resolve(next, get().playerState) }),
+-    setCurrentLineIndex: (next) => set({ currentLineIndex: resolve(next, get().currentLineIndex) }),
++    setCurrentLineIndex: (next) => {
++        const resolved = resolve(next, get().currentLineIndex);
++        if (resolved !== get().currentLineIndex) beginPerfPhase('lyric line');
++        set({ currentLineIndex: resolved });
++    },
+     setPlayQueue: (next) => set({ playQueue: resolve(next, get().playQueue) }),
+     setActivePlaybackContext: (next) => set({ activePlaybackContext: resolve(next, get().activePlaybackContext) }),
+     setIsFmMode: (next) => set({ isFmMode: resolve(next, get().isFmMode) }),
+diff --git a/src/utils/colorExtractor.ts b/src/utils/colorExtractor.ts
+index d1dfb52..25898e4 100644
+--- a/src/utils/colorExtractor.ts
++++ b/src/utils/colorExtractor.ts
+@@ -1,4 +1,5 @@
+ import { extractRepresentativeColorsFromPixels } from './colorPalette';
++import { recordPerfPhase } from '../services/debug/perfPhases';
+ 
+ // src/utils/colorExtractor.ts
+ 
+@@ -11,13 +12,17 @@ interface RGB {
+ /**
+  * 把图片缩到 50×50 读出像素（crossOrigin 匿名请求）。图片加载失败、没有 CORS 头、画布被污染（读像素抛
+  * SecurityError）时都返回 null。silent：失败时不打 warn（墙上一批头像取色时用，失败只是回退）。
++ *
++ * 解码先走 img.decode()：`onload` 只代表数据到手，真正解码发生在第一次 drawImage，而且是**主线程同步**做的。
++ * 一张 1500px 的封面在手机上同步解码就是一条几十上百毫秒的长任务 —— 而这里最终只要 50×50 的样本。decode()
++ * 把解码交给解码线程，drawImage 不再触发同步解码；引擎不支持或解码失败时照样退回直接绘制。
+  */
+ export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?: boolean } = {}): Promise<Uint8ClampedArray | null> => (
+     new Promise(resolve => {
+         const img = new Image();
+         img.crossOrigin = "Anonymous";
+ 
+-        img.onload = () => {
++        const readPixels = () => {
+             const canvas = document.createElement('canvas');
+             const ctx = canvas.getContext('2d');
+             if (!ctx) {
+@@ -31,9 +36,12 @@ export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?:
+             canvas.width = width;
+             canvas.height = height;
+ 
++            const startedAt = typeof performance === 'undefined' ? 0 : performance.now();
+             try {
+                 ctx.drawImage(img, 0, 0, width, height);
+-                resolve(ctx.getImageData(0, 0, width, height).data);
++                const pixels = ctx.getImageData(0, 0, width, height).data;
++                if (startedAt) recordPerfPhase('cover palette', startedAt, performance.now());
++                resolve(pixels);
+             } catch (error) {
+                 // 画布被跨源图片污染时 getImageData 抛错；不吞掉的话这个 Promise 永远不 resolve。
+                 if (!silent) console.warn("Failed to read image pixels for color extraction", error);
+@@ -41,6 +49,14 @@ export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?:
+             }
+         };
+ 
++        img.onload = () => {
++            if (typeof img.decode === 'function') {
++                img.decode().then(readPixels, readPixels);
++                return;
++            }
++            readPixels();
++        };
++
+         img.onerror = (e) => {
+             if (!silent) console.warn("Failed to load image for color extraction", e);
+             resolve(null);
+diff --git a/test/unit/services/debug/perfPhases.test.ts b/test/unit/services/debug/perfPhases.test.ts
+new file mode 100644
+index 0000000..9186857
+--- /dev/null
++++ b/test/unit/services/debug/perfPhases.test.ts
+@@ -0,0 +1,84 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import {
++    attributePerfPhase,
++    beginPerfPhase,
++    recentPerfPhases,
++    recordPerfPhase,
++    resetPerfPhases,
++} from '@/services/debug/perfPhases';
++
++// test/unit/services/debug/perfPhases.test.ts
++// Guards the fallback attribution path: the phone's engine has no `long-animation-frame`, so a long
++// task is attributed to whichever app phase was open when the task started. The rules that matter are
++// containment (an open phase wins), the innermost of several open phases, and the two near-miss cases
++// either side of an interval, because a phase's own close timer and a task's start never line up
++// exactly.
++
++afterEach(() => {
++    resetPerfPhases();
++    vi.unstubAllGlobals();
++    vi.useRealTimers();
++});
++
++describe('attributePerfPhase', () => {
++    it('returns nothing when no phase was ever opened', () => {
++        expect(attributePerfPhase(1000)).toBeNull();
++    });
++
++    it('attributes a task that started inside a finished phase', () => {
++        recordPerfPhase('song change', 100, 260);
++        expect(attributePerfPhase(150)).toBe('song change');
++        expect(attributePerfPhase(100)).toBe('song change');
++        expect(attributePerfPhase(260)).toBe('song change');
++    });
++
++    it('prefers the phase that opened last when several overlap', () => {
++        recordPerfPhase('song change', 100, 300);
++        recordPerfPhase('bg palette', 180, 280);
++        expect(attributePerfPhase(200)).toBe('bg palette');
++        expect(attributePerfPhase(120)).toBe('song change');
++    });
++
++    it('claims a task that started just before the phase opened', () => {
++        // A long task starts, then a promise continuation enters the named call a few ms later.
++        recordPerfPhase('cover palette', 104, 130);
++        expect(attributePerfPhase(100)).toBe('cover palette');
++    });
++
++    it('claims a task that started just after a phase closed, but not a distant one', () => {
++        recordPerfPhase('lyric line', 100, 200);
++        expect(attributePerfPhase(240)).toBe('lyric line');
++        expect(attributePerfPhase(1000)).toBeNull();
++    });
++
++    it('picks the nearer of two phases when the task falls between them', () => {
++        recordPerfPhase('wall cull', 100, 150);
++        recordPerfPhase('song change', 200, 250);
++        expect(attributePerfPhase(160)).toBe('wall cull');
++        expect(attributePerfPhase(190)).toBe('song change');
++    });
++
++    it('honours a wider tolerance when asked', () => {
++        recordPerfPhase('song change', 100, 200);
++        expect(attributePerfPhase(400, 250)).toBe('song change');
++    });
++});
++
++describe('beginPerfPhase', () => {
++    it('stays open until the current task ends, so a commit that follows stays inside it', () => {
++        vi.useFakeTimers();
++        vi.stubGlobal('window', {});
++        beginPerfPhase('song change');
++        // Still open: the timer that closes it runs after this task.
++        expect(attributePerfPhase(performance.now() + 5)).toBe('song change');
++        vi.runAllTimers();
++        expect(Number.isFinite(recentPerfPhases()[0].endTime)).toBe(true);
++    });
++
++    it('keeps the mark list bounded', () => {
++        vi.stubGlobal('window', {});
++        for (let index = 0; index < 200; index += 1) recordPerfPhase(`phase ${index}`, index, index + 1);
++        expect(recentPerfPhases().length).toBe(64);
++        expect(recentPerfPhases()[63].name).toBe('phase 199');
++    });
++});

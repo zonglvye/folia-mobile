@@ -1,6 +1,9 @@
+import { isAndroidRuntime } from './platform';
+
 // src/utils/glowBlurQuantize.ts
-// Lab > "Fix lyric animation freeze on Linux": whether the visualizers avoid asking Chromium's glyph
-// cache for an unbounded set of glyph sizes and shadow radii. While it is on:
+// Whether the visualizers avoid asking Chromium's glyph cache for an unbounded set of glyph sizes and
+// shadow radii (Lab > "Draw lyric glow on the compositor"; also the default on Android, where the
+// same re-raster is what caps the visualizer at 30 fps). While it is on:
 // - glows are drawn as `drop-shadow()` filters instead of text-shadows or canvas shadows (classic and
 //   partita in wordGlow.ts, claddagh, fume's live line via `setCanvasTextGlow`);
 // - canvas blur radii are whole pixels (`quantizeShadowBlur`);
@@ -13,18 +16,27 @@
 // and GPU process, and the renderer's soft limit of 1024 runs out after ~35 minutes of playback. The
 // full story is in docs/linux-glyph-cache-fd-leak.md.
 //
-// On by default on Linux only: the drop-shadow glow looks nearly, but not exactly, the same, and
-// elsewhere the leak costs a few MB a day - too little to be worth any visual difference.
+// On by default on Linux and on Android. Linux is where the leak ends in a frozen compositor. Android
+// is where it ends in a frame rate: classic re-rasterises the shadow mask of every glowing grapheme on
+// every frame, and that work sits on the raster thread, so it never shows up as a long task - it just
+// drops frames. Measured on the phone this app ships to with the in-app frame HUD: with this off the
+// visualizer reports p50 = p90 = p99 = 33.3 ms while `longtasks` stays at ~10 per 30 s, i.e. a locked
+// 30 fps from raster, not from JS. Everywhere else the leak costs a few MB a day, which is too little
+// to be worth any visual difference.
 
 export const GLOW_BLUR_QUANTIZE_STORAGE_KEY = 'visualizer_glow_blur_quantize';
 
-/** Linux, desktop or browser - the one platform where the leak ends in a frozen compositor. */
-const isLinuxRuntime = () => {
+/**
+ * Where drawing the halo as a compositor filter beats drawing it as a glyph shadow: Linux (a frozen
+ * compositor) and Android (a lost frame every other vsync, see above).
+ */
+const isGlyphShadowCostlyRuntime = () => {
     if (typeof window === 'undefined') return false;
     const electronPlatform = (window as Window & { electron?: { platform?: string } }).electron?.platform;
     if (electronPlatform) return electronPlatform === 'linux';
+    if (isAndroidRuntime()) return true;
     const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
-    return /Linux/.test(userAgent) && !/Android/.test(userAgent);
+    return /Linux/.test(userAgent);
 };
 
 /** The stored choice, or the platform default when the user never touched the switch. */
@@ -35,7 +47,7 @@ export const readStoredGlowBlurQuantize = (): boolean => {
     } catch {
         // Storage blocked: fall through to the default.
     }
-    return isLinuxRuntime();
+    return isGlyphShadowCostlyRuntime();
 };
 
 // Module-level on purpose, like the frame-rate limiter: the canvas renderers read it every frame and

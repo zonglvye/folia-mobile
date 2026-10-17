@@ -32,3 +32,14 @@ export const PRIMARY_MODIFIER_LABEL = isMacPlatform ? 'Cmd' : 'Ctrl';
 export const isAndroidShell = (): boolean => (
     typeof window !== 'undefined' && Boolean((window as { foliaAndroid?: unknown }).foliaAndroid)
 );
+
+/**
+ * Whether this is running on Android at all: the packaged shell, or a phone browser visiting the same
+ * build. Anything that trades picture quality for frame time asks this rather than `isAndroidShell`,
+ * because the GPU being weak is a property of the device, not of how the page was delivered.
+ */
+export const isAndroidRuntime = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    if (isAndroidShell()) return true;
+    return typeof navigator !== 'undefined' && /Android/.test(navigator.userAgent);
+};

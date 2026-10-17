@@ -19,6 +19,7 @@
 > - **v0.3.1 的网易设置项尚未在真机上验证过**（它只是新增一个设置输入框与命令面板条目，不改变既有播放路径）。
 > - **v0.4.0 的三项改动尚未在真机上验证过**：画布像素倍率封顶、首启默认 60 帧、帧率 HUD。前两项只改渲染参数，第三项是一个可关闭的浮层，都不动播放链路。
 > - **v0.5.0 的网易云内置实现尚未在真机上验证过**。它走通了整条链路（加密、路由、扫码、播放地址）的单测，但**网易的风控只有真机能回答**——扫码能不能出图、登录态能不能保持、播放地址会不会被拒，都还没有一次实测。酷狗的播放链路不受影响（两者互不依赖）。
+> - **v0.6.0 的性能改动有一半是量出来的、一半还没有对比读数**。帧率读数是真机读数（隐现背景下可视化器 `p50 33.3ms`，墙面 `59.5fps / p50 11.1ms`），据此把歌词发光改到合成层；但**改完之后的那次 A/B 对比还没做**——同一首歌、同一位置，`背景 = 隐现` 与 `背景 = 通用` 各读一次 fps，才能给这些改动记分。
 > - v0.3.0 以来**封面仍未接通**：设备音乐库里的歌显示占位图。
 > - **本仓库没有可用的 adb 通道**：目标机型跑 HarmonyOS，它的 USB 调试功能是 HDC（厂商接口 `ff/50`），不是 adb 认的 `ff/42`，无线调试也没有配对入口。`dumpsys gfxinfo` 在这台设备上取不到，性能数据只能靠 v0.4.0 新增的应用内帧率 HUD 读。
 >
@@ -40,6 +41,8 @@
 - **网易云 API 地址（v0.3.1）**：可在应用内填写自部署实例的地址，改完立即生效、无需重新打包（见下节）。
 - **网易云内置实现（v0.5.0）**：手机壳自己实现了 eapi/weapi 加密与十余条路由，**扫码登录 + 搜索 + 播放 + 歌词不需要部署任何东西**（见下节）。
 - **性能（v0.4.0）**：画布后备缓冲的像素倍率封顶到 2 倍（3 倍屏从 9 倍像素量降到 4 倍）；手机壳首启默认把 rAF 限到 60 帧（图形设置里可改回 90/120 或关闭）；新增**应用内帧率 HUD**——长按屏幕左上角 0.8 秒开关，显示 p50/p90/p99、jank 比例、长任务与堆占用。
+- **性能（v0.6.0）**：歌词发光在 Android 上改由合成层滤镜绘制（模糊按图层缓存，不再每帧重新光栅化每个发光字的阴影遮罩）；隐现背景的 mesh 着色器在手机上降到 640×360（少 75% 的像素，dithering 那层保持原分辨率，因为它的 4×4 图案按设备像素画、一掉分辨率就出摩尔纹）；帧率 HUD 的 `jank` 改成相对本次会话中位数的判据，长任务与帧样本来自同一个窗口，并会标出**长任务开始时应用在做什么**（`block lyric line 83 ms`、`block song change 591 ms`）。
+- **思索按钮可拖动（v0.6.0）**：触屏上那颗右键入口（灯泡）默认还在右上角，但按住就能拖到任何位置，松手即记住；叫出它的热区跟着按钮走，拖动不会顺手打开思索。
 
 **未完成**
 
@@ -194,6 +197,16 @@ patches/0007-feat-debug-read-frame-timings-on-the-screen-because-.patch
 patches/0008-feat-netease-port-the-eapi-and-weapi-request-ciphers.patch
 patches/0009-feat-netease-answer-the-NetEase-API-routes-inside-th.patch
 patches/0010-fix-mobile-keep-one-upcoming-lyric-line-and-let-the-.patch
+patches/0011-fix-bravais-do-not-draw-the-seam-title-quotes-around.patch
+patches/0012-fix-bravais-stop-the-seam-s-vertical-title-from-coll.patch
+patches/0013-fix-bravais-horizontal-title-on-short-seams-perf-net.patch
+patches/0014-perf-visualizer-draw-the-lyric-glow-on-the-composito.patch
+patches/0015-perf-visualizer-cut-the-mesh-shader-s-pixel-budget-o.patch
+patches/0016-perf-debug-split-a-long-frame-into-script-style-layo.patch
+patches/0017-perf-debug-attribute-a-long-task-to-the-app-phase-it.patch
+patches/0018-fix-debug-count-long-tasks-over-the-same-span-as-the.patch
+patches/0019-fix-debug-measure-jank-against-the-session-s-own-fra.patch
+patches/0020-feat-ponder-let-the-touch-button-be-dragged-and-reme.patch
 ```
 
 - **0001 无句柄本地导入**：新增 OPFS 音频字节仓、`importLocalFiles(File[])` 与文件选择器入口、让 `FileEntryForImport.handle` 可选、三个播放访问器加字节仓回退、无句柄根目录不可重扫、以及让本地页签在只有文件导入可用时也可进入。
@@ -207,8 +220,18 @@ patches/0010-fix-mobile-keep-one-upcoming-lyric-line-and-let-the-.patch
 - **0009 网易路由内置**：`neteaseDeviceProfile`（跨会话稳定的设备身份）、`neteaseEapiTransport`（请求组装与投递）、`neteaseLocalApi`（路由表 + cookie jar + 二维码本地生成 + 游客凭证十分钟重试窗口）、`neteaseQrImage`。`netease.ts` 的 `fetchWithCreds` 在 `isAndroidShell()` 且没有配置实例地址时走本地实现，桌面与网页版路径不变。壳侧新增 `NeteaseProxyHandler.java`。
 
 - **0010 手机端两处界面修正**：字幕层的「下一句预览」在手机壳上只保留紧跟的一句并去掉椭圆底色（实测那块 298×122px 的区域正好是两行 + `-inset-x-10`/`-inset-y-6` 的光晕：它本来就已经贴着进度条上方，让它看着像悬在画面中间的是自身高度）；墙面工具面板从 `flex: none` + `overflow: hidden` 改成可收缩（120px 下界）+ 纵向滚动，矮视口下不再顶出屏幕上沿被裁掉。桌面构建维持原样。
+- **0011 空标题不再画引号**：接缝的分隔线是「上引号 + 竖排标题 + 下引号」，标题为空时两个装饰引号就成了空带两端的两颗标点。改为一起收掉，并且那个空按钮不再进 Tab 序列与读屏。
+- **0012 竖排标题不再被压成零**：`.bravais-seam-vtitle-wrap` 是 `flex: 1 1 auto` + `min-height: 0`，前面的 crumbs / 过滤 / 动作行分完高度后它可以被压到 0，再叠上 `max-height: 100%` 与父级 `overflow: hidden`，一个字都不剩。给 96px 下界并让盒子跟着文字走。
+- **0013 矮接缝改横排标题 + 网易请求提速**：视口高度低于 480px 时标题单行横排加省略号、装饰引号不再绘制（18 个字的竖排标题在 300–340px 高的接缝里只能露出三四个字）。请求路径上：eapi 的 block 并行签发（30 块实测 0.658ms → 0.230ms，密文逐字节相同）、三个 AES 密钥只 import 一次并缓存、设备档案记忆化、cookie jar 只在真的变了才写回。
+- **0014 歌词发光改由合成层绘制**：`glowBlurQuantize` 的平台默认从「仅 Linux」扩到 Linux + Android。手机关闭它时 classic 会在每一帧重新光栅化每个发光字的阴影遮罩（framer 连续插值 text-shadow 半径，Chromium 按阴影在设备空间的 sigma 分桶缓存字形），主线程空闲而帧丢在光栅化。视觉差异实测整体 0.06% 像素、最差 8×8 区域 1.06%。
+- **0015 mesh 着色器的像素预算 + HUD 标出图层**：隐现背景的两层全屏着色器分开给预算——mesh 在 Android 上降到 640×360（23 万像素，比原来的 92 万少 75%），dithering 保持 1280×720（它按设备像素画 4×4 图案，掉分辨率就出摩尔纹）。HUD 增加 `vis` / `bg` / `glow` 三行，并新增 `isAndroidRuntime()`（壳或 Android UA），把「因为设备而降级」和「因为交付形态而降级」分开。
+- **0016 长帧拆成 script / style / render**：`frameSamples` 同时观察 `long-animation-frame`，保留最慢那一帧的脚本时间、样式+布局时间、渲染时间、脚本内部强制布局的位置与最慢脚本名。归约是导出纯函数并有单测（entry 混用绝对标记与时长，结束点容易算错）。没有该 entry 的引擎上 HUD 降级成 `loaf: n/a` 而不是丢掉长任务。
+- **0017 长任务归因到应用相位**：新增 `perfPhases` 环形记录（`beginPerfPhase` 在当前任务结束时闭合，所以 store 更新之后的 React 提交仍在相位内部）。长任务观察者按相位分组，HUD 显示最差的那一个。已标记的相位：换歌、换歌词行、隐现背景换调色板、墙面重新裁剪、封面取色。同时调色板取样改为先 `img.decode()` 再 `drawImage`（`onload` 只代表字节到了，解码发生在第一次 drawImage 里的主线程）。
+- **0018 长任务与帧样本同一个窗口**：帧百分位来自最近 900 帧，长任务却从上次重置起一直累加，两个数字描述的是不同时段（于是「19 个长任务、最长 591ms」会和 1.2% 的卡顿率并排出现）。现在长任务带时间戳存在同一个窗口里，计数、最大值与相位归因都从同一段切片算。
+- **0019 `jank` 用本次会话自己的帧时间做判据**：硬编码的 33.4ms（「漏两个 60Hz vsync」）在 90Hz 面板上会把「每三个 vsync 一帧」的齐整 33.3–33.5ms 判成 19% 卡顿。改为 `超过 max(33.4ms, 本窗口中位数 × 1.5)`，旧常数留作下界。同一补丁里，逐字发光在 `instant` / `fast` 展开模式下不再拆成每字一个 motion 节点（那两个变体在进入扫光分支前就返回，拆开只是让换行时多挂载一批节点）。
+- **0020 思索按钮可拖动**：触屏上那颗浮动入口从 `right-5 top-5` 改成可拖动的视口坐标（`ponderTouchButtonPosition` 负责钳位与序列化），拖动过程只写 DOM style 与 ref、不经过 React state，松手才写 store；96px 的召唤热区跟着按钮走；拖动不会触发打开思索，按住期间 4 秒的自动收起计时器不会把按钮从手指下面抽走。
 
-`web/` 的内容等于「上游 v0.7.20 + 这十个补丁」，可据此审计。
+`web/` 的内容等于「上游 v0.7.20 + 这二十个补丁」，可据此审计。
 
 ## 为什么壳里绝不申请音频焦点
 

@@ -430,7 +430,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
 
                     writeOverlayWord(overlayWord, {
                         outerTransform: `translate3d(${overlayAnchorX}px, ${overlayAnchorY}px, 0) rotate(${animatedState.rotation}deg) scale(${animatedState.scale})`,
-                        // Own compositing layer while Lab > Fix lyric animation freeze on Linux is on: otherwise every
+                        // Own compositing layer while Lab > Draw lyric glow on the compositor is on: otherwise every
                         // new scale re-rasterizes the word and its 40px text-shadow at a new device size, and Chromium's
                         // glyph cache leaks shared memory for each one. See utils/glowBlurQuantize.ts.
                         willChange: isGlowBlurQuantized() ? 'transform' : '',

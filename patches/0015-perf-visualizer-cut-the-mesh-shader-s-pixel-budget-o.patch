@@ -1,0 +1,227 @@
+From 21da9fc0fb2a355ba26d74198d1e4e64312cc731 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 14:11:31 +0800
+Subject: [PATCH 15/20] perf(visualizer): cut the mesh shader's pixel budget on
+ Android, name the layers in the HUD
+
+The GPU is the binding constraint, and it is measurable from the outside: the same
+build pins the visualizer at 30 fps on the phone this app targets and stutters far
+less on a flagship SoC. So the work is to spend fewer fragments and fewer
+full-screen passes per frame, not to look for more JS.
+
+This round:
+
+- The latent background renders TWO full-screen WebGL shaders, and they are not
+  equal citizens. The mesh gradient is a smooth colour field with one
+  low-frequency noise term, so a coarse backing store upscales invisibly; the
+  dithering layer draws its 4x4 pattern in device pixels
+  (`u_pxSize * u_pixelRatio` against `gl_FragCoord`) and aliases the moment it
+  loses resolution. They now have separate budgets: the mesh drops to 640x360 on
+  Android (230,400 px, -75 % against the old 921,600) while the dithering layer
+  keeps 1280x720 everywhere.
+
+- The frame HUD now names what it measured: `vis`, `bg` and `glow`. A frame-time
+  reading is only actionable next to the layers that produced it - "30 fps in the
+  visualizer" is a different bug with the shader background than without it, and
+  there is no adb on the target phone to look anything up on. This also makes the
+  previous commit's glow change verifiable from a screenshot (`glow: compositor`
+  vs `shadow`).
+
+utils/platform.ts gains `isAndroidRuntime` (packaged shell OR Android user agent)
+so quality-for-frame-time trade-offs ask about the device rather than about how
+the page was delivered; the glow switch now uses it too, and it is pinned apart
+from `isAndroidShell` by test/unit/utils/platform.test.ts.
+---
+ src/components/FrameStatsHud.tsx              | 14 +++++
+ .../backgrounds/latent/LatentBackground.tsx   | 12 +++-
+ src/utils/glowBlurQuantize.ts                 |  6 +-
+ src/utils/platform.ts                         | 11 ++++
+ test/unit/utils/platform.test.ts              | 55 +++++++++++++++++++
+ 5 files changed, 94 insertions(+), 4 deletions(-)
+ create mode 100644 test/unit/utils/platform.test.ts
+
+diff --git a/src/components/FrameStatsHud.tsx b/src/components/FrameStatsHud.tsx
+index 7c49d42..47451b3 100644
+--- a/src/components/FrameStatsHud.tsx
++++ b/src/components/FrameStatsHud.tsx
+@@ -9,6 +9,8 @@ import {
+     type FrameStats,
+ } from '../services/debug/frameSamples';
+ import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
++import { useVisualizerSettingsStore } from '../stores/useVisualizerSettingsStore';
++import { DEFAULT_VISUALIZER_BACKGROUND_MODE } from '../types/visualizerModes';
+ 
+ // src/components/FrameStatsHud.tsx
+ // The only performance readout that works on the phone this app ships to.
+@@ -20,6 +22,11 @@ import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../
+ //
+ // Polls at POLL_MS instead of subscribing to frames. Two updates a second is far below anything
+ // React notices, and it keeps the sampler's per-frame path free of React entirely.
++//
++// It also names what is on screen (visualizer mode, background mode, how the glow is drawn), because
++// a frame-time reading only means something next to the layers that produced it: "30 fps in the
++// visualizer" is a different bug with the shader background than without it, and the phone has no
++// adb to look anything up on.
+ 
+ const POLL_MS = 500;
+ const HOLD_MS = 800;
+@@ -45,6 +52,10 @@ const FrameStatsHud: React.FC = () => {
+     const visible = useSyncExternalStore(subscribeToFrameHud, isFrameHudVisible);
+     const [stats, setStats] = useState<FrameStats>(EMPTY_FRAME_STATS);
+     const [frameCap, setFrameCap] = useState('off');
++    const visualizerMode = useVisualizerSettingsStore(state => state.visualizerMode);
++    const backgroundMode = useVisualizerSettingsStore(state => state.visualizerBackgroundMode);
++    const randomModePerSong = useVisualizerSettingsStore(state => state.randomVisualizerModePerSong);
++    const glowOnCompositor = useVisualizerSettingsStore(state => state.glowBlurQuantize);
+ 
+     // The corner hold. Registered at the window in the capture phase and never prevented, so the tap
+     // that starts it still reaches whatever is underneath: this may not steal input from the player.
+@@ -144,6 +155,9 @@ const FrameStatsHud: React.FC = () => {
+             <Row label="longtasks" value={`${stats.longTaskCount} · max ${fmt(stats.longestTaskMs, 0)} ms`} />
+             <Row label="heap" value={stats.heapMB === null ? 'n/a' : `${fmt(stats.heapMB, 0)} MB`} />
+             <Row label="dpr / cap" value={`${fmt(dpr)} / ${frameCap}`} />
++            <Row label="vis" value={`${visualizerMode}${randomModePerSong ? ' ·random' : ''}`} />
++            <Row label="bg" value={backgroundMode ?? `${DEFAULT_VISUALIZER_BACKGROUND_MODE} (default)`} />
++            <Row label="glow" value={glowOnCompositor ? 'compositor' : 'shadow'} />
+             <div style={{ marginTop: 4, opacity: 0.4, fontSize: 9 }}>hold top-left corner to toggle</div>
+         </div>
+     );
+diff --git a/src/components/visualizer/backgrounds/latent/LatentBackground.tsx b/src/components/visualizer/backgrounds/latent/LatentBackground.tsx
+index d6d0de3..b1beb6f 100644
+--- a/src/components/visualizer/backgrounds/latent/LatentBackground.tsx
++++ b/src/components/visualizer/backgrounds/latent/LatentBackground.tsx
+@@ -12,6 +12,7 @@ import {
+ import { extractRepresentativeColors } from '../../../../utils/colorExtractor';
+ import { updatePaperShaderUniforms } from '../../../../utils/paperShaderUniforms';
+ import { createPaperShaderReleaseRef, PAPER_SHADER_CONTEXT_ATTRIBUTES } from '../../../../utils/paperShaderContext';
++import { isAndroidRuntime } from '../../../../utils/platform';
+ 
+ // src/components/visualizer/backgrounds/latent/LatentBackground.tsx
+ // Layers two cover-colored Paper shaders and drives their uniforms without React frame updates.
+@@ -27,6 +28,15 @@ interface LatentBackgroundProps {
+ }
+ 
+ const MAX_SHADER_PIXELS = 1280 * 720;
++/**
++ * Backing-store budget for the mesh layer alone. The two layers are not equal citizens: the mesh is a
++ * smooth colour field with one low-frequency noise term, so a coarse backing store upscales invisibly,
++ * while the dithering layer draws its 4x4 pattern in device pixels (`u_pxSize * u_pixelRatio` against
++ * `gl_FragCoord`) and aliases the moment it loses resolution. Phones get the cut because their GPU is
++ * the binding constraint - the in-app frame HUD pins the visualizer to 30 fps on the phone this app
++ * ships to while the wall, which runs no shader at all, reaches 40.9 fps.
++ */
++const MAX_MESH_SHADER_PIXELS = isAndroidRuntime() ? 640 * 360 : MAX_SHADER_PIXELS;
+ const PAUSED_SPEED_SCALE = 0.12;
+ const normalizeAudio = (value: number) => Math.min(1, Math.max(0, value / 255));
+ const clampShaderSpeed = (value: number) => Math.min(2, Math.max(0, value));
+@@ -303,7 +313,7 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
+                             ? 0
+                             : resolveLatentShaderSpeed(tuning.meshSpeed, tuning.meshAudioSpeed, 0, paused)}
+                         minPixelRatio={1}
+-                        maxPixelCount={MAX_SHADER_PIXELS}
++                        maxPixelCount={MAX_MESH_SHADER_PIXELS}
+                         webGlContextAttributes={PAPER_SHADER_CONTEXT_ATTRIBUTES}
+                         style={{ width: '100%', height: '100%' }}
+                     />
+diff --git a/src/utils/glowBlurQuantize.ts b/src/utils/glowBlurQuantize.ts
+index 2071bdc..a75ed48 100644
+--- a/src/utils/glowBlurQuantize.ts
++++ b/src/utils/glowBlurQuantize.ts
+@@ -1,4 +1,4 @@
+-import { isAndroidShell } from './platform';
++import { isAndroidRuntime } from './platform';
+ 
+ // src/utils/glowBlurQuantize.ts
+ // Whether the visualizers avoid asking Chromium's glyph cache for an unbounded set of glyph sizes and
+@@ -34,9 +34,9 @@ const isGlyphShadowCostlyRuntime = () => {
+     if (typeof window === 'undefined') return false;
+     const electronPlatform = (window as Window & { electron?: { platform?: string } }).electron?.platform;
+     if (electronPlatform) return electronPlatform === 'linux';
+-    if (isAndroidShell()) return true;
++    if (isAndroidRuntime()) return true;
+     const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
+-    return /Android/.test(userAgent) || /Linux/.test(userAgent);
++    return /Linux/.test(userAgent);
+ };
+ 
+ /** The stored choice, or the platform default when the user never touched the switch. */
+diff --git a/src/utils/platform.ts b/src/utils/platform.ts
+index d8fba15..8a22023 100644
+--- a/src/utils/platform.ts
++++ b/src/utils/platform.ts
+@@ -32,3 +32,14 @@ export const PRIMARY_MODIFIER_LABEL = isMacPlatform ? 'Cmd' : 'Ctrl';
+ export const isAndroidShell = (): boolean => (
+     typeof window !== 'undefined' && Boolean((window as { foliaAndroid?: unknown }).foliaAndroid)
+ );
++
++/**
++ * Whether this is running on Android at all: the packaged shell, or a phone browser visiting the same
++ * build. Anything that trades picture quality for frame time asks this rather than `isAndroidShell`,
++ * because the GPU being weak is a property of the device, not of how the page was delivered.
++ */
++export const isAndroidRuntime = (): boolean => {
++    if (typeof window === 'undefined') return false;
++    if (isAndroidShell()) return true;
++    return typeof navigator !== 'undefined' && /Android/.test(navigator.userAgent);
++};
+diff --git a/test/unit/utils/platform.test.ts b/test/unit/utils/platform.test.ts
+new file mode 100644
+index 0000000..3698929
+--- /dev/null
++++ b/test/unit/utils/platform.test.ts
+@@ -0,0 +1,55 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { isAndroidRuntime, isAndroidShell } from '@/utils/platform';
++
++// test/unit/utils/platform.test.ts
++// Pins the two Android questions apart. `isAndroidShell` is about how the page was delivered (the
++// packaged APK injects `window.foliaAndroid`); `isAndroidRuntime` is about the device, and is what
++// quality-for-frame-time trade-offs ask, because a phone browser hitting the same build has the same
++// weak GPU. Linux desktop must not answer yes to either: it has its own branches.
++
++const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 12; HUAWEI Pura 90 Pro Max) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
++const LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
++const WINDOWS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
++
++const useRuntime = (userAgent: string, windowValue: Record<string, unknown> = {}) => {
++    vi.stubGlobal('window', windowValue);
++    vi.stubGlobal('navigator', { userAgent });
++};
++
++afterEach(() => {
++    vi.unstubAllGlobals();
++});
++
++describe('isAndroidRuntime', () => {
++    it('is false where there is no window at all', () => {
++        expect(isAndroidRuntime()).toBe(false);
++    });
++
++    it('follows the user agent, so a phone browser counts as Android', () => {
++        useRuntime(ANDROID_UA);
++        expect(isAndroidRuntime()).toBe(true);
++        useRuntime(WINDOWS_UA);
++        expect(isAndroidRuntime()).toBe(false);
++    });
++
++    it('counts the packaged shell even when the user agent says nothing', () => {
++        useRuntime(WINDOWS_UA, { foliaAndroid: {} });
++        expect(isAndroidRuntime()).toBe(true);
++    });
++
++    it('never answers yes for Linux or Windows desktop', () => {
++        useRuntime(LINUX_UA);
++        expect(isAndroidRuntime()).toBe(false);
++        useRuntime(WINDOWS_UA);
++        expect(isAndroidRuntime()).toBe(false);
++    });
++});
++
++describe('isAndroidShell', () => {
++    it('is decided by the bridge, not by the user agent', () => {
++        useRuntime(ANDROID_UA);
++        expect(isAndroidShell()).toBe(false);
++        useRuntime(WINDOWS_UA, { foliaAndroid: {} });
++        expect(isAndroidShell()).toBe(true);
++    });
++});

@@ -3,7 +3,7 @@ import type { FumeBlockTiming } from './fumeBlockFrame';
 import { drawFumeLiveBlock, type FumeLiveBlockParams } from './fumeCanvasText';
 
 // src/components/visualizer/fume/fumeLiveRaster.ts
-// Draws a printing block for Lab > Fix lyric animation freeze on Linux without asking Chromium's glyph
+// Draws a printing block for Lab > Draw lyric glow on the compositor without asking Chromium's glyph
 // cache for a new size every frame.
 //
 // Drawn straight onto the stage under the camera transform, the live block's text is rasterized at a

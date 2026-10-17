@@ -102,13 +102,25 @@ const loadSession = (): NeteaseSession => ({
     jar: parseCookieString(readProviderSessionValue('netease', COOKIE_KEY, ['netease_cookie'])),
 });
 
+/**
+ * 上一次写进存储的 cookie 串。
+ *
+ * `localStorage.setItem` 是同步的，会参与主线程的样式/脚本调度；而播放一首歌就要走
+ * 详情 + 播放地址 + 歌词三次请求，每次原样重写一遍同样的字符串纯属浪费。
+ * 只在内容真的变了的时候写。
+ */
+let lastPersistedCookie: string | null = null;
+
 /** 把 jar 写回存储；顺便让诊断里的“anonymous cookie”一栏说实话。 */
 const persistSession = (session: NeteaseSession): void => {
     const serialized = serializeCookieJar(session.jar);
-    if (serialized) {
-        writeProviderSessionValue('netease', COOKIE_KEY, serialized);
-    } else {
-        removeProviderSessionValue('netease', COOKIE_KEY, ['netease_cookie']);
+    if (serialized !== lastPersistedCookie) {
+        if (serialized) {
+            writeProviderSessionValue('netease', COOKIE_KEY, serialized);
+        } else {
+            removeProviderSessionValue('netease', COOKIE_KEY, ['netease_cookie']);
+        }
+        lastPersistedCookie = serialized;
     }
     if (session.jar.MUSIC_A && !session.jar.MUSIC_U) {
         writeProviderSessionValue('netease', ANONYMOUS_COOKIE_KEY, session.jar.MUSIC_A);

@@ -1,0 +1,168 @@
+From 6435a6becc01fb45cbd690817da1f16c50d103d2 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 15:00:07 +0800
+Subject: [PATCH 18/20] fix(debug): count long tasks over the same span as the
+ frame samples
+
+The HUD's two halves described different periods. `p50`/`p99`/`worst` come from
+the last 900 frame deltas (~28 s at 30 fps), while `longtasks` accumulated from
+the last reset and never aged out - so the phone reported "19 long tasks, max
+591 ms" next to a 1.2 % jank ratio, and a single 591 ms stall would by itself
+have accounted for more jank than that. The 591 ms was startup work that had
+long since left the frame window.
+
+Long tasks are now kept as timestamped samples with the phase they started in,
+and both readings are derived from the same span: count and worst are taken over
+the frames' own window, and the per-phase grouping is computed from the same
+slice. This replaces the accumulating counters and the phase Map, so there is
+one window rather than three.
+---
+ src/services/debug/frameSamples.ts | 87 ++++++++++++++++++++----------
+ 1 file changed, 60 insertions(+), 27 deletions(-)
+
+diff --git a/src/services/debug/frameSamples.ts b/src/services/debug/frameSamples.ts
+index 8ce0ed0..cb74a41 100644
+--- a/src/services/debug/frameSamples.ts
++++ b/src/services/debug/frameSamples.ts
+@@ -231,34 +231,57 @@ let head = 0;
+ let count = 0;
+ let lastTimestamp = 0;
+ let rafHandle = 0;
+-let longTaskCount = 0;
+-let longestTaskMs = 0;
+-let observer: PerformanceObserver | null = null;
+ let loafCount = 0;
+ let loafWorst: LongFrameBreakdown | null = null;
+ let loafObserver: PerformanceObserver | null = null;
+-/** Long tasks grouped by the phase they started in, keyed by phase name. */
+-const stallByPhase = new Map<string, { count: number; worstMs: number }>();
++let observer: PerformanceObserver | null = null;
++
++/**
++ * Long tasks with their timestamps and the phase each started in.
++ *
++ * Timestamped on purpose: the frame percentiles cover only the last FRAME_CAPACITY frames (~28 s at
++ * 30 fps), so a counter that accumulated since the last reset made the two halves of the HUD describe
++ * different periods. That is how "19 long tasks, max 591 ms" appeared next to a 1.2 % jank ratio that
++ * a single 591 ms stall would by itself have exceeded - the 591 ms was startup, long outside the frame
++ * window. Both halves now answer for the same span.
++ */
++interface StallSample {
++    /** When the task started, on the same clock as the frame timestamps. */
++    at: number;
++    ms: number;
++    phase: string;
++}
++
++const MAX_STALL_SAMPLES = 256;
++let stallSamples: StallSample[] = [];
+ /** What a long task is attributed to when no phase was open: the app was idle by its own account. */
+ const UNATTRIBUTED_STALL = '(no phase)';
+ const MAX_STALL_SOURCES = 4;
+ 
+-const recordStall = (phaseName: string | null, durationMs: number) => {
+-    const key = phaseName ?? UNATTRIBUTED_STALL;
+-    const current = stallByPhase.get(key);
+-    if (current) {
+-        current.count += 1;
+-        if (durationMs > current.worstMs) current.worstMs = durationMs;
+-        return;
++const recordStall = (at: number, durationMs: number, phaseName: string | null) => {
++    stallSamples.push({ at, ms: durationMs, phase: phaseName ?? UNATTRIBUTED_STALL });
++    if (stallSamples.length > MAX_STALL_SAMPLES) {
++        stallSamples = stallSamples.slice(stallSamples.length - MAX_STALL_SAMPLES);
+     }
+-    stallByPhase.set(key, { count: 1, worstMs: durationMs });
+ };
+ 
+ /** Worst first, capped: the HUD has room for one line but a test wants to see the order. */
+-const readStallSources = (): StallSource[] => [...stallByPhase.entries()]
+-    .map(([phase, value]) => ({ phase, count: value.count, worstMs: value.worstMs }))
+-    .sort((left, right) => right.worstMs - left.worstMs)
+-    .slice(0, MAX_STALL_SOURCES);
++const readStallSources = (windowStart: number): StallSource[] => {
++    const byPhase = new Map<string, StallSource>();
++    for (const sample of stallSamples) {
++        if (sample.at < windowStart) continue;
++        const current = byPhase.get(sample.phase);
++        if (!current) {
++            byPhase.set(sample.phase, { phase: sample.phase, count: 1, worstMs: sample.ms });
++            continue;
++        }
++        current.count += 1;
++        if (sample.ms > current.worstMs) current.worstMs = sample.ms;
++    }
++    return [...byPhase.values()]
++        .sort((left, right) => right.worstMs - left.worstMs)
++        .slice(0, MAX_STALL_SOURCES);
++};
+ 
+ /**
+  * The limiter patches `window.requestAnimationFrame`; measuring through the patch would report the
+@@ -299,11 +322,9 @@ const startSampling = () => {
+     try {
+         observer = new PerformanceObserver(list => {
+             for (const entry of list.getEntries()) {
+-                longTaskCount += 1;
+-                if (entry.duration > longestTaskMs) longestTaskMs = entry.duration;
+                 // `longtask.attribution` names a container, not a cause. The app's own phase marks
+                 // know what it was doing, so ask them about the moment the task started.
+-                recordStall(attributePerfPhase(entry.startTime), entry.duration);
++                recordStall(entry.startTime, entry.duration, attributePerfPhase(entry.startTime));
+             }
+         });
+         observer.observe({ entryTypes: ['longtask'] });
+@@ -341,16 +362,14 @@ const stopSampling = () => {
+     loafObserver = null;
+ };
+ 
+-/** Drops the window, the long-task counters and the slowest-frame breakdown. */
++/** Drops the window, the long-task samples and the slowest-frame breakdown. */
+ export const resetFrameSamples = () => {
+     head = 0;
+     count = 0;
+     lastTimestamp = 0;
+-    longTaskCount = 0;
+-    longestTaskMs = 0;
+     loafCount = 0;
+     loafWorst = null;
+-    stallByPhase.clear();
++    stallSamples = [];
+     resetPerfPhases();
+     notify();
+ };
+@@ -358,17 +377,31 @@ export const resetFrameSamples = () => {
+ export const readFrameStats = (): FrameStats => {
+     const samples: number[] = [];
+     const first = count === FRAME_CAPACITY ? head : 0;
++    let windowMs = 0;
+     for (let index = 0; index < count; index += 1) {
+-        samples.push(deltas[(first + index) % FRAME_CAPACITY]);
++        const delta = deltas[(first + index) % FRAME_CAPACITY];
++        samples.push(delta);
++        windowMs += delta;
+     }
+     const heap = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
+     const heapMB = heap?.usedJSHeapSize ? heap.usedJSHeapSize / (1024 * 1024) : null;
++
++    // Stalls are counted over the same span as the frames, so the two halves of the HUD describe one
++    // period instead of two (see StallSample).
++    const now = typeof performance === 'undefined' ? 0 : performance.now();
++    const windowStart = windowMs > 0 ? now - windowMs : now;
++    const inWindow = stallSamples.filter(sample => sample.at >= windowStart);
++    let longestTaskMs = 0;
++    for (const sample of inWindow) {
++        if (sample.ms > longestTaskMs) longestTaskMs = sample.ms;
++    }
++
+     return computeFrameStats(
+         samples,
+-        { count: longTaskCount, longestMs: longestTaskMs },
++        { count: inWindow.length, longestMs: longestTaskMs },
+         heapMB,
+         { count: loafCount, worst: loafWorst },
+-        readStallSources(),
++        readStallSources(windowStart),
+     );
+ };
+ 

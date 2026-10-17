@@ -389,7 +389,7 @@ export type CommandPaletteVisualizerContext = {
     visualizerBackgroundMode: VisualizerBackgroundMode | null;
     setVisualizerMode: (mode: VisualizerMode) => void;
     toggleRandomVisualizerModePerSong: () => void;
-    /** Lab > Fix lyric animation freeze on Linux: the Linux renderer fd leak workaround. */
+    /** Lab > Draw lyric glow on the compositor: the Linux renderer fd leak workaround. */
     toggleGlowBlurQuantize: () => void;
     setVisualizerBackgroundMode: (mode: VisualizerBackgroundMode) => void;
     setMonetBackgroundTuning: (patch: Partial<MonetBackgroundTuning>) => void;

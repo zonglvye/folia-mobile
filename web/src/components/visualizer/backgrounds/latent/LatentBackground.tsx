@@ -12,6 +12,8 @@ import {
 import { extractRepresentativeColors } from '../../../../utils/colorExtractor';
 import { updatePaperShaderUniforms } from '../../../../utils/paperShaderUniforms';
 import { createPaperShaderReleaseRef, PAPER_SHADER_CONTEXT_ATTRIBUTES } from '../../../../utils/paperShaderContext';
+import { isAndroidRuntime } from '../../../../utils/platform';
+import { beginPerfPhase } from '../../../../services/debug/perfPhases';
 
 // src/components/visualizer/backgrounds/latent/LatentBackground.tsx
 // Layers two cover-colored Paper shaders and drives their uniforms without React frame updates.
@@ -27,6 +29,15 @@ interface LatentBackgroundProps {
 }
 
 const MAX_SHADER_PIXELS = 1280 * 720;
+/**
+ * Backing-store budget for the mesh layer alone. The two layers are not equal citizens: the mesh is a
+ * smooth colour field with one low-frequency noise term, so a coarse backing store upscales invisibly,
+ * while the dithering layer draws its 4x4 pattern in device pixels (`u_pxSize * u_pixelRatio` against
+ * `gl_FragCoord`) and aliases the moment it loses resolution. Phones get the cut because their GPU is
+ * the binding constraint - the in-app frame HUD pins the visualizer to 30 fps on the phone this app
+ * ships to while the wall, which runs no shader at all, reaches 40.9 fps.
+ */
+const MAX_MESH_SHADER_PIXELS = isAndroidRuntime() ? 640 * 360 : MAX_SHADER_PIXELS;
 const PAUSED_SPEED_SCALE = 0.12;
 const normalizeAudio = (value: number) => Math.min(1, Math.max(0, value / 255));
 const clampShaderSpeed = (value: number) => Math.min(2, Math.max(0, value));
@@ -143,6 +154,8 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
 
         void extractRepresentativeColors(coverUrl, 6).then(colors => {
             if (active) {
+                // The palette change re-renders both shader layers and rewrites their uniforms.
+                beginPerfPhase('bg palette');
                 setCoverColors(colors);
             }
         });
@@ -303,7 +316,7 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
                             ? 0
                             : resolveLatentShaderSpeed(tuning.meshSpeed, tuning.meshAudioSpeed, 0, paused)}
                         minPixelRatio={1}
-                        maxPixelCount={MAX_SHADER_PIXELS}
+                        maxPixelCount={MAX_MESH_SHADER_PIXELS}
                         webGlContextAttributes={PAPER_SHADER_CONTEXT_ATTRIBUTES}
                         style={{ width: '100%', height: '100%' }}
                     />

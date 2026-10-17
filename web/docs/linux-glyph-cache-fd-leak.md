@@ -1,7 +1,7 @@
 # Linux 下长时间播放后歌词动画卡死 — 字形缓存 fd 泄漏
 
-> 状态（2026-09-26）：已定位、已修复。修复挂在实验室开关「修复 Linux 歌词动画卡死」（`utils/glowBlurQuantize.ts`，
-> 存储键 `visualizer_glow_blur_quantize`）上，Linux 默认开启，其它平台默认关闭。调查过程和全部实测数据不在仓库里。
+> 状态（2026-09-26）：已定位、已修复。修复挂在实验室开关「歌词发光改用合成层绘制」（`utils/glowBlurQuantize.ts`，
+> 存储键 `visualizer_glow_blur_quantize`）上，Linux 与 Android 默认开启，其它平台默认关闭。调查过程和全部实测数据不在仓库里。
 
 ## 1. 现象
 
@@ -60,12 +60,22 @@ Chromium（GPU 光栅化）按 strike 缓存字形，strike 的 key 包含字体
   曾用 Pixi 重写 fume 的渲染层做对比：同样不泄漏，但比 canvas 版多约 85 MiB 显存（i915 DRM），renderer 主线程
   只少 4 个百分点、GPU 进程多 10 个百分点，因此没有采用。
 
-默认只在 Linux 开启：drop-shadow 的外观与原来非常接近但不完全相同，而其它平台上这个泄漏的代价很小。
+默认在 Linux 与 Android 开启：drop-shadow 的外观与原来非常接近但不完全相同，而其它平台上这个泄漏的代价很小。
 
 不改变任何视觉效果的另一条路是提高上限：systemd 的 `DefaultLimitNOFILE`（用户会话的 FD 软上限）和
 `vm.max_map_count`（每个泄漏的 fd 还带一条内存映射，很多发行版默认 65530，约 30 小时耗尽）。泄漏仍在继续，
 只是远到用不完。面向用户的步骤在文档站的「Chromium FD 耗尽问题」（`guide/chromium-fd-exhaustion`），
 实验室开关的说明链接到那里。
+
+## 3.1 Android：同一个问题表现为帧率而不是 fd
+
+手机的 WebView 也是 Chromium，字形缓存的行为一样，但瓶颈先落在帧率上而不是 fd 上限上：classic 每帧为每个发光
+字形重新生成一遍带阴影的字形遮罩，这部分工作在光栅线程上，所以**主线程没有长任务，帧照样掉**。用 App 内的帧率
+HUD（长按左上角）在这个项目的目标机型上实测：开关关闭时可视化页面 `p50 = p90 = p99 = 33.3 ms`（锁在 30 fps），
+30 秒内 `longtasks` 只有约 10 条、`worst` 66.5 ms —— 主线程是空的，掉帧来自光栅。开关打开后发光变成合成层滤镜，
+模糊结果按图层缓存，每帧只剩 opacity/transform。
+
+对照：同一个 App 的墙面页（没有逐字发光）在同一台机器上能到 40.9 fps，说明 33.3 ms 不是设备或 WebView 的硬上限。
 
 ## 4. 实测（renderer fd/s，monet 背景，120 fps，每项 180 秒）
 

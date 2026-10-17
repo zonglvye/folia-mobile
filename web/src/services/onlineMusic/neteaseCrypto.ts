@@ -46,7 +46,18 @@ const toHexUpper = (bytes: Uint8Array): string => (
     Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('').toUpperCase()
 );
 
-const importAesKey = (key: string) => crypto.subtle.importKey('raw', encoder.encode(key), 'AES-CBC', false, ['encrypt']);
+/**
+ * 三个密钥都是固定常量，导入结果是可复用的 CryptoKey。缓存的是 Promise 而不是 CryptoKey：
+ * 并发请求会拿到同一个 Promise，而不是各自再发起一次 importKey。
+ */
+const aesKeyCache = new Map<string, Promise<CryptoKey>>();
+const importAesKey = (key: string): Promise<CryptoKey> => {
+    const cached = aesKeyCache.get(key);
+    if (cached) return cached;
+    const pending = crypto.subtle.importKey('raw', encoder.encode(key), 'AES-CBC', false, ['encrypt']);
+    aesKeyCache.set(key, pending);
+    return pending;
+};
 
 /** AES-128-CBC with PKCS#7 (WebCrypto's only CBC padding), matching CryptoJS's default. */
 const aesCbcEncrypt = async (plaintext: string, key: string): Promise<Uint8Array> => {
@@ -65,6 +76,10 @@ const aesCbcEncrypt = async (plaintext: string, key: string): Promise<Uint8Array
  * A single 16-byte block run through CBC with a zero IV encrypts to exactly E(block), so encrypting
  * the padded plaintext one block at a time reproduces ECB. Each CBC call also appends a padding
  * block, which is dropped: the padding is applied once, here, before the loop.
+ *
+ * The blocks are independent, so they are issued together instead of awaited one by one: every
+ * `crypto.subtle.encrypt` is a round trip off the main thread, and an eapi payload is a dozen or
+ * more blocks - serialising them is the whole cost of a request's encryption.
  */
 const aesEcbEncrypt = async (plaintext: string, key: string): Promise<Uint8Array> => {
     const cryptoKey = await importAesKey(key);
@@ -75,11 +90,16 @@ const aesEcbEncrypt = async (plaintext: string, key: string): Promise<Uint8Array
     padded.set(raw);
     padded.fill(padLength, raw.length);
 
-    const out = new Uint8Array(padded.length);
+    const blocks: Promise<ArrayBuffer>[] = [];
     for (let offset = 0; offset < padded.length; offset += 16) {
-        const block = padded.subarray(offset, offset + 16);
-        const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv: zeroIv }, cryptoKey, block));
-        out.set(encrypted.subarray(0, 16), offset);
+        // slice() 而不是 subarray()：交出去的是独立缓冲，不和别的块共享同一个后端视图。
+        blocks.push(crypto.subtle.encrypt({ name: 'AES-CBC', iv: zeroIv }, cryptoKey, padded.slice(offset, offset + 16)));
+    }
+
+    const encrypted = await Promise.all(blocks);
+    const out = new Uint8Array(padded.length);
+    for (let index = 0; index < encrypted.length; index += 1) {
+        out.set(new Uint8Array(encrypted[index]!).subarray(0, 16), index * 16);
     }
     return out;
 };

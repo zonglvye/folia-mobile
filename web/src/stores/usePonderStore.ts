@@ -2,6 +2,11 @@ import { create } from 'zustand';
 import { getStoredString } from './storagePrimitives';
 import { isPonderHintVisibility, type PonderHintVisibility, type PonderTargetId } from '../types/ponder';
 import { parsePonderSeen, serializePonderSeen, withPonderSeen } from '../utils/ponder/ponderSeenRecord';
+import {
+    parsePonderTouchButtonPosition,
+    serializePonderTouchButtonPosition,
+    type PonderTouchButtonPosition,
+} from '../utils/ponder/ponderTouchButtonPosition';
 
 // src/stores/usePonderStore.ts
 // 「思索」教程的会话状态与设置。
@@ -12,6 +17,7 @@ import { parsePonderSeen, serializePonderSeen, withPonderSeen } from '../utils/p
 
 const PONDER_HINT_VISIBILITY_STORAGE_KEY = 'ponder_hint_visibility';
 const PONDER_TOUCH_BUTTON_STORAGE_KEY = 'ponder_touch_button';
+const PONDER_TOUCH_BUTTON_POSITION_STORAGE_KEY = 'ponder_touch_button_position';
 const PONDER_SEEN_STORAGE_KEY = 'folia_ponder_seen';
 
 const readStoredVisibility = (): PonderHintVisibility => {
@@ -39,6 +45,20 @@ const readStoredTouchButton = (): boolean => {
     }
 };
 
+/**
+ * 触屏上那颗思索按钮被拖到哪儿了。null 表示还没拖过 —— 位置由组件按当时的视口算默认值，
+ * 所以这里不存一个「默认坐标」常数，那在横竖屏和不同分辨率上都是错的。
+ */
+const readStoredTouchButtonPosition = (): PonderTouchButtonPosition | null => {
+    try {
+        return parsePonderTouchButtonPosition(
+            getStoredString(PONDER_TOUCH_BUTTON_POSITION_STORAGE_KEY, ''),
+        );
+    } catch {
+        return null;
+    }
+};
+
 const readStoredSeen = (): Set<string> => {
     if (typeof window === 'undefined') {
         return new Set();
@@ -62,6 +82,8 @@ type PonderState = {
     seenTargetIds: ReadonlySet<string>;
     ponderHintVisibility: PonderHintVisibility;
     showPonderTouchButton: boolean;
+    /** 拖过一次之后的位置；null 表示仍然停在默认的右上角。 */
+    ponderTouchButtonPosition: PonderTouchButtonPosition | null;
     /** 思索导航页开着没有。帮助页那颗按钮开的就是它。 */
     isNavigationOpen: boolean;
 
@@ -74,6 +96,7 @@ type PonderState = {
     markPonderSeen: (targetId: PonderTargetId) => void;
     setPonderHintVisibility: (visibility: PonderHintVisibility) => void;
     setShowPonderTouchButton: (show: boolean) => void;
+    setPonderTouchButtonPosition: (position: PonderTouchButtonPosition) => void;
     openNavigation: () => void;
     closeNavigation: () => void;
 };
@@ -85,6 +108,7 @@ export const usePonderStore = create<PonderState>((set, get) => ({
     seenTargetIds: readStoredSeen(),
     ponderHintVisibility: readStoredVisibility(),
     showPonderTouchButton: readStoredTouchButton(),
+    ponderTouchButtonPosition: readStoredTouchButtonPosition(),
     isNavigationOpen: false,
 
     setHoveredTargetId: targetId => {
@@ -144,6 +168,18 @@ export const usePonderStore = create<PonderState>((set, get) => ({
             localStorage.setItem(PONDER_TOUCH_BUTTON_STORAGE_KEY, show ? 'on' : 'off');
         } catch {
             // 同上。
+        }
+    },
+
+    setPonderTouchButtonPosition: position => {
+        set({ ponderTouchButtonPosition: position });
+        try {
+            localStorage.setItem(
+                PONDER_TOUCH_BUTTON_POSITION_STORAGE_KEY,
+                serializePonderTouchButtonPosition(position),
+            );
+        } catch {
+            // 同上：位置不落盘，这一次会话里它仍然待在用户放下的地方。
         }
     },
 }));

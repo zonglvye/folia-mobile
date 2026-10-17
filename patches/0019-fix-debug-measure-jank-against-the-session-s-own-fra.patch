@@ -1,0 +1,126 @@
+From 17fc9bac485aeba45758d1a41ff6286f0e8c90b8 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 15:03:44 +0800
+Subject: [PATCH 19/20] fix(debug): measure jank against the session's own
+ frame time
+
+A reading off the phone showed `p50 33.3 / p90 33.5 / p99 33.5 / jank 19.2 %`:
+the frames were perfectly even, and 19 % of them still counted as jank,
+because FRAME_JANK_MS is a hardcoded "two missed 60 Hz vsyncs" = 33.4 ms while
+this panel runs at 90 Hz and every third-vsync frame lands on 33.3-33.5 ms. A
+number that fires on even frames cannot be trusted, and this one was being read
+as evidence of stutter.
+
+Jank is now `delta > max(FRAME_JANK_MS, median * 1.5)`: deviation from what the
+session actually achieves, with the old constant kept as a floor so a healthy
+60 fps session still flags a two-vsync frame. Low frame rate stays fps's job.
+
+Also stops splitting a word's glow into one motion span per character when the
+reveal mode ignores per-character timing. `wordGlowVariants.active` returns
+before the sweep branch for `instant` and `fast`, so those spans animated in
+lockstep and drew the same pixels as a single span - while the line change they
+are mounted on is what the HUD attributes its remaining 83 ms stall to.
+---
+ src/components/visualizer/GlowWord.tsx        | 10 +++++++++-
+ src/services/debug/frameSamples.ts            | 15 ++++++++++++---
+ test/unit/services/debug/frameSamples.test.ts | 16 ++++++++++++++++
+ 3 files changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/src/components/visualizer/GlowWord.tsx b/src/components/visualizer/GlowWord.tsx
+index 93a787b..4d72db3 100644
+--- a/src/components/visualizer/GlowWord.tsx
++++ b/src/components/visualizer/GlowWord.tsx
+@@ -45,6 +45,14 @@ export const GlowWord = <TConfig extends { id: string }>({
+     const duration = getGlowWordDisplayDuration(word, renderProfile);
+     const activeEndTime = getGlowWordActiveEndTime(word, renderProfile);
+     const graphemeTimings = useMemo(() => buildWordGraphemeTimings(word), [word]);
++    // One glow span per character only when the reveal mode actually staggers them. `instant` and
++    // `fast` ignore every per-character field (`wordGlowVariants.active` returns before the sweep
++    // branch), so splitting the word there mounted N motion nodes animating in lockstep and changed
++    // nothing on screen - and the line change, which is what the frame HUD attributes its remaining
++    // stall to, is exactly where those nodes get mounted.
++    const usesPerCharacterGlow = graphemeTimings.length > 1
++        && renderProfile.wordRevealMode !== 'instant'
++        && renderProfile.wordRevealMode !== 'fast';
+ 
+     /* eslint-disable-next-line no-warning-comments -- @AI: KEEP THIS EXACTLY AS IS */
+     // @note Version Control: Project Folia version 0.5.27-a16525c
+@@ -86,7 +94,7 @@ export const GlowWord = <TConfig extends { id: string }>({
+                 className="absolute inset-0 select-none pointer-events-none block"
+                 aria-hidden="true"
+             >
+-                {graphemeTimings.length > 1 ? (
++                {usesPerCharacterGlow ? (
+                     graphemeTimings.map((timing, index) => (
+                         <motion.span
+                             key={index}
+diff --git a/src/services/debug/frameSamples.ts b/src/services/debug/frameSamples.ts
+index cb74a41..f1e6ad7 100644
+--- a/src/services/debug/frameSamples.ts
++++ b/src/services/debug/frameSamples.ts
+@@ -18,6 +18,9 @@ import { attributePerfPhase, resetPerfPhases } from './perfPhases';
+ /** A frame slower than this is two missed 60 Hz vsyncs, i.e. the user saw a stutter. */
+ export const FRAME_JANK_MS = 33.4;
+ 
++/** ...but jank is measured against the session's own median, so a steady 30 fps is not "jank". */
++const JANK_MEDIAN_FACTOR = 1.5;
++
+ /**
+  * Gaps longer than this are not dropped frames: they are the WebView being backgrounded, the screen
+  * going off, or a debugger pause. Folding those into the percentiles would report a 60% jank ratio
+@@ -198,19 +201,25 @@ export const computeFrameStats = (
+     }
+ 
+     const sorted = deltas.slice().sort((a, b) => a - b);
++    const percentile = (p: number) => sorted[Math.min(frames - 1, Math.max(0, Math.ceil(p * frames) - 1))];
++    const median = percentile(0.5);
++    // Jank is deviation from what this session actually achieves, not a fixed 60 Hz budget: a phone
++    // panel that runs at 90 Hz makes a rock-steady 30 fps land on 33.3-33.5 ms, which straddles the old
++    // hardcoded 33.4 ms threshold and reported 19 % jank for frames that were all perfectly even.
++    // The constant stays as a floor so a healthy 60 fps session still flags a two-vsync frame.
++    const jankThresholdMs = Math.max(FRAME_JANK_MS, median * JANK_MEDIAN_FACTOR);
+     let totalMs = 0;
+     let jankFrames = 0;
+     for (const delta of deltas) {
+         totalMs += delta;
+-        if (delta > FRAME_JANK_MS) jankFrames += 1;
++        if (delta > jankThresholdMs) jankFrames += 1;
+     }
+-    const percentile = (p: number) => sorted[Math.min(frames - 1, Math.max(0, Math.ceil(p * frames) - 1))];
+ 
+     return {
+         frames,
+         windowMs: totalMs,
+         fps: totalMs > 0 ? (frames * 1000) / totalMs : 0,
+-        p50: percentile(0.5),
++        p50: median,
+         p90: percentile(0.9),
+         p99: percentile(0.99),
+         worst: sorted[frames - 1],
+diff --git a/test/unit/services/debug/frameSamples.test.ts b/test/unit/services/debug/frameSamples.test.ts
+index 7042936..735bc20 100644
+--- a/test/unit/services/debug/frameSamples.test.ts
++++ b/test/unit/services/debug/frameSamples.test.ts
+@@ -28,6 +28,22 @@ describe('computeFrameStats', () => {
+         expect(stats.jankRatio).toBeCloseTo(0.25, 5);
+     });
+ 
++    it('does not call a rock-steady slow session janky', () => {
++        // A 90 Hz panel that only manages every third vsync sits at 33.3-33.5 ms, which straddles the
++        // old hardcoded 33.4 ms threshold and read as 19 % jank on the phone. Even frames are not
++        // stutter: the rate is low (reported by fps), the delivery is not erratic.
++        const steady = [33.3, 33.4, 33.5, 33.3, 33.5, 33.4];
++        const stats = computeFrameStats(steady, { count: 0, longestMs: 0 }, null);
++        expect(stats.jankRatio).toBe(0);
++        expect(stats.fps).toBeCloseTo(30, 0);
++    });
++
++    it('still flags the frames that break away from the session median once it is slow', () => {
++        const mixed = [33.3, 33.3, 33.3, 33.3, 120];
++        const stats = computeFrameStats(mixed, { count: 0, longestMs: 0 }, null);
++        expect(stats.jankRatio).toBeCloseTo(0.2, 5);
++    });
++
+     it('keeps percentiles ordered and carries long-task and heap readings through', () => {
+         const stats = computeFrameStats([16.7, 16.7, 16.7, 16.7, 50], { count: 2, longestMs: 120 }, 148.2);
+         expect(stats.p50).toBeCloseTo(16.7, 5);

@@ -3,12 +3,17 @@
 # The toolchain lives outside the repository (in an ASCII-only path) because local.properties is
 # ISO-8859-1 and the project path contains non-ASCII characters.
 #
-# Usage:  powershell -ExecutionPolicy Bypass -File tools\build-apk.ps1 [-Variant debug|release] [-SkipAssets]
+# Usage:  powershell -ExecutionPolicy Bypass -File tools\build-apk.ps1 [-Variant debug|release] [-SkipAssets] [-NoArchive]
+#
+# Every release build is copied into ../builds/<version>-vc<code>-<timestamp>/ together with the shell
+# sources and the web commit it came from (tools/archive-build.ps1). The build output path is reused by
+# every build, so without that step the previous APK is gone as soon as the next one compiles.
 
 param(
     [ValidateSet('debug', 'release')]
     [string]$Variant = 'debug',
-    [switch]$SkipAssets
+    [switch]$SkipAssets,
+    [switch]$NoArchive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,6 +72,32 @@ if ($apk) {
     Write-Host ""
     Write-Host ("APK: {0}" -f $apk.FullName)
     Write-Host ("Size: {0} MB" -f $sizeMb)
+
+    # Release builds are the distributable artefact, so they get a restore point automatically.
+    # Debug builds are disposable and 2 MB larger; pass -NoArchive for a throwaway release build.
+    #
+    # The archiver lives at tools/archive-build.ps1 in the maintainer's checkout and is NOT part of
+    # the public repository (that tree only carries web/, android/ and patches/). Archiving is a
+    # maintainer workflow, not a requirement for building, so its absence is a note and not an error
+    # - a fresh clone of the public repo must be able to run this script as-is.
+    $archiver = Join-Path $PSScriptRoot '..\..\tools\archive-build.ps1'
+    if ($Variant -eq 'release' -and -not $NoArchive -and -not (Test-Path -LiteralPath $archiver)) {
+        Write-Host ''
+        Write-Host "Skipping the build archive: tools\archive-build.ps1 is not present in this checkout."
+    }
+    if ($Variant -eq 'release' -and -not $NoArchive -and (Test-Path -LiteralPath $archiver)) {
+        $gradleFile = Get-Content -LiteralPath (Join-Path $project 'app\build.gradle') -Raw
+        $codeMatch = [regex]::Match($gradleFile, 'versionCode\s+(\d+)')
+        $nameMatch = [regex]::Match($gradleFile, "versionName\s+'([^']+)'")
+        if (-not $codeMatch.Success -or -not $nameMatch.Success) {
+            throw 'Could not read versionCode / versionName out of app/build.gradle; refusing to build without a restorable version stamp.'
+        }
+        & $archiver `
+            -ApkPath $apk.FullName `
+            -VersionCode $codeMatch.Groups[1].Value `
+            -VersionName $nameMatch.Groups[1].Value
+        if ($LASTEXITCODE -ne 0) { throw "Archiving the build failed with exit code $LASTEXITCODE" }
+    }
 } else {
     Write-Warning "No APK found under $apkDir"
 }

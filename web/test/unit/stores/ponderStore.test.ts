@@ -141,4 +141,35 @@ describe('ponder store', () => {
         expect(first).toBe('player-bar');
         expect(values.has('folia_ponder_seen')).toBe(false);
     });
+
+    it('触屏按钮的位置默认为空，表示还没拖过', async () => {
+        const store = await load();
+        expect(store.getState().ponderTouchButtonPosition).toBeNull();
+    });
+
+    it('拖动之后位置落盘并回读', async () => {
+        const store = await load();
+        store.getState().setPonderTouchButtonPosition({ x: 420, y: 260 });
+
+        expect(values.get('ponder_touch_button_position')).toBe('420,260');
+        vi.resetModules();
+        const reloaded = (await import('@/stores/usePonderStore')).usePonderStore;
+        expect(reloaded.getState().ponderTouchButtonPosition).toEqual({ x: 420, y: 260 });
+    });
+
+    it('位置存档读坏时退回默认位置而不是抛', async () => {
+        values.set('ponder_touch_button_position', 'somewhere');
+        installStorage();
+        const store = await load();
+
+        expect(store.getState().ponderTouchButtonPosition).toBeNull();
+    });
+
+    it('位置写不进去时不抛，本次会话仍然记住', async () => {
+        installStorage(false, true);
+        const store = await load();
+
+        expect(() => store.getState().setPonderTouchButtonPosition({ x: 40, y: 40 })).not.toThrow();
+        expect(store.getState().ponderTouchButtonPosition).toEqual({ x: 40, y: 40 });
+    });
 });

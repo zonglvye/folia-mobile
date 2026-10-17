@@ -9,6 +9,8 @@ import {
     type FrameStats,
 } from '../services/debug/frameSamples';
 import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
+import { useVisualizerSettingsStore } from '../stores/useVisualizerSettingsStore';
+import { DEFAULT_VISUALIZER_BACKGROUND_MODE } from '../types/visualizerModes';
 
 // src/components/FrameStatsHud.tsx
 // The only performance readout that works on the phone this app ships to.
@@ -20,6 +22,11 @@ import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../
 //
 // Polls at POLL_MS instead of subscribing to frames. Two updates a second is far below anything
 // React notices, and it keeps the sampler's per-frame path free of React entirely.
+//
+// It also names what is on screen (visualizer mode, background mode, how the glow is drawn), because
+// a frame-time reading only means something next to the layers that produced it: "30 fps in the
+// visualizer" is a different bug with the shader background than without it, and the phone has no
+// adb to look anything up on.
 
 const POLL_MS = 500;
 const HOLD_MS = 800;
@@ -27,6 +34,13 @@ const HOLD_MS = 800;
 const CORNER_PX = 64;
 
 const fmt = (value: number, digits = 1) => value.toFixed(digits);
+
+/** Keeps a script name inside the panel: the interesting part is the prefix, not the chunk hash. */
+const SCRIPT_LABEL_MAX = 26;
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+const clipScriptLabel = (script: { name: string; file: string }, max: number) => (
+    clip(script.file ? `${script.name} @ ${script.file}` : script.name, max)
+);
 
 const jankTone = (ms: number): string => {
     if (ms > 50) return '#fb7185';
@@ -45,6 +59,10 @@ const FrameStatsHud: React.FC = () => {
     const visible = useSyncExternalStore(subscribeToFrameHud, isFrameHudVisible);
     const [stats, setStats] = useState<FrameStats>(EMPTY_FRAME_STATS);
     const [frameCap, setFrameCap] = useState('off');
+    const visualizerMode = useVisualizerSettingsStore(state => state.visualizerMode);
+    const backgroundMode = useVisualizerSettingsStore(state => state.visualizerBackgroundMode);
+    const randomModePerSong = useVisualizerSettingsStore(state => state.randomVisualizerModePerSong);
+    const glowOnCompositor = useVisualizerSettingsStore(state => state.glowBlurQuantize);
 
     // The corner hold. Registered at the window in the capture phase and never prevented, so the tap
     // that starts it still reaches whatever is underneath: this may not steal input from the player.
@@ -97,6 +115,7 @@ const FrameStatsHud: React.FC = () => {
     if (!visible) return null;
 
     const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
+    const loaf = stats.loafWorst;
 
     return (
         <div
@@ -111,7 +130,7 @@ const FrameStatsHud: React.FC = () => {
                 border: '1px solid rgba(148, 163, 184, 0.35)',
                 color: '#e2e8f0',
                 font: '500 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
-                minWidth: 214,
+                minWidth: 240,
                 pointerEvents: 'auto',
             }}
         >
@@ -144,6 +163,37 @@ const FrameStatsHud: React.FC = () => {
             <Row label="longtasks" value={`${stats.longTaskCount} · max ${fmt(stats.longestTaskMs, 0)} ms`} />
             <Row label="heap" value={stats.heapMB === null ? 'n/a' : `${fmt(stats.heapMB, 0)} MB`} />
             <Row label="dpr / cap" value={`${fmt(dpr)} / ${frameCap}`} />
+            <Row label="vis" value={`${visualizerMode}${randomModePerSong ? ' ·random' : ''}`} />
+            <Row label="bg" value={backgroundMode ?? `${DEFAULT_VISUALIZER_BACKGROUND_MODE} (default)`} />
+            <Row label="glow" value={glowOnCompositor ? 'compositor' : 'shadow'} />
+            {loaf ? (
+                <>
+                    <Row
+                        label="loaf"
+                        value={`${stats.loafCount} · max ${fmt(loaf.worstMs, 0)} ms`}
+                        tone={jankTone(loaf.worstMs)}
+                    />
+                    <Row
+                        label="js·css·paint"
+                        value={`${fmt(loaf.scriptMs, 0)} · ${fmt(loaf.styleAndLayoutMs, 0)} · ${fmt(loaf.renderMs, 0)}`}
+                    />
+                    {loaf.slowestScript && (
+                        <Row label="slowest js" value={clipScriptLabel(loaf.slowestScript, SCRIPT_LABEL_MAX)} />
+                    )}
+                    {loaf.forcedStyleAndLayoutMs >= 1 && (
+                        <Row label="forced layout" value={`${fmt(loaf.forcedStyleAndLayoutMs, 0)} ms`} />
+                    )}
+                </>
+            ) : (
+                <Row label="loaf" value="n/a" />
+            )}
+            {stats.stallSources.length > 0 && (
+                <Row
+                    label="block"
+                    tone={jankTone(stats.stallSources[0].worstMs)}
+                    value={`${clip(stats.stallSources[0].phase, 18)} ${fmt(stats.stallSources[0].worstMs, 0)} ms · ${stats.stallSources[0].count}x`}
+                />
+            )}
             <div style={{ marginTop: 4, opacity: 0.4, fontSize: 9 }}>hold top-left corner to toggle</div>
         </div>
     );

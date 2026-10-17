@@ -1,0 +1,430 @@
+From 1de7692ae23c142178b32c5a7ff566819e6b7369 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 13:52:24 +0800
+Subject: [PATCH 14/20] perf(visualizer): draw the lyric glow on the compositor
+ on Android
+
+The frame HUD off the phone says the visualizer is pinned to exactly 30 fps:
+p50 = p90 = p99 = 33.3 ms with only ~10 long tasks per 30 s and a 66.5 ms worst
+frame. The main thread is idle, so the frames are being lost in raster. The wall
+on the same device reaches 40.9 fps without the per-word glow, which rules the
+device out as the ceiling.
+
+That is the shape of the problem utils/glowBlurQuantize.ts already documents:
+with the switch off, classic re-rasterises the shadow mask of every glowing
+grapheme on every frame, because framer interpolates the text-shadow radius
+continuously and Chromium keys its glyph strikes on the shadow's device-space
+sigma. The module's own measurements put that at ~0.9 new strikes/s on Linux,
+and -23 percentage points of renderer CPU on fume once the glow is drawn as a
+compositor filter whose blur is cached per layer.
+
+So this makes the platform default Linux *or Android* instead of Linux only.
+Nothing else changes: the switch keeps its storage key, stays in Lab > Graphics
+and the command palette, and an explicit user choice still wins.
+
+Visual delta, measured rather than assumed: at full glow the text-shadow and
+drop-shadow forms of a two-character lyric word (49 px on the phone's 816x377
+landscape viewport, screenshotted at 2x) differ by 0.06 % of pixels overall and
+1.06 % in the worst 8x8 region. The transition is smoother, not rougher - framer
+cannot interpolate from `none` to a two-shadow string, so the old path snapped
+the halo on and off, while the drop-shadow radii do interpolate
+(0/0 -> 2/4 -> 4/8 -> 6/12 -> 8/16 px).
+
+Also renamed the toggle to match what it now does, in all three locales, in the
+command-palette fallbacks and in the comments that anchor to it by name.
+---
+ docs/linux-glyph-cache-fd-leak.md             | 16 ++++-
+ .../commands/visualizerCommands.ts            |  6 +-
+ src/components/command-palette/types.ts       |  2 +-
+ .../settings/GraphicsSettingsSubview.tsx      |  2 +-
+ .../visualizer/cadenza/VisualizerCadenza.tsx  |  2 +-
+ .../visualizer/claddagh/CladdaghRingLine.tsx  |  2 +-
+ .../visualizer/claddagh/claddaghGlow.ts       |  2 +-
+ .../visualizer/fume/fumeCanvasText.ts         |  2 +-
+ .../visualizer/fume/fumeLiveRaster.ts         |  2 +-
+ .../visualizer/fume/useFumeCanvasStage.ts     |  2 +-
+ src/i18n/locales/en.ts                        |  6 +-
+ src/i18n/locales/in.ts                        |  6 +-
+ src/i18n/locales/zh-CN.ts                     |  6 +-
+ src/utils/glowBlurQuantize.ts                 | 28 +++++---
+ test/unit/visualizer/glowBlurQuantize.test.ts | 67 +++++++++++++++++++
+ test/unit/visualizer/wordGlow.test.ts         |  2 +-
+ 16 files changed, 121 insertions(+), 32 deletions(-)
+ create mode 100644 test/unit/visualizer/glowBlurQuantize.test.ts
+
+diff --git a/docs/linux-glyph-cache-fd-leak.md b/docs/linux-glyph-cache-fd-leak.md
+index d975411..e153460 100644
+--- a/docs/linux-glyph-cache-fd-leak.md
++++ b/docs/linux-glyph-cache-fd-leak.md
+@@ -1,7 +1,7 @@
+ # Linux 下长时间播放后歌词动画卡死 — 字形缓存 fd 泄漏
+ 
+-> 状态（2026-09-26）：已定位、已修复。修复挂在实验室开关「修复 Linux 歌词动画卡死」（`utils/glowBlurQuantize.ts`，
+-> 存储键 `visualizer_glow_blur_quantize`）上，Linux 默认开启，其它平台默认关闭。调查过程和全部实测数据不在仓库里。
++> 状态（2026-09-26）：已定位、已修复。修复挂在实验室开关「歌词发光改用合成层绘制」（`utils/glowBlurQuantize.ts`，
++> 存储键 `visualizer_glow_blur_quantize`）上，Linux 与 Android 默认开启，其它平台默认关闭。调查过程和全部实测数据不在仓库里。
+ 
+ ## 1. 现象
+ 
+@@ -60,13 +60,23 @@ Chromium（GPU 光栅化）按 strike 缓存字形，strike 的 key 包含字体
+   曾用 Pixi 重写 fume 的渲染层做对比：同样不泄漏，但比 canvas 版多约 85 MiB 显存（i915 DRM），renderer 主线程
+   只少 4 个百分点、GPU 进程多 10 个百分点，因此没有采用。
+ 
+-默认只在 Linux 开启：drop-shadow 的外观与原来非常接近但不完全相同，而其它平台上这个泄漏的代价很小。
++默认在 Linux 与 Android 开启：drop-shadow 的外观与原来非常接近但不完全相同，而其它平台上这个泄漏的代价很小。
+ 
+ 不改变任何视觉效果的另一条路是提高上限：systemd 的 `DefaultLimitNOFILE`（用户会话的 FD 软上限）和
+ `vm.max_map_count`（每个泄漏的 fd 还带一条内存映射，很多发行版默认 65530，约 30 小时耗尽）。泄漏仍在继续，
+ 只是远到用不完。面向用户的步骤在文档站的「Chromium FD 耗尽问题」（`guide/chromium-fd-exhaustion`），
+ 实验室开关的说明链接到那里。
+ 
++## 3.1 Android：同一个问题表现为帧率而不是 fd
++
++手机的 WebView 也是 Chromium，字形缓存的行为一样，但瓶颈先落在帧率上而不是 fd 上限上：classic 每帧为每个发光
++字形重新生成一遍带阴影的字形遮罩，这部分工作在光栅线程上，所以**主线程没有长任务，帧照样掉**。用 App 内的帧率
++HUD（长按左上角）在这个项目的目标机型上实测：开关关闭时可视化页面 `p50 = p90 = p99 = 33.3 ms`（锁在 30 fps），
++30 秒内 `longtasks` 只有约 10 条、`worst` 66.5 ms —— 主线程是空的，掉帧来自光栅。开关打开后发光变成合成层滤镜，
++模糊结果按图层缓存，每帧只剩 opacity/transform。
++
++对照：同一个 App 的墙面页（没有逐字发光）在同一台机器上能到 40.9 fps，说明 33.3 ms 不是设备或 WebView 的硬上限。
++
+ ## 4. 实测（renderer fd/s，monet 背景，120 fps，每项 180 秒）
+ 
+ | 模式 | 修复前 / 开关关闭 | 开关开启 |
+diff --git a/src/components/command-palette/commands/visualizerCommands.ts b/src/components/command-palette/commands/visualizerCommands.ts
+index 4aa325e..14bec5e 100644
+--- a/src/components/command-palette/commands/visualizerCommands.ts
++++ b/src/components/command-palette/commands/visualizerCommands.ts
+@@ -67,9 +67,9 @@ export const visualizerCommands: CommandPaletteCommand[] = [
+     createToggleCommand(
+         'visualizer-toggle-glow-blur-quantize',
+         'visualizer',
+-        'Fix lyric animation freeze on Linux',
+-        'Change how some lyric animations draw their glow, fixing occasional freezes after long playback on Linux',
+-        ['lyric freeze', 'freeze fix', 'linux', 'glow', 'fd leak', 'stepped glow', '歌词卡死', '动画卡死', '画面定格', '发光半径分档', '发光', 'faguangbanjing', 'fgbj'],
++        'Draw lyric glow on the compositor',
++        'Draw lyric glow as a compositor filter instead of re-rasterising a text shadow every frame: fixes occasional freezes after long playback on Linux and cuts the per-frame raster cost on phones',
++        ['lyric freeze', 'freeze fix', 'linux', 'glow', 'fd leak', 'stepped glow', 'frame rate', 'performance', 'compositor', '歌词卡死', '动画卡死', '画面定格', '发光半径分档', '发光', '帧率', '性能', 'faguangbanjing', 'fgbj'],
+         context => context.visualizer.toggleGlowBlurQuantize(),
+     ),
+     createToggleCommand('visualizer-toggle-random-per-song', 'visualizer', 'Random visualizer for every song', 'Toggle a random lyric animation mode whenever the song changes', ['random visualizer', 'random animation', 'per song', '随机歌词动画', '每首歌随机动画'], context => context.visualizer.toggleRandomVisualizerModePerSong()),
+diff --git a/src/components/command-palette/types.ts b/src/components/command-palette/types.ts
+index 8614423..f3883e7 100644
+--- a/src/components/command-palette/types.ts
++++ b/src/components/command-palette/types.ts
+@@ -389,7 +389,7 @@ export type CommandPaletteVisualizerContext = {
+     visualizerBackgroundMode: VisualizerBackgroundMode | null;
+     setVisualizerMode: (mode: VisualizerMode) => void;
+     toggleRandomVisualizerModePerSong: () => void;
+-    /** Lab > Fix lyric animation freeze on Linux: the Linux renderer fd leak workaround. */
++    /** Lab > Draw lyric glow on the compositor: the Linux renderer fd leak workaround. */
+     toggleGlowBlurQuantize: () => void;
+     setVisualizerBackgroundMode: (mode: VisualizerBackgroundMode) => void;
+     setMonetBackgroundTuning: (patch: Partial<MonetBackgroundTuning>) => void;
+diff --git a/src/components/modal/settings/GraphicsSettingsSubview.tsx b/src/components/modal/settings/GraphicsSettingsSubview.tsx
+index 8fbe6ab..6c25846 100644
+--- a/src/components/modal/settings/GraphicsSettingsSubview.tsx
++++ b/src/components/modal/settings/GraphicsSettingsSubview.tsx
+@@ -19,7 +19,7 @@ import { useVisualizerSettingsStore } from '../../../stores/useVisualizerSetting
+ // the home background, native blur, the frame-rate cap, the Linux glow fix and reduced motion.
+ // Moved out of the lab page, where these sat among unrelated player-chrome switches.
+ 
+-/** Docs page behind the "Fix lyric animation freeze on Linux" switch. */
++/** Docs page behind the "Draw lyric glow on the compositor" switch. */
+ const CHROMIUM_FD_EXHAUSTION_DOCS_URL = 'https://folia-site.cielaniska.top/guide/chromium-fd-exhaustion';
+ 
+ /** On desktop a plain link would open inside the app window; hand it to the system browser instead. */
+diff --git a/src/components/visualizer/cadenza/VisualizerCadenza.tsx b/src/components/visualizer/cadenza/VisualizerCadenza.tsx
+index c66308f..a30e61a 100644
+--- a/src/components/visualizer/cadenza/VisualizerCadenza.tsx
++++ b/src/components/visualizer/cadenza/VisualizerCadenza.tsx
+@@ -430,7 +430,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
+ 
+                     writeOverlayWord(overlayWord, {
+                         outerTransform: `translate3d(${overlayAnchorX}px, ${overlayAnchorY}px, 0) rotate(${animatedState.rotation}deg) scale(${animatedState.scale})`,
+-                        // Own compositing layer while Lab > Fix lyric animation freeze on Linux is on: otherwise every
++                        // Own compositing layer while Lab > Draw lyric glow on the compositor is on: otherwise every
+                         // new scale re-rasterizes the word and its 40px text-shadow at a new device size, and Chromium's
+                         // glyph cache leaks shared memory for each one. See utils/glowBlurQuantize.ts.
+                         willChange: isGlowBlurQuantized() ? 'transform' : '',
+diff --git a/src/components/visualizer/claddagh/CladdaghRingLine.tsx b/src/components/visualizer/claddagh/CladdaghRingLine.tsx
+index 34cca66..01893f9 100644
+--- a/src/components/visualizer/claddagh/CladdaghRingLine.tsx
++++ b/src/components/visualizer/claddagh/CladdaghRingLine.tsx
+@@ -395,7 +395,7 @@ export const RingLine: React.FC<RingLineProps> = ({
+                     }
+                 }
+ 
+-                // While Lab > Fix lyric animation freeze on Linux is on, the glow is a drop-shadow filter
++                // While Lab > Draw lyric glow on the compositor is on, the glow is a drop-shadow filter
+                 // rather than a text-shadow: the glyph's `scale()` changes every frame, so even a whole-pixel
+                 // text-shadow radius reaches Chromium's glyph cache as an unbounded set of device sizes, and
+                 // each one leaks shared memory. A filter is applied by the compositor and never goes through
+diff --git a/src/components/visualizer/claddagh/claddaghGlow.ts b/src/components/visualizer/claddagh/claddaghGlow.ts
+index d185c4d..568cb0d 100644
+--- a/src/components/visualizer/claddagh/claddaghGlow.ts
++++ b/src/components/visualizer/claddagh/claddaghGlow.ts
+@@ -4,7 +4,7 @@ import { clamp } from './claddaghTimeline';
+ // src/components/visualizer/claddagh/claddaghGlow.ts
+ // 用串联 drop-shadow 表达的 glow（Linux 下替代 text-shadow 的路径）。
+ 
+-// The glow as chained drop-shadow() filters, for Lab > Fix lyric animation freeze on Linux (see where it is
++// The glow as chained drop-shadow() filters, for Lab > Draw lyric glow on the compositor (see where it is
+ // used). Fitted against the text-shadow glow by pixel difference in Folia's Electron: one layer matches at
+ // half the text-shadow radius (the text-shadow radius is two sigmas, a drop-shadow's one); the chorus's
+ // three layers at 0.4x with a much weaker middle layer, because each drop-shadow also shadows the ones
+diff --git a/src/components/visualizer/fume/fumeCanvasText.ts b/src/components/visualizer/fume/fumeCanvasText.ts
+index b4d0884..2a31ee1 100644
+--- a/src/components/visualizer/fume/fumeCanvasText.ts
++++ b/src/components/visualizer/fume/fumeCanvasText.ts
+@@ -375,7 +375,7 @@ export const drawFumeLiveBlock = (
+                     continue;
+                 }
+ 
+-                // Whole pixels while Lab > Fix lyric animation freeze on Linux is on: a
++                // Whole pixels while Lab > Draw lyric glow on the compositor is on: a
+                 // blur radius that changes every frame leaks shared memory in Chromium's
+                 // glyph cache.
+                 // See utils/glowBlurQuantize.ts.
+diff --git a/src/components/visualizer/fume/fumeLiveRaster.ts b/src/components/visualizer/fume/fumeLiveRaster.ts
+index a6a9f5c..11e28d5 100644
+--- a/src/components/visualizer/fume/fumeLiveRaster.ts
++++ b/src/components/visualizer/fume/fumeLiveRaster.ts
+@@ -3,7 +3,7 @@ import type { FumeBlockTiming } from './fumeBlockFrame';
+ import { drawFumeLiveBlock, type FumeLiveBlockParams } from './fumeCanvasText';
+ 
+ // src/components/visualizer/fume/fumeLiveRaster.ts
+-// Draws a printing block for Lab > Fix lyric animation freeze on Linux without asking Chromium's glyph
++// Draws a printing block for Lab > Draw lyric glow on the compositor without asking Chromium's glyph
+ // cache for a new size every frame.
+ //
+ // Drawn straight onto the stage under the camera transform, the live block's text is rasterized at a
+diff --git a/src/components/visualizer/fume/useFumeCanvasStage.ts b/src/components/visualizer/fume/useFumeCanvasStage.ts
+index b19006b..3b857f0 100644
+--- a/src/components/visualizer/fume/useFumeCanvasStage.ts
++++ b/src/components/visualizer/fume/useFumeCanvasStage.ts
+@@ -14,7 +14,7 @@ import { readFumeAudioLevels, type FumeStageDriver, type FumeStageScene } from '
+ // Fume's stage: one full-viewport canvas redrawn every frame - background, then every block on screen,
+ // waiting and passed blocks from cached snapshots, printing blocks glyph by glyph.
+ //
+-// While Lab > Fix lyric animation freeze on Linux is on, a printing block goes through FumeLiveRaster
++// While Lab > Draw lyric glow on the compositor is on, a printing block goes through FumeLiveRaster
+ // (drawn at a bounded set of raster scales, then placed under the camera) instead of straight under
+ // the camera transform, which asked Chromium's glyph cache for a new size every frame. A Pixi stage
+ // was built and measured as the alternative: no less CPU, 85 MiB more video memory
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index ff20c26..b0f65aa 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -661,7 +661,7 @@ export default {
+       "video-layer-toggle": { "title": "Video layer behind lyrics", "description": "Show or hide the muted video layer behind the lyrics" },
+       "video-layer-pick": { "title": "Video layer: pick a local video", "description": "Choose a local video to play behind the lyrics" },
+       "visualizer-toggle-random-per-song": { "title": "Random visualizer for every song", "description": "Toggle a random lyric animation mode whenever the song changes" },
+-      "visualizer-toggle-glow-blur-quantize": { "title": "Fix lyric animation freeze on Linux", "description": "Change how some lyric animations draw their glow, fixing occasional freezes after long playback on Linux" },
++      "visualizer-toggle-glow-blur-quantize": { "title": "Draw lyric glow on the compositor", "description": "Draw the lyric glow as a compositor filter instead of re-rasterising a text shadow every frame: fixes occasional freezes after long playback on Linux and cuts the per-frame raster cost on phones" },
+       "settings-visualizer": { "title": "Visualizer settings", "description": "Open lyrics animation workbench" },
+       "settings-theme-park": { "title": "Color", "description": "Open theme editor" },
+       "settings-global-lyric-offset": { "title": "Global timing offset", "description": "Calibrate lyric timing against Bluetooth or device audio latency" },
+@@ -2524,8 +2524,8 @@ export default {
+     "visualizerOpacity": "Lyrics Animation Opacity",
+     "visualizerFrameRate": "Experimental Animation FPS Limit",
+     "visualizerFrameRateDesc": "Experimental setting. When enabled, it limits requestAnimationFrame-driven animation and may cause unexpected issues in animation, measurement, or third-party motion code.",
+-    "glowBlurQuantize": "Fix lyric animation freeze on Linux",
+-    "glowBlurQuantizeDesc": "Changes how some lyric animations draw their glow, fixing occasional freezes after long playback on Linux. On by default on Linux, off elsewhere. See",
++    "glowBlurQuantize": "Draw lyric glow on the compositor",
++    "glowBlurQuantizeDesc": "Changes how some lyric animations draw their glow: a compositor filter instead of a text shadow re-rasterised every frame. Fixes occasional freezes after long playback on Linux, and cuts the per-frame raster cost on phones. Very close to the original look, but not identical. On by default on Linux and Android. See",
+     "glowBlurQuantizeDocs": "Chromium FD exhaustion",
+     "visualizerFrameRateValue": "Limit",
+     "themePresets": "Theme Presets",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index ae37ba3..a08e087 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -659,7 +659,7 @@ export default {
+       "video-layer-toggle": { "title": "Lapisan video di belakang lirik", "description": "Tampilkan atau sembunyikan lapisan video tanpa suara di belakang lirik" },
+       "video-layer-pick": { "title": "Lapisan video: pilih video lokal", "description": "Pilih video lokal untuk diputar di belakang lirik" },
+       "visualizer-toggle-random-per-song": { "title": "Visualizer acak tiap lagu", "description": "Alihkan mode animasi lirik acak tiap pergantian lagu" },
+-      "visualizer-toggle-glow-blur-quantize": { "title": "Perbaiki animasi lirik macet di Linux", "description": "Ubah cara beberapa animasi lirik menggambar glow, memperbaiki macet yang sesekali terjadi setelah pemutaran lama di Linux" },
++      "visualizer-toggle-glow-blur-quantize": { "title": "Gambar glow lirik di compositor", "description": "Menggambar glow lirik sebagai filter compositor, bukan text shadow yang diraster ulang setiap frame: memperbaiki macet sesekali setelah pemutaran lama di Linux dan memangkas biaya raster per frame di ponsel" },
+       "settings-visualizer": { "title": "Pengaturan visualizer", "description": "Buka bengkel animasi lirik" },
+       "settings-theme-park": { "title": "Warna", "description": "Buka editor tema" },
+       "settings-global-lyric-offset": { "title": "Offset waktu global", "description": "Kalibrasi waktu lirik terhadap latensi audio Bluetooth atau perangkat" },
+@@ -2390,8 +2390,8 @@ export default {
+     "visualizerOpacity": "Opasitas Animasi Lirik",
+     "visualizerFrameRate": "Batas FPS Animasi Eksperimental",
+     "visualizerFrameRateDesc": "Pengaturan eksperimental. Saat diaktifkan, membatasi animasi berbasis requestAnimationFrame dan dapat menyebabkan masalah tak terduga dalam animasi, pengukuran, atau kode gerakan pihak ketiga.",
+-    "glowBlurQuantize": "Perbaiki animasi lirik macet di Linux",
+-    "glowBlurQuantizeDesc": "Mengubah cara beberapa animasi lirik menggambar glow, memperbaiki macet yang sesekali terjadi setelah pemutaran lama di Linux. Aktif secara default di Linux, nonaktif di platform lain. Lihat",
++    "glowBlurQuantize": "Gambar glow lirik di compositor",
++    "glowBlurQuantizeDesc": "Mengubah cara beberapa animasi lirik menggambar glow: filter compositor, bukan text shadow yang diraster ulang setiap frame. Memperbaiki macet sesekali setelah pemutaran lama di Linux, dan memangkas biaya raster per frame di ponsel. Tampilannya sangat mirip aslinya, tetapi tidak identik. Aktif secara default di Linux dan Android. Lihat",
+     "glowBlurQuantizeDocs": "kehabisan FD Chromium",
+     "visualizerFrameRateValue": "Batas",
+     "themePresets": "Preset Tema",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 6d05be9..53cbf97 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -661,7 +661,7 @@ export default {
+       "video-layer-toggle": { "title": "歌词后方视频层", "description": "显示或隐藏歌词后方的静音视频层" },
+       "video-layer-pick": { "title": "视频层：选择本地视频", "description": "选择在歌词后方播放的本地视频" },
+       "visualizer-toggle-random-per-song": { "title": "每首歌随机歌词动画", "description": "歌曲切换时随机使用一种歌词动画模式" },
+-      "visualizer-toggle-glow-blur-quantize": { "title": "修复 Linux 歌词动画卡死", "description": "改变部分歌词动画的发光绘制方式，修复 Linux 下长时间播放后偶发的卡死问题" },
++      "visualizer-toggle-glow-blur-quantize": { "title": "歌词发光改用合成层绘制", "description": "不再逐帧重绘文字阴影，改为合成层滤镜：修复 Linux 下长时间播放后的偶发卡死，并降低手机上每帧的栅格化开销" },
+       "settings-visualizer": { "title": "歌词动画样式设置", "description": "打开歌词动画实验台" },
+       "settings-theme-park": { "title": "配色", "description": "打开主题编辑器" },
+       "settings-global-lyric-offset": { "title": "全局时间偏移", "description": "校准蓝牙等设备造成的音画延迟" },
+@@ -2525,8 +2525,8 @@ export default {
+     "visualizerOpacity": "整体透明度",
+     "visualizerFrameRate": "实验性动画帧率限制",
+     "visualizerFrameRateDesc": "限制 requestAnimationFrame 驱动的动画帧率，可能导致意外问题，请谨慎使用。",
+-    "glowBlurQuantize": "修复 Linux 歌词动画卡死",
+-    "glowBlurQuantizeDesc": "改变部分歌词动画的发光绘制方式，修复 Linux 下长时间播放后偶发的卡死问题。Linux下默认开启，其他平台默认关闭。详见",
++    "glowBlurQuantize": "歌词发光改用合成层绘制",
++    "glowBlurQuantizeDesc": "改变部分歌词动画的发光绘制方式：不再逐帧重绘文字阴影，改为合成层滤镜。可修复 Linux 下长时间播放后的偶发卡死，并明显降低手机上每帧的栅格化开销。外观与原效果非常接近，但不完全相同。Linux 与手机端默认开启。详见",
+     "glowBlurQuantizeDocs": "chromium FD耗尽问题",
+     "visualizerFrameRateValue": "限制档位",
+     "themePresets": "配色主题预设",
+diff --git a/src/utils/glowBlurQuantize.ts b/src/utils/glowBlurQuantize.ts
+index f753fb0..2071bdc 100644
+--- a/src/utils/glowBlurQuantize.ts
++++ b/src/utils/glowBlurQuantize.ts
+@@ -1,6 +1,9 @@
++import { isAndroidShell } from './platform';
++
+ // src/utils/glowBlurQuantize.ts
+-// Lab > "Fix lyric animation freeze on Linux": whether the visualizers avoid asking Chromium's glyph
+-// cache for an unbounded set of glyph sizes and shadow radii. While it is on:
++// Whether the visualizers avoid asking Chromium's glyph cache for an unbounded set of glyph sizes and
++// shadow radii (Lab > "Draw lyric glow on the compositor"; also the default on Android, where the
++// same re-raster is what caps the visualizer at 30 fps). While it is on:
+ // - glows are drawn as `drop-shadow()` filters instead of text-shadows or canvas shadows (classic and
+ //   partita in wordGlow.ts, claddagh, fume's live line via `setCanvasTextGlow`);
+ // - canvas blur radii are whole pixels (`quantizeShadowBlur`);
+@@ -13,18 +16,27 @@
+ // and GPU process, and the renderer's soft limit of 1024 runs out after ~35 minutes of playback. The
+ // full story is in docs/linux-glyph-cache-fd-leak.md.
+ //
+-// On by default on Linux only: the drop-shadow glow looks nearly, but not exactly, the same, and
+-// elsewhere the leak costs a few MB a day - too little to be worth any visual difference.
++// On by default on Linux and on Android. Linux is where the leak ends in a frozen compositor. Android
++// is where it ends in a frame rate: classic re-rasterises the shadow mask of every glowing grapheme on
++// every frame, and that work sits on the raster thread, so it never shows up as a long task - it just
++// drops frames. Measured on the phone this app ships to with the in-app frame HUD: with this off the
++// visualizer reports p50 = p90 = p99 = 33.3 ms while `longtasks` stays at ~10 per 30 s, i.e. a locked
++// 30 fps from raster, not from JS. Everywhere else the leak costs a few MB a day, which is too little
++// to be worth any visual difference.
+ 
+ export const GLOW_BLUR_QUANTIZE_STORAGE_KEY = 'visualizer_glow_blur_quantize';
+ 
+-/** Linux, desktop or browser - the one platform where the leak ends in a frozen compositor. */
+-const isLinuxRuntime = () => {
++/**
++ * Where drawing the halo as a compositor filter beats drawing it as a glyph shadow: Linux (a frozen
++ * compositor) and Android (a lost frame every other vsync, see above).
++ */
++const isGlyphShadowCostlyRuntime = () => {
+     if (typeof window === 'undefined') return false;
+     const electronPlatform = (window as Window & { electron?: { platform?: string } }).electron?.platform;
+     if (electronPlatform) return electronPlatform === 'linux';
++    if (isAndroidShell()) return true;
+     const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
+-    return /Linux/.test(userAgent) && !/Android/.test(userAgent);
++    return /Android/.test(userAgent) || /Linux/.test(userAgent);
+ };
+ 
+ /** The stored choice, or the platform default when the user never touched the switch. */
+@@ -35,7 +47,7 @@ export const readStoredGlowBlurQuantize = (): boolean => {
+     } catch {
+         // Storage blocked: fall through to the default.
+     }
+-    return isLinuxRuntime();
++    return isGlyphShadowCostlyRuntime();
+ };
+ 
+ // Module-level on purpose, like the frame-rate limiter: the canvas renderers read it every frame and
+diff --git a/test/unit/visualizer/glowBlurQuantize.test.ts b/test/unit/visualizer/glowBlurQuantize.test.ts
+new file mode 100644
+index 0000000..3376c1a
+--- /dev/null
++++ b/test/unit/visualizer/glowBlurQuantize.test.ts
+@@ -0,0 +1,67 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { GLOW_BLUR_QUANTIZE_STORAGE_KEY, readStoredGlowBlurQuantize } from '@/utils/glowBlurQuantize';
++
++// test/unit/visualizer/glowBlurQuantize.test.ts
++// Pins the platform default of Lab > "歌词发光改用合成层绘制" (utils/glowBlurQuantize.ts). Linux needs it
++// or the renderer runs out of fds; Android needs it because the same per-frame glyph re-raster is what
++// pins the visualizer to 30 fps on the phone this app ships to. An explicit user choice always wins.
++
++const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 12; HUAWEI Pura 90 Pro Max) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
++const LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
++const WINDOWS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
++
++interface RuntimeStub {
++    userAgent: string;
++    window?: Record<string, unknown>;
++    /** Value `localStorage.getItem` returns, i.e. a choice the user already made. */
++    stored?: string | null;
++}
++
++/** Rebuilds the globals the module reads, so each case starts from a clean runtime. */
++const useRuntime = ({ userAgent, window = {}, stored = null }: RuntimeStub) => {
++    vi.stubGlobal('window', window);
++    vi.stubGlobal('navigator', { userAgent });
++    vi.stubGlobal('localStorage', {
++        getItem: (key: string) => (key === GLOW_BLUR_QUANTIZE_STORAGE_KEY ? stored : null),
++    });
++};
++
++afterEach(() => {
++    vi.unstubAllGlobals();
++});
++
++describe('glow blur quantize platform default', () => {
++    it('stays off on a desktop browser, where the leak costs a few MB a day', () => {
++        useRuntime({ userAgent: WINDOWS_UA });
++        expect(readStoredGlowBlurQuantize()).toBe(false);
++    });
++
++    it('is on for the Android phone, where the same re-raster is the frame-rate ceiling', () => {
++        useRuntime({ userAgent: ANDROID_UA });
++        expect(readStoredGlowBlurQuantize()).toBe(true);
++    });
++
++    it('is on inside the Android shell even when the user agent does not say Android', () => {
++        useRuntime({ userAgent: WINDOWS_UA, window: { foliaAndroid: {} } });
++        expect(readStoredGlowBlurQuantize()).toBe(true);
++    });
++
++    it('is on for Linux desktop, where the leak ends in a frozen compositor', () => {
++        useRuntime({ userAgent: LINUX_UA });
++        expect(readStoredGlowBlurQuantize()).toBe(true);
++    });
++
++    it('lets Electron override the user agent', () => {
++        useRuntime({ userAgent: ANDROID_UA, window: { electron: { platform: 'win32' } } });
++        expect(readStoredGlowBlurQuantize()).toBe(false);
++        useRuntime({ userAgent: WINDOWS_UA, window: { electron: { platform: 'linux' } } });
++        expect(readStoredGlowBlurQuantize()).toBe(true);
++    });
++
++    it('keeps a choice the user already made on either platform', () => {
++        useRuntime({ userAgent: ANDROID_UA, stored: 'false' });
++        expect(readStoredGlowBlurQuantize()).toBe(false);
++        useRuntime({ userAgent: WINDOWS_UA, stored: 'true' });
++        expect(readStoredGlowBlurQuantize()).toBe(true);
++    });
++});
+diff --git a/test/unit/visualizer/wordGlow.test.ts b/test/unit/visualizer/wordGlow.test.ts
+index 712d45f..58b5aad 100644
+--- a/test/unit/visualizer/wordGlow.test.ts
++++ b/test/unit/visualizer/wordGlow.test.ts
+@@ -11,7 +11,7 @@ import {
+ } from '@/utils/glowBlurQuantize';
+ 
+ // test/unit/visualizer/wordGlow.test.ts
+-// Guards Lab > "Fix lyric animation freeze on Linux" (utils/glowBlurQuantize.ts): while it is on, an
++// Guards Lab > "Draw lyric glow on the compositor" (utils/glowBlurQuantize.ts): while it is on, an
+ // animated glow must not sweep a glyph shadow's blur radius. A radius that changes every frame leaked a
+ // shared-memory fd in the renderer and GPU process about every thousand distinct radii on Linux,
+ // until the compositor stopped producing frames. On, the word glow is a `filter: drop-shadow()`

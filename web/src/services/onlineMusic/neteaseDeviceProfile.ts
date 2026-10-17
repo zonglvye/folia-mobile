@@ -84,18 +84,29 @@ const isUsableProfile = (value: unknown): value is NeteaseDeviceProfile => {
     );
 };
 
+/**
+ * 进程内缓存：设备身份是跨会话不变的常量，而它每个请求都要用一次。
+ * 不缓存就要每次读两条 localStorage 再 JSON.parse 一遍。
+ */
+let cachedProfile: NeteaseDeviceProfile | null = null;
+
 const persist = (profile: NeteaseDeviceProfile): NeteaseDeviceProfile => {
     writeProviderSessionValue('netease', PROFILE_KEY, JSON.stringify(profile));
+    cachedProfile = profile;
     return profile;
 };
 
 /** 读取设备身份；缺失或损坏时新建并把新值写回去。 */
 export const resolveNeteaseDeviceProfile = (): NeteaseDeviceProfile => {
+    if (cachedProfile) return cachedProfile;
     const stored = readProviderSessionValue('netease', PROFILE_KEY);
     if (stored) {
         try {
             const parsed = JSON.parse(stored);
-            if (isUsableProfile(parsed)) return parsed;
+            if (isUsableProfile(parsed)) {
+                cachedProfile = parsed;
+                return parsed;
+            }
         } catch {
             // 存储损坏就重建：继续用一份半截身份会让每个请求都带着错位的字段。
         }

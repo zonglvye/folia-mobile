@@ -1,0 +1,416 @@
+From 66f99beb08bd2a78330bfb96fecb015bf3278005 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 14:25:00 +0800
+Subject: [PATCH 16/20] perf(debug): split a long frame into script,
+ style/layout and render in the HUD
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The frame-time percentiles from the phone now say the throughput problem is
+mostly gone - a wall reading came back at 59.5 fps with p50 = 11.1 ms on a 90 Hz
+panel - but the same screenshot has p99 = 77.5 ms, a 155 ms worst frame, 2.8 %
+jank and 19 long tasks in 15 s. Those are hitches, and `longtask` cannot say
+whether a hitch was React, a forced reflow or paint. On a phone with no adb that
+unknown cannot be resolved by looking, so the HUD has to be the instrument.
+
+`frameSamples.ts` now observes `long-animation-frame` alongside `longtask` and
+keeps the breakdown of the slowest frame: script time, style+layout time, render
+time, the layout the page forced from inside a script, and the name of the
+slowest script. The reduction is a pure exported function
+(`summarizeLongAnimationFrame`) covered by test, because the entry mixes absolute
+markers (`startTime`, `renderStart`, `styleAndLayoutStart`) with a duration and
+the end of the frame is easy to get wrong. The HUD shows `loaf`,
+`js·css·paint`, `slowest js`, and `forced layout` when it is non-zero.
+
+A second observer, not a second entry type on the first: engines without the
+entry type must still report long tasks, and the HUD already degrades to `loaf:
+n/a` when neither arrives.
+---
+ src/components/FrameStatsHud.tsx              |  31 +++-
+ src/services/debug/frameSamples.ts            | 145 +++++++++++++++++-
+ test/unit/services/debug/frameSamples.test.ts |  87 ++++++++++-
+ 3 files changed, 258 insertions(+), 5 deletions(-)
+
+diff --git a/src/components/FrameStatsHud.tsx b/src/components/FrameStatsHud.tsx
+index 47451b3..03027e8 100644
+--- a/src/components/FrameStatsHud.tsx
++++ b/src/components/FrameStatsHud.tsx
+@@ -35,6 +35,13 @@ const CORNER_PX = 64;
+ 
+ const fmt = (value: number, digits = 1) => value.toFixed(digits);
+ 
++/** Keeps a script name inside the panel: the interesting part is the prefix, not the chunk hash. */
++const SCRIPT_LABEL_MAX = 26;
++const clipScriptLabel = (script: { name: string; file: string }, max: number) => {
++    const full = script.file ? `${script.name} @ ${script.file}` : script.name;
++    return full.length > max ? `${full.slice(0, max - 1)}…` : full;
++};
++
+ const jankTone = (ms: number): string => {
+     if (ms > 50) return '#fb7185';
+     if (ms > 33.4) return '#fbbf24';
+@@ -108,6 +115,7 @@ const FrameStatsHud: React.FC = () => {
+     if (!visible) return null;
+ 
+     const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
++    const loaf = stats.loafWorst;
+ 
+     return (
+         <div
+@@ -122,7 +130,7 @@ const FrameStatsHud: React.FC = () => {
+                 border: '1px solid rgba(148, 163, 184, 0.35)',
+                 color: '#e2e8f0',
+                 font: '500 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
+-                minWidth: 214,
++                minWidth: 240,
+                 pointerEvents: 'auto',
+             }}
+         >
+@@ -158,6 +166,27 @@ const FrameStatsHud: React.FC = () => {
+             <Row label="vis" value={`${visualizerMode}${randomModePerSong ? ' ·random' : ''}`} />
+             <Row label="bg" value={backgroundMode ?? `${DEFAULT_VISUALIZER_BACKGROUND_MODE} (default)`} />
+             <Row label="glow" value={glowOnCompositor ? 'compositor' : 'shadow'} />
++            {loaf ? (
++                <>
++                    <Row
++                        label="loaf"
++                        value={`${stats.loafCount} · max ${fmt(loaf.worstMs, 0)} ms`}
++                        tone={jankTone(loaf.worstMs)}
++                    />
++                    <Row
++                        label="js·css·paint"
++                        value={`${fmt(loaf.scriptMs, 0)} · ${fmt(loaf.styleAndLayoutMs, 0)} · ${fmt(loaf.renderMs, 0)}`}
++                    />
++                    {loaf.slowestScript && (
++                        <Row label="slowest js" value={clipScriptLabel(loaf.slowestScript, SCRIPT_LABEL_MAX)} />
++                    )}
++                    {loaf.forcedStyleAndLayoutMs >= 1 && (
++                        <Row label="forced layout" value={`${fmt(loaf.forcedStyleAndLayoutMs, 0)} ms`} />
++                    )}
++                </>
++            ) : (
++                <Row label="loaf" value="n/a" />
++            )}
+             <div style={{ marginTop: 4, opacity: 0.4, fontSize: 9 }}>hold top-left corner to toggle</div>
+         </div>
+     );
+diff --git a/src/services/debug/frameSamples.ts b/src/services/debug/frameSamples.ts
+index 4003ef8..9696eba 100644
+--- a/src/services/debug/frameSamples.ts
++++ b/src/services/debug/frameSamples.ts
+@@ -43,8 +43,105 @@ export interface FrameStats {
+     longestTaskMs: number;
+     /** `performance.memory` is Chrome-only, so this is null where the runtime hides it. */
+     heapMB: number | null;
++    /** Long animation frames seen since the last reset, and the cost split of the worst one. */
++    loafCount: number;
++    loafWorst: LongFrameBreakdown | null;
+ }
+ 
++/**
++ * Where a slow frame actually went, as `long-animation-frame` reports it. Script, style/layout and
++ * render are separate budgets on Chromium, and each points at a different fix: a script-bound stall is
++ * React work, a style/layout-bound one is a forced reflow, and a render-bound one is paint or GPU. The
++ * frame-time percentiles alone cannot tell those apart, which matters on a phone with no adb.
++ */
++export interface LongFrameBreakdown {
++    worstMs: number;
++    scriptMs: number;
++    styleAndLayoutMs: number;
++    renderMs: number;
++    /** Layout work the page forced by reading geometry inside a script, ms. */
++    forcedStyleAndLayoutMs: number;
++    /** The slowest script in the frame, when the engine names one. */
++    slowestScript: { name: string; file: string } | null;
++}
++
++/** The `long-animation-frame` fields this sampler reads; typed here so the reduction is testable. */
++export interface ScriptTimingLike {
++    duration?: number;
++    forcedStyleAndLayoutDuration?: number;
++    invoker?: string;
++    sourceURL?: string;
++    sourceFunctionName?: string;
++}
++
++export interface LongAnimationFrameLike {
++    /** Absolute (time-origin relative) start of the frame; the markers below use the same clock. */
++    startTime: number;
++    duration: number;
++    renderStart?: number;
++    styleAndLayoutStart?: number;
++    scripts?: ReadonlyArray<ScriptTimingLike>;
++}
++
++const fileNameOf = (url: string | undefined): string => {
++    if (!url) return '';
++    const withoutQuery = url.split(/[?#]/)[0];
++    return withoutQuery.slice(withoutQuery.lastIndexOf('/') + 1);
++};
++
++/**
++ * Splits one long animation frame into script / style+layout / render. The regions are contiguous by
++ * definition: render runs from `renderStart` to `styleAndLayoutStart`, and style+layout from there to
++ * the end of the frame. Markers are absolute timestamps while `duration` is a span, so the end has to
++ * be derived from `startTime`; a missing marker collapses to zero rather than inventing a split.
++ */
++export const summarizeLongAnimationFrame = (entry: LongAnimationFrameLike): LongFrameBreakdown => {
++    const duration = Math.max(0, entry.duration);
++    const frameStart = entry.startTime;
++    const frameEnd = frameStart + duration;
++    const renderStart = entry.renderStart ?? frameStart;
++    const styleAndLayoutStart = entry.styleAndLayoutStart ?? 0;
++
++    const renderMs = styleAndLayoutStart > 0
++        ? Math.max(0, styleAndLayoutStart - renderStart)
++        : Math.max(0, frameEnd - renderStart);
++    const styleAndLayoutMs = styleAndLayoutStart > 0
++        ? Math.max(0, frameEnd - styleAndLayoutStart)
++        : 0;
++
++    const scripts = entry.scripts ?? [];
++    let scriptMs = 0;
++    let forcedStyleAndLayoutMs = 0;
++    let slowest: ScriptTimingLike | null = null;
++    let slowestMs = -1;
++    for (const script of scripts) {
++        const scriptDuration = script.duration ?? 0;
++        scriptMs += scriptDuration;
++        forcedStyleAndLayoutMs += script.forcedStyleAndLayoutDuration ?? 0;
++        if (scriptDuration > slowestMs) {
++            slowestMs = scriptDuration;
++            slowest = script;
++        }
++    }
++
++    return {
++        worstMs: duration,
++        scriptMs,
++        styleAndLayoutMs,
++        renderMs,
++        forcedStyleAndLayoutMs,
++        slowestScript: slowest
++            ? { name: slowest.sourceFunctionName || slowest.invoker || '(anonymous)', file: fileNameOf(slowest.sourceURL) }
++            : null,
++    };
++};
++
++/** Keeps the slowest frame of the window: the one worth explaining. */
++export const worseLongFrame = (
++    current: LongFrameBreakdown | null,
++    next: LongFrameBreakdown,
++): LongFrameBreakdown => (current && current.worstMs >= next.worstMs ? current : next);
++
+ export const EMPTY_FRAME_STATS: FrameStats = {
+     frames: 0,
+     windowMs: 0,
+@@ -57,6 +154,8 @@ export const EMPTY_FRAME_STATS: FrameStats = {
+     longTaskCount: 0,
+     longestTaskMs: 0,
+     heapMB: null,
++    loafCount: 0,
++    loafWorst: null,
+ };
+ 
+ /**
+@@ -67,10 +166,18 @@ export const computeFrameStats = (
+     deltas: readonly number[],
+     longTask: { count: number; longestMs: number },
+     heapMB: number | null,
++    loaf: { count: number; worst: LongFrameBreakdown | null } = { count: 0, worst: null },
+ ): FrameStats => {
+     const frames = deltas.length;
+     if (frames === 0) {
+-        return { ...EMPTY_FRAME_STATS, longTaskCount: longTask.count, longestTaskMs: longTask.longestMs, heapMB };
++        return {
++            ...EMPTY_FRAME_STATS,
++            longTaskCount: longTask.count,
++            longestTaskMs: longTask.longestMs,
++            heapMB,
++            loafCount: loaf.count,
++            loafWorst: loaf.worst,
++        };
+     }
+ 
+     const sorted = deltas.slice().sort((a, b) => a - b);
+@@ -94,6 +201,8 @@ export const computeFrameStats = (
+         longTaskCount: longTask.count,
+         longestTaskMs: longTask.longestMs,
+         heapMB,
++        loafCount: loaf.count,
++        loafWorst: loaf.worst,
+     };
+ };
+ 
+@@ -107,6 +216,9 @@ let rafHandle = 0;
+ let longTaskCount = 0;
+ let longestTaskMs = 0;
+ let observer: PerformanceObserver | null = null;
++let loafCount = 0;
++let loafWorst: LongFrameBreakdown | null = null;
++let loafObserver: PerformanceObserver | null = null;
+ 
+ /**
+  * The limiter patches `window.requestAnimationFrame`; measuring through the patch would report the
+@@ -155,6 +267,24 @@ const startSampling = () => {
+     } catch {
+         observer = null;
+     }
++
++    // The same stalls split three ways. `longtask` says a frame was lost; `long-animation-frame` says
++    // whether the time went to script, to style/layout or to render, which is what decides the fix.
++    // Its own observer, so an engine without the entry type still reports long tasks.
++    try {
++        loafObserver = new PerformanceObserver(list => {
++            for (const entry of list.getEntries()) {
++                loafCount += 1;
++                loafWorst = worseLongFrame(
++                    loafWorst,
++                    summarizeLongAnimationFrame(entry as unknown as LongAnimationFrameLike),
++                );
++            }
++        });
++        loafObserver.observe({ entryTypes: ['long-animation-frame'] });
++    } catch {
++        loafObserver = null;
++    }
+ };
+ 
+ const stopSampling = () => {
+@@ -164,15 +294,19 @@ const stopSampling = () => {
+     }
+     observer?.disconnect();
+     observer = null;
++    loafObserver?.disconnect();
++    loafObserver = null;
+ };
+ 
+-/** Drops the window and the long-task counters. The next `readFrameStats` starts from empty. */
++/** Drops the window, the long-task counters and the slowest-frame breakdown. */
+ export const resetFrameSamples = () => {
+     head = 0;
+     count = 0;
+     lastTimestamp = 0;
+     longTaskCount = 0;
+     longestTaskMs = 0;
++    loafCount = 0;
++    loafWorst = null;
+     notify();
+ };
+ 
+@@ -184,7 +318,12 @@ export const readFrameStats = (): FrameStats => {
+     }
+     const heap = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
+     const heapMB = heap?.usedJSHeapSize ? heap.usedJSHeapSize / (1024 * 1024) : null;
+-    return computeFrameStats(samples, { count: longTaskCount, longestMs: longestTaskMs }, heapMB);
++    return computeFrameStats(
++        samples,
++        { count: longTaskCount, longestMs: longestTaskMs },
++        heapMB,
++        { count: loafCount, worst: loafWorst },
++    );
+ };
+ 
+ // ---- visibility ------------------------------------------------------------
+diff --git a/test/unit/services/debug/frameSamples.test.ts b/test/unit/services/debug/frameSamples.test.ts
+index f9bc870..7042936 100644
+--- a/test/unit/services/debug/frameSamples.test.ts
++++ b/test/unit/services/debug/frameSamples.test.ts
+@@ -1,5 +1,11 @@
+ import { describe, expect, it } from 'vitest';
+-import { computeFrameStats, EMPTY_FRAME_STATS, FRAME_JANK_MS } from '../../../../src/services/debug/frameSamples';
++import {
++    computeFrameStats,
++    EMPTY_FRAME_STATS,
++    FRAME_JANK_MS,
++    summarizeLongAnimationFrame,
++    worseLongFrame,
++} from '../../../../src/services/debug/frameSamples';
+ 
+ // test/unit/services/debug/frameSamples.test.ts
+ 
+@@ -38,4 +44,83 @@ describe('computeFrameStats', () => {
+         computeFrameStats(deltas, { count: 0, longestMs: 0 }, null);
+         expect(deltas).toEqual([30, 10, 20]);
+     });
++
++    it('carries the slowest-frame breakdown through even when no frames were sampled yet', () => {
++        const loaf = summarizeLongAnimationFrame({ startTime: 1000, duration: 155 });
++        const stats = computeFrameStats([], { count: 0, longestMs: 0 }, null, { count: 3, worst: loaf });
++        expect(stats.loafCount).toBe(3);
++        expect(stats.loafWorst).toBe(loaf);
++    });
++});
++
++describe('summarizeLongAnimationFrame', () => {
++    // A 155 ms frame that started at t=5000: scripts ran to 5130, style/layout to 5140, paint to 5155.
++    const frame = {
++        startTime: 5000,
++        duration: 155,
++        renderStart: 5100,
++        styleAndLayoutStart: 5140,
++        scripts: [
++            { duration: 60, forcedStyleAndLayoutDuration: 12, sourceFunctionName: 'renderWall', sourceURL: 'https://x/assets/bundle-abc.js?v=1' },
++            { duration: 40, invoker: 'MessagePort' },
++        ],
++    };
++
++    it('splits the frame into script, style/layout and render on the same clock', () => {
++        const breakdown = summarizeLongAnimationFrame(frame);
++        expect(breakdown.worstMs).toBe(155);
++        expect(breakdown.scriptMs).toBe(100);
++        expect(breakdown.renderMs).toBe(40); // renderStart -> styleAndLayoutStart
++        expect(breakdown.styleAndLayoutMs).toBe(15); // styleAndLayoutStart -> end
++        expect(breakdown.forcedStyleAndLayoutMs).toBe(12);
++    });
++
++    it('names the slowest script and strips the query off its file', () => {
++        expect(summarizeLongAnimationFrame(frame).slowestScript).toEqual({
++            name: 'renderWall',
++            file: 'bundle-abc.js',
++        });
++    });
++
++    it('falls back through invoker, then to anonymous, and never invents a file', () => {
++        const unnamed = summarizeLongAnimationFrame({
++            startTime: 0,
++            duration: 80,
++            scripts: [{ duration: 50, invoker: 'MessagePort' }, { duration: 70 }],
++        });
++        expect(unnamed.slowestScript).toEqual({ name: '(anonymous)', file: '' });
++        const viaInvoker = summarizeLongAnimationFrame({
++            startTime: 0,
++            duration: 80,
++            scripts: [{ duration: 70, invoker: 'MessagePort' }],
++        });
++        expect(viaInvoker.slowestScript).toEqual({ name: 'MessagePort', file: '' });
++    });
++
++    it('reports an all-render frame when the engine gives no style/layout marker', () => {
++        const breakdown = summarizeLongAnimationFrame({ startTime: 100, duration: 90, renderStart: 110 });
++        expect(breakdown.styleAndLayoutMs).toBe(0);
++        expect(breakdown.renderMs).toBe(80);
++        expect(breakdown.scriptMs).toBe(0);
++        expect(breakdown.slowestScript).toBeNull();
++    });
++
++    it('clamps markers that disagree rather than reporting negative time', () => {
++        const breakdown = summarizeLongAnimationFrame({
++            startTime: 0,
++            duration: 60,
++            renderStart: 50,
++            styleAndLayoutStart: 40,
++        });
++        expect(breakdown.renderMs).toBe(0);
++        expect(breakdown.styleAndLayoutMs).toBe(20);
++    });
++
++    it('keeps whichever of two frames was slower', () => {
++        const slow = summarizeLongAnimationFrame({ startTime: 0, duration: 200 });
++        const fast = summarizeLongAnimationFrame({ startTime: 0, duration: 90 });
++        expect(worseLongFrame(slow, fast)).toBe(slow);
++        expect(worseLongFrame(fast, slow)).toBe(slow);
++        expect(worseLongFrame(null, fast)).toBe(fast);
++    });
+ });

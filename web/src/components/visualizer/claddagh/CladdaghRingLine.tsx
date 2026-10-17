@@ -395,7 +395,7 @@ export const RingLine: React.FC<RingLineProps> = ({
                     }
                 }
 
-                // While Lab > Fix lyric animation freeze on Linux is on, the glow is a drop-shadow filter
+                // While Lab > Draw lyric glow on the compositor is on, the glow is a drop-shadow filter
                 // rather than a text-shadow: the glyph's `scale()` changes every frame, so even a whole-pixel
                 // text-shadow radius reaches Chromium's glyph cache as an unbounded set of device sizes, and
                 // each one leaks shared memory. A filter is applied by the compositor and never goes through

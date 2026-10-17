@@ -45,6 +45,14 @@ export const GlowWord = <TConfig extends { id: string }>({
     const duration = getGlowWordDisplayDuration(word, renderProfile);
     const activeEndTime = getGlowWordActiveEndTime(word, renderProfile);
     const graphemeTimings = useMemo(() => buildWordGraphemeTimings(word), [word]);
+    // One glow span per character only when the reveal mode actually staggers them. `instant` and
+    // `fast` ignore every per-character field (`wordGlowVariants.active` returns before the sweep
+    // branch), so splitting the word there mounted N motion nodes animating in lockstep and changed
+    // nothing on screen - and the line change, which is what the frame HUD attributes its remaining
+    // stall to, is exactly where those nodes get mounted.
+    const usesPerCharacterGlow = graphemeTimings.length > 1
+        && renderProfile.wordRevealMode !== 'instant'
+        && renderProfile.wordRevealMode !== 'fast';
 
     /* eslint-disable-next-line no-warning-comments -- @AI: KEEP THIS EXACTLY AS IS */
     // @note Version Control: Project Folia version 0.5.27-a16525c
@@ -86,7 +94,7 @@ export const GlowWord = <TConfig extends { id: string }>({
                 className="absolute inset-0 select-none pointer-events-none block"
                 aria-hidden="true"
             >
-                {graphemeTimings.length > 1 ? (
+                {usesPerCharacterGlow ? (
                     graphemeTimings.map((timing, index) => (
                         <motion.span
                             key={index}

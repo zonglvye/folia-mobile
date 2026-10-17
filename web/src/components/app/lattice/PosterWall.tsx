@@ -15,6 +15,7 @@ import { useLatticePosterSelection } from './useLatticePosterSelection';
 import { useWallKeyboardFocus } from './useWallKeyboardFocus';
 import { useWallPointerPan } from '../../wall/useWallPointerPan';
 import { formatWorldTransform } from '../../wall/wallView';
+import { beginPerfPhase } from '../../../services/debug/perfPhases';
 import type { LatticeTile } from './latticeModel';
 import LatticePoster from './LatticePoster';
 import { countRender } from '../../../dev/renderCount';
@@ -125,6 +126,8 @@ export default function PosterWall({
         publishCurrentPosterVisibility(next);
         if (!updateBounds || frameRef.current !== null) return;
         frameRef.current = requestAnimationFrame(() => {
+            // Re-culling mounts and unmounts posters, which is the wall's one per-gesture commit.
+            beginPerfPhase('wall cull');
             setBounds(getWorldBounds(cameraRef.current, viewportRef.current));
             frameRef.current = null;
         });

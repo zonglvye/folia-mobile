@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type React from 'react';
 import { PlayerState, type ActiveLocalLyricsSource, type LyricData, type PlaybackContext, type ReplayGainMode, type SongResult } from '../types';
 import { createCoverUrlResolver } from '../components/app/playback/createCoverUrlResolver';
+import { beginPerfPhase } from '../services/debug/perfPhases';
 
 /** The now-playing picture, frozen for as long as a transition is running. */
 export interface TransitionDisplay {
@@ -98,7 +99,15 @@ export const usePlaybackStore = create<PlaybackStoreState>((set, get) => ({
     lyricTimelineOffsetMs: 0,
     transitionDisplay: null,
 
-    setCurrentSong: (next) => set({ currentSong: resolve(next, get().currentSong) }),
+    // The two updates that a whole scene hangs off: a new song rebuilds the visualizer's cover, palette
+    // and shader colours, and a new lyric line rebuilds the word layers. Both mark a debug phase so a
+    // long task observed right afterwards can be attributed to one of them instead of staying a number
+    // (see services/debug/perfPhases.ts; the phone's engine has no `long-animation-frame`).
+    setCurrentSong: (next) => {
+        const resolved = resolve(next, get().currentSong);
+        if (resolved !== get().currentSong) beginPerfPhase('song change');
+        set({ currentSong: resolved });
+    },
     setAudioSrc: (next) => set({ audioSrc: resolve(next, get().audioSrc) }),
     // Plain setter: the extension transform (Folium `lyrics.transform`) runs in the lyrics
     // pipeline (createLyricsSetter), so functional updates here never re-transform.
@@ -107,7 +116,11 @@ export const usePlaybackStore = create<PlaybackStoreState>((set, get) => ({
     setCachedCoverUrl: (next) => set({ cachedCoverUrl: resolve(next, get().cachedCoverUrl) }),
     setDuration: (next) => set({ duration: resolve(next, get().duration) }),
     setPlayerState: (next) => set({ playerState: resolve(next, get().playerState) }),
-    setCurrentLineIndex: (next) => set({ currentLineIndex: resolve(next, get().currentLineIndex) }),
+    setCurrentLineIndex: (next) => {
+        const resolved = resolve(next, get().currentLineIndex);
+        if (resolved !== get().currentLineIndex) beginPerfPhase('lyric line');
+        set({ currentLineIndex: resolved });
+    },
     setPlayQueue: (next) => set({ playQueue: resolve(next, get().playQueue) }),
     setActivePlaybackContext: (next) => set({ activePlaybackContext: resolve(next, get().activePlaybackContext) }),
     setIsFmMode: (next) => set({ isFmMode: resolve(next, get().isFmMode) }),

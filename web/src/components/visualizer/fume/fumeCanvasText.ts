@@ -375,7 +375,7 @@ export const drawFumeLiveBlock = (
                     continue;
                 }
 
-                // Whole pixels while Lab > Fix lyric animation freeze on Linux is on: a
+                // Whole pixels while Lab > Draw lyric glow on the compositor is on: a
                 // blur radius that changes every frame leaks shared memory in Chromium's
                 // glyph cache.
                 // See utils/glowBlurQuantize.ts.

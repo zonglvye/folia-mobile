@@ -11,7 +11,7 @@ import {
 } from '@/utils/glowBlurQuantize';
 
 // test/unit/visualizer/wordGlow.test.ts
-// Guards Lab > "Fix lyric animation freeze on Linux" (utils/glowBlurQuantize.ts): while it is on, an
+// Guards Lab > "Draw lyric glow on the compositor" (utils/glowBlurQuantize.ts): while it is on, an
 // animated glow must not sweep a glyph shadow's blur radius. A radius that changes every frame leaked a
 // shared-memory fd in the renderer and GPU process about every thousand distinct radii on Linux,
 // until the compositor stopped producing frames. On, the word glow is a `filter: drop-shadow()`

@@ -19,7 +19,7 @@ import { useVisualizerSettingsStore } from '../../../stores/useVisualizerSetting
 // the home background, native blur, the frame-rate cap, the Linux glow fix and reduced motion.
 // Moved out of the lab page, where these sat among unrelated player-chrome switches.
 
-/** Docs page behind the "Fix lyric animation freeze on Linux" switch. */
+/** Docs page behind the "Draw lyric glow on the compositor" switch. */
 const CHROMIUM_FD_EXHAUSTION_DOCS_URL = 'https://folia-site.cielaniska.top/guide/chromium-fd-exhaustion';
 
 /** On desktop a plain link would open inside the app window; hand it to the system browser instead. */

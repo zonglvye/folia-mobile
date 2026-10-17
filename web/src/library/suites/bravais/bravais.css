@@ -391,6 +391,31 @@
     overflow: hidden;
 }
 
+/* 矮视口（手机横屏，视口高约 370px）：竖排大标题在这个高度里只放得下三四个字，而上下两个装饰引号
+ * 反而成了缝里最显眼的东西——它们没有任何说明，看起来就像两个多余的标点。
+ * 这一档整体换一种排法：标题改成横排单行、放不下就省略号；引号收掉。与完整信息条的其它行同一条基线，
+ * 标题区仍然占满剩余高度，所以下面的动作行位置不变。
+ * 只作用于标题区域里的标题，书脊那颗按钮（.bravais-seam-vtitle.is-button）仍是竖排。 */
+@media (max-height: 480px) {
+    .bravais-seam .bravais-seam-quote { display: none; }
+    .bravais-seam .bravais-seam-title-area { justify-content: flex-start; }
+    .bravais-seam .bravais-seam-title-area .bravais-seam-vtitle-wrap {
+        min-height: 0;
+        flex: 0 0 auto;
+        justify-content: flex-start;
+        overflow: visible;
+    }
+    .bravais-seam .bravais-seam-title-area .bravais-seam-vtitle {
+        max-width: 100%;
+        overflow: hidden;
+        font-size: 20px;
+        letter-spacing: 0.02em;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        writing-mode: horizontal-tb;
+    }
+}
+
 .bravais-seam-rule { flex: none; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
 .bravais-seam-meta { color: var(--bravais-seam-ink-soft); font-size: 12px; line-height: 1.6; }
 .bravais-seam-status { font-size: 12px; line-height: 1.6; }

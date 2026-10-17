@@ -14,7 +14,7 @@ import { readFumeAudioLevels, type FumeStageDriver, type FumeStageScene } from '
 // Fume's stage: one full-viewport canvas redrawn every frame - background, then every block on screen,
 // waiting and passed blocks from cached snapshots, printing blocks glyph by glyph.
 //
-// While Lab > Fix lyric animation freeze on Linux is on, a printing block goes through FumeLiveRaster
+// While Lab > Draw lyric glow on the compositor is on, a printing block goes through FumeLiveRaster
 // (drawn at a bounded set of raster scales, then placed under the camera) instead of straight under
 // the camera transform, which asked Chromium's glyph cache for a new size every frame. A Pixi stage
 // was built and measured as the alternative: no less CPU, 85 MiB more video memory

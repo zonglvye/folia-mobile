@@ -1,4 +1,5 @@
 import { extractRepresentativeColorsFromPixels } from './colorPalette';
+import { recordPerfPhase } from '../services/debug/perfPhases';
 
 // src/utils/colorExtractor.ts
 
@@ -11,13 +12,17 @@ interface RGB {
 /**
  * 把图片缩到 50×50 读出像素（crossOrigin 匿名请求）。图片加载失败、没有 CORS 头、画布被污染（读像素抛
  * SecurityError）时都返回 null。silent：失败时不打 warn（墙上一批头像取色时用，失败只是回退）。
+ *
+ * 解码先走 img.decode()：`onload` 只代表数据到手，真正解码发生在第一次 drawImage，而且是**主线程同步**做的。
+ * 一张 1500px 的封面在手机上同步解码就是一条几十上百毫秒的长任务 —— 而这里最终只要 50×50 的样本。decode()
+ * 把解码交给解码线程，drawImage 不再触发同步解码；引擎不支持或解码失败时照样退回直接绘制。
  */
 export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?: boolean } = {}): Promise<Uint8ClampedArray | null> => (
     new Promise(resolve => {
         const img = new Image();
         img.crossOrigin = "Anonymous";
 
-        img.onload = () => {
+        const readPixels = () => {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             if (!ctx) {
@@ -31,14 +36,25 @@ export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?:
             canvas.width = width;
             canvas.height = height;
 
+            const startedAt = typeof performance === 'undefined' ? 0 : performance.now();
             try {
                 ctx.drawImage(img, 0, 0, width, height);
-                resolve(ctx.getImageData(0, 0, width, height).data);
+                const pixels = ctx.getImageData(0, 0, width, height).data;
+                if (startedAt) recordPerfPhase('cover palette', startedAt, performance.now());
+                resolve(pixels);
             } catch (error) {
                 // 画布被跨源图片污染时 getImageData 抛错；不吞掉的话这个 Promise 永远不 resolve。
                 if (!silent) console.warn("Failed to read image pixels for color extraction", error);
                 resolve(null);
             }
+        };
+
+        img.onload = () => {
+            if (typeof img.decode === 'function') {
+                img.decode().then(readPixels, readPixels);
+                return;
+            }
+            readPixels();
         };
 
         img.onerror = (e) => {

@@ -1,0 +1,198 @@
+From 303463a5a56ff204615018c42c97c1af8548c7c6 Mon Sep 17 00:00:00 2001
+From: folia-mobile <mobile@folia.local>
+Date: Sat, 17 Oct 2026 13:36:39 +0800
+Subject: [PATCH 13/20] fix(bravais): horizontal title on short seams;
+ perf(netease): cut per-request work
+
+Seam: on a landscape phone the seam is ~300-340px tall, and an 18-character
+vertical title needs ~500px, so the vertical layout could only ever show three
+or four characters - with two quotation marks around them that read as stray
+punctuation. Below 480px of viewport height the title is now a single
+horizontal line with an ellipsis and the decorative quotes are dropped. Verified
+in the same headless harness at 300x368: no quotes, title readable, and the
+count, both actions and the list/more row all still visible.
+
+Perf, all on the request path every online call takes:
+- eapi blocks are issued together instead of awaited one at a time. Measured on
+  30 blocks (a realistic eapi payload): 0.658ms -> 0.230ms per call, 2.9x, with
+  byte-identical ciphertext - the reference-vector tests still pass unchanged.
+- The three AES keys are imported once and cached as promises, so concurrent
+  requests share one importKey instead of racing three.
+- The device profile is memoised; it was reading two localStorage entries and
+  JSON.parse-ing on every request.
+- The cookie jar is only written back when it actually changed. Playing one song
+  makes three requests, and each one used to rewrite the same string through
+  the synchronous localStorage API.
+
+Not changed, deliberately: the wall is already viewport-virtualised (layoutLattice
+lays out only posters intersecting the viewport plus overscan) and
+MAX_RENDERED_INSTANCES is a 400-instance guard, not a render budget - lowering it
+would have been cargo-culting.
+---
+ src/library/suites/bravais/bravais.css        | 25 ++++++++++++++++
+ src/services/onlineMusic/neteaseCrypto.ts     | 30 +++++++++++++++----
+ .../onlineMusic/neteaseDeviceProfile.ts       | 13 +++++++-
+ src/services/onlineMusic/neteaseLocalApi.ts   | 20 ++++++++++---
+ 4 files changed, 78 insertions(+), 10 deletions(-)
+
+diff --git a/src/library/suites/bravais/bravais.css b/src/library/suites/bravais/bravais.css
+index 4f403ed..ae5ac66 100644
+--- a/src/library/suites/bravais/bravais.css
++++ b/src/library/suites/bravais/bravais.css
+@@ -391,6 +391,31 @@
+     overflow: hidden;
+ }
+ 
++/* 矮视口（手机横屏，视口高约 370px）：竖排大标题在这个高度里只放得下三四个字，而上下两个装饰引号
++ * 反而成了缝里最显眼的东西——它们没有任何说明，看起来就像两个多余的标点。
++ * 这一档整体换一种排法：标题改成横排单行、放不下就省略号；引号收掉。与完整信息条的其它行同一条基线，
++ * 标题区仍然占满剩余高度，所以下面的动作行位置不变。
++ * 只作用于标题区域里的标题，书脊那颗按钮（.bravais-seam-vtitle.is-button）仍是竖排。 */
++@media (max-height: 480px) {
++    .bravais-seam .bravais-seam-quote { display: none; }
++    .bravais-seam .bravais-seam-title-area { justify-content: flex-start; }
++    .bravais-seam .bravais-seam-title-area .bravais-seam-vtitle-wrap {
++        min-height: 0;
++        flex: 0 0 auto;
++        justify-content: flex-start;
++        overflow: visible;
++    }
++    .bravais-seam .bravais-seam-title-area .bravais-seam-vtitle {
++        max-width: 100%;
++        overflow: hidden;
++        font-size: 20px;
++        letter-spacing: 0.02em;
++        text-overflow: ellipsis;
++        white-space: nowrap;
++        writing-mode: horizontal-tb;
++    }
++}
++
+ .bravais-seam-rule { flex: none; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+ .bravais-seam-meta { color: var(--bravais-seam-ink-soft); font-size: 12px; line-height: 1.6; }
+ .bravais-seam-status { font-size: 12px; line-height: 1.6; }
+diff --git a/src/services/onlineMusic/neteaseCrypto.ts b/src/services/onlineMusic/neteaseCrypto.ts
+index 7d04ea8..4c103a8 100644
+--- a/src/services/onlineMusic/neteaseCrypto.ts
++++ b/src/services/onlineMusic/neteaseCrypto.ts
+@@ -46,7 +46,18 @@ const toHexUpper = (bytes: Uint8Array): string => (
+     Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('').toUpperCase()
+ );
+ 
+-const importAesKey = (key: string) => crypto.subtle.importKey('raw', encoder.encode(key), 'AES-CBC', false, ['encrypt']);
++/**
++ * 三个密钥都是固定常量，导入结果是可复用的 CryptoKey。缓存的是 Promise 而不是 CryptoKey：
++ * 并发请求会拿到同一个 Promise，而不是各自再发起一次 importKey。
++ */
++const aesKeyCache = new Map<string, Promise<CryptoKey>>();
++const importAesKey = (key: string): Promise<CryptoKey> => {
++    const cached = aesKeyCache.get(key);
++    if (cached) return cached;
++    const pending = crypto.subtle.importKey('raw', encoder.encode(key), 'AES-CBC', false, ['encrypt']);
++    aesKeyCache.set(key, pending);
++    return pending;
++};
+ 
+ /** AES-128-CBC with PKCS#7 (WebCrypto's only CBC padding), matching CryptoJS's default. */
+ const aesCbcEncrypt = async (plaintext: string, key: string): Promise<Uint8Array> => {
+@@ -65,6 +76,10 @@ const aesCbcEncrypt = async (plaintext: string, key: string): Promise<Uint8Array
+  * A single 16-byte block run through CBC with a zero IV encrypts to exactly E(block), so encrypting
+  * the padded plaintext one block at a time reproduces ECB. Each CBC call also appends a padding
+  * block, which is dropped: the padding is applied once, here, before the loop.
++ *
++ * The blocks are independent, so they are issued together instead of awaited one by one: every
++ * `crypto.subtle.encrypt` is a round trip off the main thread, and an eapi payload is a dozen or
++ * more blocks - serialising them is the whole cost of a request's encryption.
+  */
+ const aesEcbEncrypt = async (plaintext: string, key: string): Promise<Uint8Array> => {
+     const cryptoKey = await importAesKey(key);
+@@ -75,11 +90,16 @@ const aesEcbEncrypt = async (plaintext: string, key: string): Promise<Uint8Array
+     padded.set(raw);
+     padded.fill(padLength, raw.length);
+ 
+-    const out = new Uint8Array(padded.length);
++    const blocks: Promise<ArrayBuffer>[] = [];
+     for (let offset = 0; offset < padded.length; offset += 16) {
+-        const block = padded.subarray(offset, offset + 16);
+-        const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv: zeroIv }, cryptoKey, block));
+-        out.set(encrypted.subarray(0, 16), offset);
++        // slice() 而不是 subarray()：交出去的是独立缓冲，不和别的块共享同一个后端视图。
++        blocks.push(crypto.subtle.encrypt({ name: 'AES-CBC', iv: zeroIv }, cryptoKey, padded.slice(offset, offset + 16)));
++    }
++
++    const encrypted = await Promise.all(blocks);
++    const out = new Uint8Array(padded.length);
++    for (let index = 0; index < encrypted.length; index += 1) {
++        out.set(new Uint8Array(encrypted[index]!).subarray(0, 16), index * 16);
+     }
+     return out;
+ };
+diff --git a/src/services/onlineMusic/neteaseDeviceProfile.ts b/src/services/onlineMusic/neteaseDeviceProfile.ts
+index 563bc99..798251d 100644
+--- a/src/services/onlineMusic/neteaseDeviceProfile.ts
++++ b/src/services/onlineMusic/neteaseDeviceProfile.ts
+@@ -84,18 +84,29 @@ const isUsableProfile = (value: unknown): value is NeteaseDeviceProfile => {
+     );
+ };
+ 
++/**
++ * 进程内缓存：设备身份是跨会话不变的常量，而它每个请求都要用一次。
++ * 不缓存就要每次读两条 localStorage 再 JSON.parse 一遍。
++ */
++let cachedProfile: NeteaseDeviceProfile | null = null;
++
+ const persist = (profile: NeteaseDeviceProfile): NeteaseDeviceProfile => {
+     writeProviderSessionValue('netease', PROFILE_KEY, JSON.stringify(profile));
++    cachedProfile = profile;
+     return profile;
+ };
+ 
+ /** 读取设备身份；缺失或损坏时新建并把新值写回去。 */
+ export const resolveNeteaseDeviceProfile = (): NeteaseDeviceProfile => {
++    if (cachedProfile) return cachedProfile;
+     const stored = readProviderSessionValue('netease', PROFILE_KEY);
+     if (stored) {
+         try {
+             const parsed = JSON.parse(stored);
+-            if (isUsableProfile(parsed)) return parsed;
++            if (isUsableProfile(parsed)) {
++                cachedProfile = parsed;
++                return parsed;
++            }
+         } catch {
+             // 存储损坏就重建：继续用一份半截身份会让每个请求都带着错位的字段。
+         }
+diff --git a/src/services/onlineMusic/neteaseLocalApi.ts b/src/services/onlineMusic/neteaseLocalApi.ts
+index f1d7228..7cfdd37 100644
+--- a/src/services/onlineMusic/neteaseLocalApi.ts
++++ b/src/services/onlineMusic/neteaseLocalApi.ts
+@@ -102,13 +102,25 @@ const loadSession = (): NeteaseSession => ({
+     jar: parseCookieString(readProviderSessionValue('netease', COOKIE_KEY, ['netease_cookie'])),
+ });
+ 
++/**
++ * 上一次写进存储的 cookie 串。
++ *
++ * `localStorage.setItem` 是同步的，会参与主线程的样式/脚本调度；而播放一首歌就要走
++ * 详情 + 播放地址 + 歌词三次请求，每次原样重写一遍同样的字符串纯属浪费。
++ * 只在内容真的变了的时候写。
++ */
++let lastPersistedCookie: string | null = null;
++
+ /** 把 jar 写回存储；顺便让诊断里的“anonymous cookie”一栏说实话。 */
+ const persistSession = (session: NeteaseSession): void => {
+     const serialized = serializeCookieJar(session.jar);
+-    if (serialized) {
+-        writeProviderSessionValue('netease', COOKIE_KEY, serialized);
+-    } else {
+-        removeProviderSessionValue('netease', COOKIE_KEY, ['netease_cookie']);
++    if (serialized !== lastPersistedCookie) {
++        if (serialized) {
++            writeProviderSessionValue('netease', COOKIE_KEY, serialized);
++        } else {
++            removeProviderSessionValue('netease', COOKIE_KEY, ['netease_cookie']);
++        }
++        lastPersistedCookie = serialized;
+     }
+     if (session.jar.MUSIC_A && !session.jar.MUSIC_U) {
+         writeProviderSessionValue('netease', ANONYMOUS_COOKIE_KEY, session.jar.MUSIC_A);

@@ -4,7 +4,7 @@ import { clamp } from './claddaghTimeline';
 // src/components/visualizer/claddagh/claddaghGlow.ts
 // 用串联 drop-shadow 表达的 glow（Linux 下替代 text-shadow 的路径）。
 
-// The glow as chained drop-shadow() filters, for Lab > Fix lyric animation freeze on Linux (see where it is
+// The glow as chained drop-shadow() filters, for Lab > Draw lyric glow on the compositor (see where it is
 // used). Fitted against the text-shadow glow by pixel difference in Folia's Electron: one layer matches at
 // half the text-shadow radius (the text-shadow radius is two sigmas, a drop-shadow's one); the chorus's
 // three layers at 0.4x with a much weaker middle layer, because each drop-shadow also shadows the ones
