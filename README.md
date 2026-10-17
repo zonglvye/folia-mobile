@@ -18,6 +18,7 @@
 > - **v0.2.0 已在真机上确认可以启动**，但它的**手动导入本地音乐没有成功**：本地页签停在「未检测到任何本地音乐」。这条路径目前不可信，原因仍在排查——设备音乐库不经过它。
 > - **v0.3.1 的网易设置项尚未在真机上验证过**（它只是新增一个设置输入框与命令面板条目，不改变既有播放路径）。
 > - **v0.4.0 的三项改动尚未在真机上验证过**：画布像素倍率封顶、首启默认 60 帧、帧率 HUD。前两项只改渲染参数，第三项是一个可关闭的浮层，都不动播放链路。
+> - **v0.5.0 的网易云内置实现尚未在真机上验证过**。它走通了整条链路（加密、路由、扫码、播放地址）的单测，但**网易的风控只有真机能回答**——扫码能不能出图、登录态能不能保持、播放地址会不会被拒，都还没有一次实测。酷狗的播放链路不受影响（两者互不依赖）。
 > - v0.3.0 以来**封面仍未接通**：设备音乐库里的歌显示占位图。
 > - **本仓库没有可用的 adb 通道**：目标机型跑 HarmonyOS，它的 USB 调试功能是 HDC（厂商接口 `ff/50`），不是 adb 认的 `ff/42`，无线调试也没有配对入口。`dumpsys gfxinfo` 在这台设备上取不到，性能数据只能靠 v0.4.0 新增的应用内帧率 HUD 读。
 >
@@ -37,6 +38,7 @@
 - **设备音乐库（v0.3.0）**：直接读取手机自己的音乐收藏（MediaStore），**打开应用就能看到歌**，不需要手动挑文件。见下节。
 - **在线音源（酷狗）**：搜索、播放、歌词、封面，**不需要任何服务器**（见下节）。
 - **网易云 API 地址（v0.3.1）**：可在应用内填写自部署实例的地址，改完立即生效、无需重新打包（见下节）。
+- **网易云内置实现（v0.5.0）**：手机壳自己实现了 eapi/weapi 加密与十余条路由，**扫码登录 + 搜索 + 播放 + 歌词不需要部署任何东西**（见下节）。
 - **性能（v0.4.0）**：画布后备缓冲的像素倍率封顶到 2 倍（3 倍屏从 9 倍像素量降到 4 倍）；手机壳首启默认把 rAF 限到 60 帧（图形设置里可改回 90/120 或关闭）；新增**应用内帧率 HUD**——长按屏幕左上角 0.8 秒开关，显示 p50/p90/p99、jank 比例、长任务与堆占用。
 
 **未完成**
@@ -69,7 +71,7 @@ v0.3.0 起，应用会读取手机自身的音乐收藏，并把这些歌**当�
 
 ## 在线音源
 
-桌面版把网易云 / QQ / 酷狗的 API 后端**内置在主进程里**，所以它天生就能在线听。Web 与壳形态没有这些后端——但**酷狗有一条不需要任何服务器的公开路径**，壳已经把它接通了：
+桌面版把网易云 / QQ / 酷狗的 API 后端**内置在主进程里**，所以它天生就能在线听。Web 与壳形态没有这些后端——但**酷狗有一条不需要任何服务器的公开路径**，网易云在 v0.5.0 里也被搬进了壳，两条都接通了：
 
 | 能力 | 状态 |
 |---|---|
@@ -77,10 +79,12 @@ v0.3.0 起，应用会读取手机自身的音乐收藏，并把这些歌**当�
 | 播放 | ✅ **约六成曲目可播**；付费曲目会明确提示需要账号，而不是报"网络错误" |
 | 歌词 | ✅ 可用 |
 | 封面 | ✅ 可用 |
-| 网易云 / QQ | ⚠️ **需要你自己部署一个 API 实例**，然后在「设置 → 集成 → 网易云 API 地址」里填地址（v0.3.1 起可在应用内直接填，不用重新打包）。见下节 |
+| 网易云（v0.5.0） | ✅ **扫码登录后可用**，不需要部署实例。会员曲目仍受版权限制 |
+| 网易云（自部署实例） | ⚠️ 仍然支持：在「设置 → 集成 → 网易云 API 地址」里填地址即可接管 |
+| QQ | ⚠️ **需要你自己部署一个 API 实例**，然后在「设置 → 集成 → 网易云 API 地址」里填地址（v0.3.1 起可在应用内直接填，不用重新打包）。见下节 |
 | 波点音乐 | ❌ 桌面独占（依赖主进程里的 Node 包，网页版无法运行） |
 
-**首次使用请先在音源选择里切到「酷狗」**：应用默认的活动音源是网易云，而在手机上它不可用。
+**首次使用请先切到「酷狗」或「网易云」**：应用默认的活动音源是网易云，v0.5.0 起在手机上可用（要扫码登录）；不想登录就切到酷狗，它的匿名路径能播约六成曲目。
 
 为什么酷狗能免服务器：网页层自己实现了酷狗的匿名签名，缺的只是"谁来发这个请求"——浏览器直连拿不到 CORS 头。壳内有一个原生的 `/api/lyric-proxy`（与部署形态下 `api-ts/lyric-proxy.ts` 这个 serverless 函数同一份契约），由它负责发请求。页面因此只与自己的源通信，既不涉及 CORS，也不涉及混合内容。
 
@@ -97,11 +101,34 @@ v0.3.0 起，应用会读取手机自身的音乐收藏，并把这些歌**当�
 | `POST /weapi/song/enhance/player/url/v1` | ❌ 200 但 `url: null, code: 404` |
 | `POST /weapi/cloudsearch/pc` | ❌ `code:500 请求失败` |
 
-**也就是说：网易不登录就不给音频地址。** 这跟酷狗匿名就能拿到约六成曲目完全不同，所以「像酷狗那样在网页层直连」这条路对网易走不通。
+**也就是说：网易不登录就不给音频地址。** 这跟酷狗匿名就能拿到约六成曲目完全不同，所以「像酷狗那样在网页层匿名直连」这条路对网易走不通。
 
-桌面版之所以能用，是因为它把 `@neteasecloudmusicapienhanced/api` 这个 **449 个路由模块的 Node 服务**跑在了 Electron 主进程里。浏览器和 WebView 跑不了它（依赖 `fs`/`crypto`/`http`、`anonymous_token`、xeapi 公钥与设备注册）。
+桌面版之所以能用，是因为它把 `@neteasecloudmusicapienhanced/api` 这个 **449 个路由模块的 Node 服务**跑在了 Electron 主进程里。浏览器和 WebView 跑不了它（依赖 `fs`/`crypto`/`http`、`anonymous_token`、xeapi 公钥与设备注册）。但那份服务干的活其实只有两件：把路径翻译成上游端点，以及做 eapi/weapi 加密。这两件都能在 Web 侧重做。
 
-### 所以：部署一个实例，然后在应用里填地址
+### v0.5.0：手机壳自己做了这两件事，不需要任何实例
+
+上表那些「匿名不给」的结论测的是**网页层直接 fetch 网易域名**——那被 CORS 挡着。v0.5.0 换了做法：壳里加了一个**限定域名的 POST 转发器**，加密、路由、cookie jar 全在 Web 侧。于是手机端现在是**开箱扫码登录就能在线听网易**，不用部署任何东西。
+
+已实现的路由，响应形态与实例逐条对齐：
+
+| 能力 | 路由 |
+|---|---|
+| 扫码登录三步 | `/login/qr/key`、`/login/qr/create`（二维码本地画，不联网）、`/login/qr/check` |
+| 登录态 | `/login/status`、`/user/account`、`/logout` |
+| 搜索 | `/cloudsearch` |
+| 播放与歌词 | `/song/url/v1`、`/lyric/new`、`/song/chorus` |
+| 曲库 | `/user/playlist`、`/playlist/detail`、`/playlist/track/all`、`/likelist`、`/like` |
+| 推荐 | `/recommend/songs`、`/personal_fm` |
+| 游客态 | `/register/anonimous` |
+
+**没实现**的路由（歌手/专辑详情、云盘等）返回实例同形的 `{code:404,msg:"Not Found"}`，走原有的「这条路由不支持」降级，不会假装成功。尤其是 `/scrobble/v1` 听歌打卡：它需要一套 NCBL 日志上传，这里没编，也**不会**返回 200 假装记了一次播放。
+
+两点必须诚实说明：
+
+- **风控未验证**。参考包里除了 eapi/weapi，还躺着 xeapi（X25519 + AES-GCM）和 neapi（chacha20-poly1305 + zstd），说明网易在往上加固。这里选 eapi/weapi 是因为端点模块自己还在用它们；如果真机被拦（返回空、code 报错、要验证码），正确的做法是评估换 xeapi，而不是在现有代码里硬凑。
+- **会员曲目仍受版权限制**。播放地址依赖登录态，非会员遇到 VIP 曲目照样是 `url: null`，壳会如实报出来。
+
+### 另一条路：部署一个实例，然后在应用里填地址
 
 v0.3.1 起，「设置 → 集成 → 网易云 API 地址」可以直接填，**改完立刻生效，不用重新打包**（上游原本只有构建期变量 `VITE_NETEASE_API_BASE`，对已经装在手机上的 APK 没有意义）。
 
@@ -109,7 +136,8 @@ v0.3.1 起，「设置 → 集成 → 网易云 API 地址」可以直接填，*
 
 - **用 https 的实例**。请部署**独立的网易 API 实例**（Vercel / Cloudflare Workers 的免费额度够用，或自己的 Docker 加 TLS 反代）。安卓壳只对音源域名开了明文白名单，`http://` 的局域网地址会被系统策略拦掉。
 - **不要直接填 Folia Docker 全栈的 `/netease/` 路由**。那个 gateway 段（`deploy/docker/gateway/nginx.conf.template` 的 `location /netease/`）**不加 CORS 头**——它服务的是同源的 Web 页面，用不上。安卓壳是**跨源**调用，会被浏览器拒收。要复用它就得在该 location 里补上 CORS 头，并解决明文限制。
-- **独立实例的 CORS 是自带的，实测可用**：Express 中间件会**回显 Origin**（不是 `*`）并带 `Access-Control-Allow-Credentials: true`。这一点很关键——应用的请求带 `credentials: 'include'`，如果服务端回 `*`，浏览器会直接拒收，而回显 Origin 就没问题。所以不需要在壳里加代理层。
+- **独立实例的 CORS 是自带的，实测可用**：Express 中间件会**回显 Origin**（不是 `*`）并带 `Access-Control-Allow-Credentials: true`。这一点很关键——应用的请求带 `credentials: 'include'`，如果服务端回 `*`，浏览器会直接拒收，而回显 Origin 就没问题。
+- **填了地址就以地址为准**：v0.5.0 的内置实现只在**没填地址**时生效。填了实例地址就是明确要用那个后端（比如想要 unblock 或内置实现还没做的路由），不会被内置实现悄悄顶掉。
 - **登录态是客户端持有的**：会话 Cookie 每次请求作为 `cookie` 查询参数带过去（`src/services/netease.ts`），服务端不存会话。**因此无服务器部署（Vercel / Cloudflare）是可行的**，不需要一台常驻机器。
 - 地址填错时输入框会变红并保留上一次可用的值，不会被写坏；旁边的「测试」按钮会发一个真实的搜索请求，能直接区分「地址写错」「实例没起来」「CORS 没放行」。
 
@@ -162,6 +190,8 @@ patches/0004-feat-netease-make-the-API-gateway-address-configurab.patch
 patches/0005-perf-render-cap-canvas-backing-stores-at-2x-device-p.patch
 patches/0006-perf-runtime-default-the-frame-rate-gate-to-60-on-th.patch
 patches/0007-feat-debug-read-frame-timings-on-the-screen-because-.patch
+patches/0008-feat-netease-port-the-eapi-and-weapi-request-ciphers.patch
+patches/0009-feat-netease-answer-the-NetEase-API-routes-inside-th.patch
 ```
 
 - **0001 无句柄本地导入**：新增 OPFS 音频字节仓、`importLocalFiles(File[])` 与文件选择器入口、让 `FileEntryForImport.handle` 可选、三个播放访问器加字节仓回退、无句柄根目录不可重扫、以及让本地页签在只有文件导入可用时也可进入。
@@ -171,8 +201,10 @@ patches/0007-feat-debug-read-frame-timings-on-the-screen-because-.patch
 - **0005 画布像素倍率封顶**：新增 `canvasPixelRatio` 把 `devicePixelRatio` 钳到 1..2，cadenza / monet / pendolo / fume 四处画布的后备缓冲与 `setTransform` 同步改用同一倍率。上游 `lumiere` 早有同样取舍（`LUMIERE_MAX_RENDER_RESOLUTION`），这里只是补齐遗漏的渲染器。
 - **0006 手机壳首启默认 60 帧**：新增 `isAndroidShell`（看 `window.foliaAndroid` 是否存在，不看 UA）与 `ensureVisualizerFrameRateDefault`（只在存储里没有记录时播种，写进存储而不是只交给限帧器，保证图形设置与实际生效一致），启动期在装上限帧器之前调用。桌面与浏览器构建不受影响。
 - **0007 应用内帧率 HUD**：新增 `frameSamples` 采样器（预分配环形缓冲、每帧零分配、不碰 React；采样走限帧器保存的原生 rAF，否则只会测到我们自己的上限；超过 250ms 的间隔不计入，那是切后台而非掉帧）与 `FrameStatsHud`（500ms 轮询，长按左上角开关，监听挂在 window 捕获阶段且不 `preventDefault`，不会抢走播放器的输入）。
+- **0008 网易请求加密**：`neteaseCrypto` 移植 eapi（AES-128-ECB + MD5 摘要签名）与 weapi（双层 AES-CBC + 教科书式 RSA）。WebCrypto 没有 ECB，也没有无填充 RSA，所以 ECB 用单块零 IV CBC 拼出来，`encSecKey` 用 BigInt 做平方-乘。单测向量由参考实现生成后钉死，常量一漂就红。
+- **0009 网易路由内置**：`neteaseDeviceProfile`（跨会话稳定的设备身份）、`neteaseEapiTransport`（请求组装与投递）、`neteaseLocalApi`（路由表 + cookie jar + 二维码本地生成）、`neteaseQrImage`。`netease.ts` 的 `fetchWithCreds` 在 `isAndroidShell()` 时走本地实现，桌面与网页版路径不变。壳侧新增 `NeteaseProxyHandler.java`。
 
-`web/` 的内容等于「上游 v0.7.20 + 这七个补丁」，可据此审计。
+`web/` 的内容等于「上游 v0.7.20 + 这九个补丁」，可据此审计。
 
 ## 为什么壳里绝不申请音频焦点
 

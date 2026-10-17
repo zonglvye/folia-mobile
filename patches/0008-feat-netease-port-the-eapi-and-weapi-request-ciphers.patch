@@ -1,0 +1,236 @@
+From 8c9bb7b2ea0fdd409ca1f0d410786fe4818ec74c Mon Sep 17 00:00:00 2001
+From: folia-mobile <mobile@folia.local>
+Date: Sat, 17 Oct 2026 11:19:09 +0800
+Subject: [PATCH 8/9] feat(netease): port the eapi and weapi request ciphers to
+ WebCrypto
+
+The Android shell has no NetEase API instance next to it, and the platform's
+hosts send no CORS headers, so the page cannot call them itself. Doing the
+encryption in the page is the only way to reach the service without a server.
+
+Both schemes are transcribed from the reference implementation the app was
+already talking to, with two things WebCrypto cannot express handled
+explicitly: AES-ECB is assembled from single-block zero-IV CBC, and encSecKey
+is textbook RSA done with BigInt because it has no padding scheme at all.
+
+The unit tests pin the output against vectors produced by that reference, so a
+drift in a constant fails a test instead of coming back as an 'invalid request'
+from the platform.
+---
+ src/services/onlineMusic/neteaseCrypto.ts   | 153 ++++++++++++++++++++
+ test/unit/onlineMusic/neteaseCrypto.test.ts |  46 ++++++
+ 2 files changed, 199 insertions(+)
+ create mode 100644 src/services/onlineMusic/neteaseCrypto.ts
+ create mode 100644 test/unit/onlineMusic/neteaseCrypto.test.ts
+
+diff --git a/src/services/onlineMusic/neteaseCrypto.ts b/src/services/onlineMusic/neteaseCrypto.ts
+new file mode 100644
+index 0000000..7d04ea8
+--- /dev/null
++++ b/src/services/onlineMusic/neteaseCrypto.ts
+@@ -0,0 +1,153 @@
++import md5 from 'blueimp-md5';
++
++// src/services/onlineMusic/neteaseCrypto.ts
++// The two request encryption schemes NetEase's web/desktop clients use, implemented against the
++// browser's own WebCrypto so the app can talk to the music platform without a relay server.
++//
++// This is a port of `util/crypto.js` from @neteasecloudmusicapienhanced/api, which is the reference
++// the app was already speaking to. Constants are copied from there verbatim; the test file pins
++// their output against vectors produced by that same reference implementation, so a drift in any of
++// them fails a unit test rather than silently returning "invalid request" from the platform.
++//
++// Two things WebCrypto does not offer, handled explicitly below:
++// - AES-ECB. eapi is ECB, so it is assembled out of single-block zero-IV CBC, which encrypts a block
++//   to exactly E(block) (see `aesEcbEncrypt`).
++// - Textbook RSA. `encSecKey` is the raw modular exponentiation of the reversed secret key with no
++//   padding scheme at all, so it is done with BigInt instead of `crypto.subtle`'s RSA-OAEP.
++
++const WEAPI_IV = '0102030405060708';
++const WEAPI_PRESET_KEY = '0CoJUm6Qyw8W8jud';
++const WEAPI_SECRET_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
++const WEAPI_SECRET_LENGTH = 16;
++
++/**
++ * The 1024-bit modulus behind the public key in `util/crypto.js`, with its leading zero byte dropped
++ * so it is exactly 128 bytes. The exponent is the usual 65537.
++ */
++const WEAPI_MODULUS_HEX = 'e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7';
++const WEAPI_EXPONENT = 65537n;
++const WEAPI_MODULUS_BYTES = 128;
++
++const EAPI_KEY = 'e82ckenh8dichen8';
++const EAPI_SEPARATOR = '-36cd479b6b5-';
++const EAPI_SALT_PREFIX = 'nobody';
++const EAPI_SALT_SUFFIX = 'use';
++const EAPI_SALT_TAIL = 'md5forencrypt';
++
++const encoder = new TextEncoder();
++
++const toBase64 = (bytes: Uint8Array): string => {
++    let binary = '';
++    for (const byte of bytes) binary += String.fromCharCode(byte);
++    return btoa(binary);
++};
++
++const toHexUpper = (bytes: Uint8Array): string => (
++    Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('').toUpperCase()
++);
++
++const importAesKey = (key: string) => crypto.subtle.importKey('raw', encoder.encode(key), 'AES-CBC', false, ['encrypt']);
++
++/** AES-128-CBC with PKCS#7 (WebCrypto's only CBC padding), matching CryptoJS's default. */
++const aesCbcEncrypt = async (plaintext: string, key: string): Promise<Uint8Array> => {
++    const cryptoKey = await importAesKey(key);
++    const out = await crypto.subtle.encrypt(
++        { name: 'AES-CBC', iv: encoder.encode(WEAPI_IV) },
++        cryptoKey,
++        encoder.encode(plaintext),
++    );
++    return new Uint8Array(out);
++};
++
++/**
++ * AES-128-ECB with PKCS#7, which WebCrypto has no mode for.
++ *
++ * A single 16-byte block run through CBC with a zero IV encrypts to exactly E(block), so encrypting
++ * the padded plaintext one block at a time reproduces ECB. Each CBC call also appends a padding
++ * block, which is dropped: the padding is applied once, here, before the loop.
++ */
++const aesEcbEncrypt = async (plaintext: string, key: string): Promise<Uint8Array> => {
++    const cryptoKey = await importAesKey(key);
++    const zeroIv = new Uint8Array(16);
++    const raw = encoder.encode(plaintext);
++    const padLength = 16 - (raw.length % 16);
++    const padded = new Uint8Array(raw.length + padLength);
++    padded.set(raw);
++    padded.fill(padLength, raw.length);
++
++    const out = new Uint8Array(padded.length);
++    for (let offset = 0; offset < padded.length; offset += 16) {
++        const block = padded.subarray(offset, offset + 16);
++        const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv: zeroIv }, cryptoKey, block));
++        out.set(encrypted.subarray(0, 16), offset);
++    }
++    return out;
++};
++
++/** `base ** exponent mod modulus`, by square-and-multiply. */
++const modPow = (base: bigint, exponent: bigint, modulus: bigint): bigint => {
++    let result = 1n;
++    let factor = base % modulus;
++    let power = exponent;
++    while (power > 0n) {
++        if (power & 1n) result = (result * factor) % modulus;
++        factor = (factor * factor) % modulus;
++        power >>= 1n;
++    }
++    return result;
++};
++
++/**
++ * Textbook RSA: the plaintext bytes as one big-endian integer, raised to the public exponent.
++ * No padding is applied and none is expected — that is what `encSecKey` is, and it is why a padded
++ * scheme like RSA-OAEP cannot be substituted here.
++ */
++const textbookRsaHex = (plaintext: Uint8Array): string => {
++    let value = 0n;
++    for (const byte of plaintext) value = (value << 8n) | BigInt(byte);
++    const modulus = BigInt(`0x${WEAPI_MODULUS_HEX}`);
++    return modPow(value, WEAPI_EXPONENT, modulus)
++        .toString(16)
++        .padStart(WEAPI_MODULUS_BYTES * 2, '0');
++};
++
++const createWeapiSecretKey = (): string => {
++    let key = '';
++    for (let index = 0; index < WEAPI_SECRET_LENGTH; index += 1) {
++        key += WEAPI_SECRET_ALPHABET.charAt(Math.round(Math.random() * (WEAPI_SECRET_ALPHABET.length - 1)));
++    }
++    return key;
++};
++
++export interface WeapiEncrypted {
++    params: string;
++    encSecKey: string;
++}
++
++/**
++ * The weapi envelope: the payload is AES-CBC'd twice (first with the fixed preset key, then with a
++ * random per-request key), and that random key travels reversed and RSA-encrypted as `encSecKey`.
++ *
++ * `secretKey` exists so tests can pin the random half; production callers leave it out.
++ */
++export const weapiEncrypt = async (payload: unknown, secretKey?: string): Promise<WeapiEncrypted> => {
++    const text = JSON.stringify(payload);
++    const secret = secretKey ?? createWeapiSecretKey();
++    // The second pass encrypts the base64 STRING the first pass produced, not its raw bytes.
++    const once = toBase64(await aesCbcEncrypt(text, WEAPI_PRESET_KEY));
++    const params = toBase64(await aesCbcEncrypt(once, secret));
++    const reversed = secret.split('').reverse().join('');
++    return { params, encSecKey: textbookRsaHex(encoder.encode(reversed)) };
++};
++
++/**
++ * The eapi envelope: the payload is glued between its own URL and an MD5 of that whole string, and
++ * the result is AES-ECB'd with a fixed key. `url` must be the full request path
++ * (e.g. `/api/login/qrcode/unikey`) — it is part of the signed material, not just metadata.
++ */
++export const eapiEncrypt = async (url: string, payload: unknown): Promise<{ params: string }> => {
++    const text = JSON.stringify(payload);
++    const digest = md5(`${EAPI_SALT_PREFIX}${url}${EAPI_SALT_SUFFIX}${text}${EAPI_SALT_TAIL}`);
++    const data = `${url}${EAPI_SEPARATOR}${text}${EAPI_SEPARATOR}${digest}`;
++    return { params: toHexUpper(await aesEcbEncrypt(data, EAPI_KEY)) };
++};
+diff --git a/test/unit/onlineMusic/neteaseCrypto.test.ts b/test/unit/onlineMusic/neteaseCrypto.test.ts
+new file mode 100644
+index 0000000..ccd4198
+--- /dev/null
++++ b/test/unit/onlineMusic/neteaseCrypto.test.ts
+@@ -0,0 +1,46 @@
++import { describe, expect, it } from 'vitest';
++import { eapiEncrypt, weapiEncrypt } from '../../../src/services/onlineMusic/neteaseCrypto';
++
++// test/unit/onlineMusic/neteaseCrypto.test.ts
++//
++// These vectors are not self-generated: each one was produced by running the reference
++// implementation (@neteasecloudmusicapienhanced/api's util/crypto.js) over the same input, with the
++// weapi secret key pinned to a fixed value because that implementation randomises it per request.
++// So the assertions below are "byte-identical to the thing that already works against the platform",
++// which is the only claim worth making about a port of existing cryptography.
++
++const EAPI_UNIKEY_PARAMS = '1CA81A97B7BAEB099F29A9B99A25CD6E58E7BA5B35F25231033065C776830C0A38A128CF8B3EAF44635E50E0B9800A4A037CBDA1E04BD460C02768E3ECD5E66E905A5BCAE52009FB0933EFB373A62E834048DEBDABCCC627F25820A8D94E0A8C';
++const EAPI_CLOUDSEARCH_PARAMS = '2B5D64177AA6460FBAA3DCB1285E28954BBB4F7556E09B0FB25750F12398BB50699B9E0C5AB14A9C135E3FB6947F787F43D51C5366462117E9B221E851D77D620EBF383D8F8FCDAE42D2D519CEDCF5D9C1B5F865E0C0F565830D262C482C2C74CFD22B7BAFF256FA48DB5A462FE7E3C256800DF344ACBC79DB9BB5A9B660815E38322BC312DA1E97314C2631089A1889';
++
++const WEAPI_SECRET = 'abcdefghijklmnop';
++const WEAPI_PAYLOAD = { s: 'test', type: 1, limit: 1 };
++const WEAPI_PARAMS = 'DJtzZlO4j6WGsoqnByvWRVt9m04jGNIya4aE5bKK8B1LENT5nG0rcTttGmGYfQr0';
++const WEAPI_ENC_SEC_KEY = 'd15a1683c992095d0c234c19966605c5c5964911268bbeda8cb8d08d834913e59d53b32358903a121b5fca784c1f5ae44951fd02524df58ecc98e52cc7cf8689b42c2e93ddf05b0592512d87f5960467e2f086c018849d76014d323500e30f13ef4cafbb0cf5a66731a3f1776c75ca35d0062dac70a3e33245afabcf47938487';
++
++describe('eapiEncrypt', () => {
++    it('matches the reference output for the QR unikey request', async () => {
++        const { params } = await eapiEncrypt('/api/login/qrcode/unikey', { type: 3 });
++        expect(params).toBe(EAPI_UNIKEY_PARAMS);
++    });
++
++    it('matches the reference output for cloud search', async () => {
++        const { params } = await eapiEncrypt('/api/cloudsearch/pc', { s: 'test', type: 1, limit: 1, offset: 0, total: true });
++        expect(params).toBe(EAPI_CLOUDSEARCH_PARAMS);
++    });
++});
++
++describe('weapiEncrypt', () => {
++    it('matches the reference output when the secret key is pinned', async () => {
++        const result = await weapiEncrypt(WEAPI_PAYLOAD, WEAPI_SECRET);
++        expect(result.params).toBe(WEAPI_PARAMS);
++        expect(result.encSecKey).toBe(WEAPI_ENC_SEC_KEY);
++    });
++
++    it('picks its own secret key and still produces a full-width textbook RSA block', async () => {
++        const result = await weapiEncrypt({ a: 1 });
++        expect(result.params.length).toBeGreaterThan(0);
++        // 128 bytes of modulus, lowercase hex, left-padded — a short result would mean the
++        // exponentiation lost leading zero bytes.
++        expect(result.encSecKey).toMatch(/^[0-9a-f]{256}$/);
++    });
++});

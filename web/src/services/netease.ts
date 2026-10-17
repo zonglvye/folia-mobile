@@ -1,6 +1,8 @@
 import { NeteaseUser, NeteasePlaylist, NoCopyrightRecommendation, SongPrivilege, SongResult } from "../types";
 import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from './onlineMusic/providerStorage';
 import { getBuildTimeApiBase, getProviderApiBaseOverride } from './onlineMusic/providerApiBase';
+import { requestLocalNetease } from './onlineMusic/neteaseLocalApi';
+import { isAndroidShell } from '../utils/platform';
 import type { PersonalFmRequestOptions } from '../types/onlineMusic';
 import {
   isNeteaseRouteMissingResponse,
@@ -107,6 +109,15 @@ const getApiBase = async () => {
 };
 
 const fetchWithCreds = async (endpoint: string, options: RequestInit = {}) => {
+  // 手机壳里既没有 API 实例，页面也不能直连网易（无 CORS）:由壳内的本地实现代替实例应答，
+  // 路由与响应形态在 neteaseLocalApi 里逐条对齐。桌面版与网页版照旧走远端/内嵌后端。
+  //
+  // 唯一的例外是用户在设置里显式填过实例地址：那是明确的意愿（比如想要 unblock 或别的路由），
+  // 不能被内置实现悄悄顶掉，所以填了就走远端。
+  if (isAndroidShell() && !getProviderApiBaseOverride('netease')) {
+    return requestLocalNetease(endpoint);
+  }
+
   const base = await getApiBase();
   const url = `${base}${endpoint}`;
   // Ensure we send credentials to persist session (cookies)

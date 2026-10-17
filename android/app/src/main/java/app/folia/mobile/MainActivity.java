@@ -249,6 +249,13 @@ public class MainActivity extends Activity {
         if (proxyResponse != null) {
             return proxyResponse;
         }
+        // NetEase needs a second, stricter transport: its API is POST-with-form-body and its
+        // session lives in Set-Cookie headers. See NeteaseProxyHandler for why that has to be a
+        // native replay instead of an ordinary fetch from the page.
+        WebResourceResponse neteaseResponse = NeteaseProxyHandler.handle(request);
+        if (neteaseResponse != null) {
+            return neteaseResponse;
+        }
         // The device's own music library. Tried before the asset loader for the same reason as the
         // proxy: /api/ is not a file in the bundle, and the asset handler's SPA fallback would
         // otherwise answer these paths with an HTML document.
