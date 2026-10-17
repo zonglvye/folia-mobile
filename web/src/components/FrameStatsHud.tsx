@@ -9,6 +9,7 @@ import {
     type FrameStats,
 } from '../services/debug/frameSamples';
 import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
+import { countContextLosses, lastIncident, readIncidents } from '../services/debug/incidents';
 import { useVisualizerSettingsStore } from '../stores/useVisualizerSettingsStore';
 import { DEFAULT_VISUALIZER_BACKGROUND_MODE } from '../types/visualizerModes';
 
@@ -59,6 +60,11 @@ const FrameStatsHud: React.FC = () => {
     const visible = useSyncExternalStore(subscribeToFrameHud, isFrameHudVisible);
     const [stats, setStats] = useState<FrameStats>(EMPTY_FRAME_STATS);
     const [frameCap, setFrameCap] = useState('off');
+    /**
+     * 崩溃证据。黑屏之后这台设备没有任何别的通道能说出发生过什么，所以把它和帧读数一起轮询：
+     * `readIncidents()` 在没有新事件时返回同一个引用，这里不会产生多余的重渲染。
+     */
+    const [incidents, setIncidents] = useState(() => readIncidents());
     const visualizerMode = useVisualizerSettingsStore(state => state.visualizerMode);
     const backgroundMode = useVisualizerSettingsStore(state => state.visualizerBackgroundMode);
     const randomModePerSong = useVisualizerSettingsStore(state => state.randomVisualizerModePerSong);
@@ -105,8 +111,10 @@ const FrameStatsHud: React.FC = () => {
         };
         readCap();
         setStats(readFrameStats());
+        setIncidents(readIncidents());
         const id = window.setInterval(() => {
             setStats(readFrameStats());
+            setIncidents(readIncidents());
             readCap();
         }, POLL_MS);
         return () => window.clearInterval(id);
@@ -116,6 +124,10 @@ const FrameStatsHud: React.FC = () => {
 
     const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
     const loaf = stats.loafWorst;
+    const contextLosses = countContextLosses();
+    const errorIncident = lastIncident('error') ?? lastIncident('rejection');
+    const errorCount = incidents.filter(entry => entry.kind === 'error' || entry.kind === 'rejection').length;
+    const blankRoot = lastIncident('blank-root');
 
     return (
         <div
@@ -144,6 +156,14 @@ const FrameStatsHud: React.FC = () => {
                     >
                         reset
                     </button>
+                    {/* 屏黑了但界面还活着时，这是不卸载应用就能回到可用状态的唯一出口。 */}
+                    <button
+                        type="button"
+                        onClick={() => window.location.reload()}
+                        style={{ cursor: 'pointer', color: '#fcd34d', background: 'none', border: 0, font: 'inherit', padding: 0 }}
+                    >
+                        reload
+                    </button>
                     <button
                         type="button"
                         onClick={() => setFrameHudVisible(false)}
@@ -166,6 +186,23 @@ const FrameStatsHud: React.FC = () => {
             <Row label="vis" value={`${visualizerMode}${randomModePerSong ? ' ·random' : ''}`} />
             <Row label="bg" value={backgroundMode ?? `${DEFAULT_VISUALIZER_BACKGROUND_MODE} (default)`} />
             <Row label="glow" value={glowOnCompositor ? 'compositor' : 'shadow'} />
+            {/* 黑屏那一类故障的证据：上下文丢失次数与最后一条异常。没有 adb 时，这两行就是全部线索。 */}
+            <Row
+                label="gl"
+                value={`${contextLosses.lost} lost / ${contextLosses.restored} back`}
+                tone={contextLosses.lost > 0 ? '#fb7185' : undefined}
+            />
+            <Row
+                label="err"
+                value={errorCount === 0 ? '0' : String(errorCount)}
+                tone={errorCount > 0 ? '#fb7185' : undefined}
+            />
+            {blankRoot && <Row label="blank" value={`yes · ${fmt((Date.now() - blankRoot.at) / 1000, 0)}s ago`} tone="#fb7185" />}
+            {errorIncident && (
+                <div style={{ marginTop: 2, fontSize: 9, lineHeight: 1.35, opacity: 0.7, wordBreak: 'break-word' }}>
+                    {clip(errorIncident.detail, 90)}
+                </div>
+            )}
             {loaf ? (
                 <>
                     <Row

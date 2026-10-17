@@ -1,0 +1,739 @@
+From aa78fd41b50b60621c9a95b4c7509a47cd73ecf9 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 22:14:59 +0800
+Subject: [PATCH 22/22] feat(debug): record what happens when the screen goes
+ black
+
+A black screen on this device is currently unattributable: `body` is #09090b, so
+an unmounted React tree and a live app whose GL layers stopped drawing look
+identical, and there is no adb to ask (services/debug/frameSamples.ts makes the
+same argument for frame timings). Every path that can blank the screen now
+leaves a line of text.
+
+`services/debug/incidents.ts` keeps a 64-entry ring and persists its tail, so the
+evidence outlives the document that produced it - the interesting case is the one
+that needed a reload. Three failure modes go into it:
+
+- uncaught exceptions and unhandled rejections, installed before createRoot so
+  the first commit is covered;
+- WebGL context loss, captured at the document because the event does not bubble
+  and the canvases that lose contexts belong to third-party shader plumbing.
+  Deliberately NOT `preventDefault`ed: that promises the browser a restore these
+  layers cannot perform, which would trade "nothing drawn" for "restored context
+  drawing nothing";
+- a blank root, detected by counting #root's children twice a second. React
+  unmounts the whole tree on an uncaught render or effect error, and with no
+  error boundary in this app that state IS the black screen.
+
+Only the blank root raises the overlay, and that overlay is plain DOM appended to
+the document rather than a React component: nothing React can render exists in
+that state. It lists the recent incidents and offers a reload, so the failure
+becomes recoverable instead of terminal. Ordinary thrown handlers are recorded
+but never covered up - the app still works, and a red box would be worse than the
+exception.
+
+The frame HUD gains `gl` (contexts lost / restored), `err` (count and the last
+message) and `blank`, plus a `reload` button: when the screen is black but the
+tree is alive, the HUD is the one surface that can still reach the user, and it
+already has a gesture everyone knows.
+---
+ src/bootstrap.tsx                             |   8 +
+ src/components/FrameStatsHud.tsx              |  37 ++++
+ src/services/debug/incidentOverlay.ts         | 113 ++++++++++++
+ src/services/debug/incidents.ts               | 146 ++++++++++++++++
+ .../debug/installIncidentRecorders.ts         | 125 +++++++++++++
+ test/unit/services/debug/incidents.test.ts    | 164 ++++++++++++++++++
+ 6 files changed, 593 insertions(+)
+ create mode 100644 src/services/debug/incidentOverlay.ts
+ create mode 100644 src/services/debug/incidents.ts
+ create mode 100644 src/services/debug/installIncidentRecorders.ts
+ create mode 100644 test/unit/services/debug/incidents.test.ts
+
+diff --git a/src/bootstrap.tsx b/src/bootstrap.tsx
+index e4d6abd..8eb5cee 100644
+--- a/src/bootstrap.tsx
++++ b/src/bootstrap.tsx
+@@ -16,6 +16,7 @@ import { installFoliumHostEvents } from './mods/folium/hostEvents';
+ import { installFoliumHomePageDismissal } from './components/app/home/foliumHomePageDismissal';
+ import { installLibrarySuiteChromeCommands } from './library/app/installLibrarySuiteChromeCommands';
+ import { installNativeDragGuard } from './utils/nativeDragGuard';
++import { installIncidentRecorders, armBlankRootWatchdog } from './services/debug/installIncidentRecorders';
+ import { bootNavidromeServerPreset } from './services/navidromeServerPreset';
+ import { isNavidromeEnabled } from './services/navidromeService';
+ import { setNavidromeEnabledState } from './stores/useLibraryStore';
+@@ -39,6 +40,10 @@ import './stores/useMotionSettingsStore';
+ // roots are covered too and App.tsx does not grow. See utils/nativeDragGuard.ts.
+ installNativeDragGuard();
+ 
++// 黑屏唯一的证据来源。装在 createRoot 之前：首屏那次提交里抛的异常也要被记下。
++// 见 services/debug/installIncidentRecorders.ts —— 这台设备没有 adb，也就没有 console。
++installIncidentRecorders();
++
+ const rootElement = document.getElementById('root');
+ if (!rootElement) {
+   throw new Error("Could not find root element to mount to");
+@@ -103,4 +108,7 @@ void Promise.allSettled([bootFolium(), bootNavidrome()])
+     .finally(() => {
+         initializeLocalCoverRuntime();
+         renderApp();
++        // 组件树挂了之后，React 内部再没有任何东西能报信：这个看门狗直接在 #root 上数子节点，
++        // 掉到 0 就用非 React 的 DOM 把那条错误和重载按钮显示出来。
++        armBlankRootWatchdog(rootElement);
+     });
+diff --git a/src/components/FrameStatsHud.tsx b/src/components/FrameStatsHud.tsx
+index 62e2925..ee774c8 100644
+--- a/src/components/FrameStatsHud.tsx
++++ b/src/components/FrameStatsHud.tsx
+@@ -9,6 +9,7 @@ import {
+     type FrameStats,
+ } from '../services/debug/frameSamples';
+ import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
++import { countContextLosses, lastIncident, readIncidents } from '../services/debug/incidents';
+ import { useVisualizerSettingsStore } from '../stores/useVisualizerSettingsStore';
+ import { DEFAULT_VISUALIZER_BACKGROUND_MODE } from '../types/visualizerModes';
+ 
+@@ -59,6 +60,11 @@ const FrameStatsHud: React.FC = () => {
+     const visible = useSyncExternalStore(subscribeToFrameHud, isFrameHudVisible);
+     const [stats, setStats] = useState<FrameStats>(EMPTY_FRAME_STATS);
+     const [frameCap, setFrameCap] = useState('off');
++    /**
++     * 崩溃证据。黑屏之后这台设备没有任何别的通道能说出发生过什么，所以把它和帧读数一起轮询：
++     * `readIncidents()` 在没有新事件时返回同一个引用，这里不会产生多余的重渲染。
++     */
++    const [incidents, setIncidents] = useState(() => readIncidents());
+     const visualizerMode = useVisualizerSettingsStore(state => state.visualizerMode);
+     const backgroundMode = useVisualizerSettingsStore(state => state.visualizerBackgroundMode);
+     const randomModePerSong = useVisualizerSettingsStore(state => state.randomVisualizerModePerSong);
+@@ -105,8 +111,10 @@ const FrameStatsHud: React.FC = () => {
+         };
+         readCap();
+         setStats(readFrameStats());
++        setIncidents(readIncidents());
+         const id = window.setInterval(() => {
+             setStats(readFrameStats());
++            setIncidents(readIncidents());
+             readCap();
+         }, POLL_MS);
+         return () => window.clearInterval(id);
+@@ -116,6 +124,10 @@ const FrameStatsHud: React.FC = () => {
+ 
+     const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
+     const loaf = stats.loafWorst;
++    const contextLosses = countContextLosses();
++    const errorIncident = lastIncident('error') ?? lastIncident('rejection');
++    const errorCount = incidents.filter(entry => entry.kind === 'error' || entry.kind === 'rejection').length;
++    const blankRoot = lastIncident('blank-root');
+ 
+     return (
+         <div
+@@ -144,6 +156,14 @@ const FrameStatsHud: React.FC = () => {
+                     >
+                         reset
+                     </button>
++                    {/* 屏黑了但界面还活着时，这是不卸载应用就能回到可用状态的唯一出口。 */}
++                    <button
++                        type="button"
++                        onClick={() => window.location.reload()}
++                        style={{ cursor: 'pointer', color: '#fcd34d', background: 'none', border: 0, font: 'inherit', padding: 0 }}
++                    >
++                        reload
++                    </button>
+                     <button
+                         type="button"
+                         onClick={() => setFrameHudVisible(false)}
+@@ -166,6 +186,23 @@ const FrameStatsHud: React.FC = () => {
+             <Row label="vis" value={`${visualizerMode}${randomModePerSong ? ' ·random' : ''}`} />
+             <Row label="bg" value={backgroundMode ?? `${DEFAULT_VISUALIZER_BACKGROUND_MODE} (default)`} />
+             <Row label="glow" value={glowOnCompositor ? 'compositor' : 'shadow'} />
++            {/* 黑屏那一类故障的证据：上下文丢失次数与最后一条异常。没有 adb 时，这两行就是全部线索。 */}
++            <Row
++                label="gl"
++                value={`${contextLosses.lost} lost / ${contextLosses.restored} back`}
++                tone={contextLosses.lost > 0 ? '#fb7185' : undefined}
++            />
++            <Row
++                label="err"
++                value={errorCount === 0 ? '0' : String(errorCount)}
++                tone={errorCount > 0 ? '#fb7185' : undefined}
++            />
++            {blankRoot && <Row label="blank" value={`yes · ${fmt((Date.now() - blankRoot.at) / 1000, 0)}s ago`} tone="#fb7185" />}
++            {errorIncident && (
++                <div style={{ marginTop: 2, fontSize: 9, lineHeight: 1.35, opacity: 0.7, wordBreak: 'break-word' }}>
++                    {clip(errorIncident.detail, 90)}
++                </div>
++            )}
+             {loaf ? (
+                 <>
+                     <Row
+diff --git a/src/services/debug/incidentOverlay.ts b/src/services/debug/incidentOverlay.ts
+new file mode 100644
+index 0000000..7441f2a
+--- /dev/null
++++ b/src/services/debug/incidentOverlay.ts
+@@ -0,0 +1,113 @@
++import type { Incident } from './incidents';
++
++// src/services/debug/incidentOverlay.ts
++// The only thing that can still appear after React is gone.
++//
++// If the root tree unmounts (an exception in render or in an effect, and nothing catches it), every
++// component including an error boundary is off the page, and `body` is #09090b - the screen is black
++// with the WebView perfectly alive. A React-rendered message cannot exist in that state, so this is
++// plain DOM appended to the document, styled inline: no Tailwind class, no portal, no store.
++//
++// Deliberately NOT shown for ordinary errors. A thrown click handler leaves a working app, and
++// covering the player with a red box for it would be worse than the exception. It is reserved for
++// "there is nothing on the screen", which is the state it can also fix.
++
++const OVERLAY_ID = 'folia-incident-overlay';
++
++const formatTime = (at: number): string => {
++    const date = new Date(at);
++    const pad = (value: number) => String(value).padStart(2, '0');
++    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
++};
++
++const KIND_LABEL: Record<Incident['kind'], string> = {
++    error: '未捕获异常',
++    rejection: '未处理的 Promise 拒绝',
++    'gl-lost': 'WebGL 上下文丢失',
++    'gl-restored': 'WebGL 上下文恢复',
++    'blank-root': 'React 根节点空了',
++};
++
++export type IncidentOverlayOptions = {
++    title: string;
++    incidents: readonly Incident[];
++};
++
++/** Shows (or replaces) the overlay. The reload button is the whole point of it existing. */
++export const showIncidentOverlay = ({ title, incidents }: IncidentOverlayOptions): void => {
++    if (typeof document === 'undefined') {
++        return;
++    }
++    document.getElementById(OVERLAY_ID)?.remove();
++
++    const host = document.createElement('div');
++    host.id = OVERLAY_ID;
++    host.setAttribute('role', 'alertdialog');
++    host.style.cssText = [
++        'position:fixed', 'inset:0', 'z-index:2147483600',
++        'display:flex', 'flex-direction:column', 'gap:12px',
++        'padding:20px', 'box-sizing:border-box',
++        'background:rgba(9,9,11,0.96)', 'color:#e4e4e7',
++        'font:500 13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace',
++        'overflow:auto',
++    ].join(';');
++
++    const heading = document.createElement('div');
++    heading.textContent = title;
++    heading.style.cssText = 'font-weight:700;font-size:15px;color:#fca5a5;flex:none';
++    host.appendChild(heading);
++
++    const hint = document.createElement('div');
++    hint.textContent = '这条信息会保留到下次重载之后；重新加载一般能回到可用状态。';
++    hint.style.cssText = 'opacity:0.6;flex:none';
++    host.appendChild(hint);
++
++    const list = document.createElement('div');
++    list.style.cssText = 'display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-height:0';
++    for (const incident of incidents.slice(-6)) {
++        const line = document.createElement('div');
++        line.style.cssText = 'padding:8px 10px;border-radius:8px;background:rgba(148,163,184,0.12);word-break:break-word';
++        const meta = document.createElement('div');
++        meta.textContent = `${formatTime(incident.at)} · ${KIND_LABEL[incident.kind]}`;
++        meta.style.cssText = 'opacity:0.55;font-size:11px';
++        const detail = document.createElement('div');
++        detail.textContent = incident.detail || '(无内容)';
++        line.append(meta, detail);
++        list.appendChild(line);
++    }
++    host.appendChild(list);
++
++    const actions = document.createElement('div');
++    actions.style.cssText = 'display:flex;gap:10px;flex:none';
++
++    const reload = document.createElement('button');
++    reload.type = 'button';
++    reload.textContent = '重新加载';
++    reload.style.cssText = [
++        'flex:1 1 auto', 'padding:10px 14px', 'border-radius:10px', 'cursor:pointer',
++        'border:1px solid rgba(147,197,253,0.5)', 'background:rgba(59,130,246,0.25)',
++        'color:#dbeafe', 'font:inherit', 'font-weight:700',
++    ].join(';');
++    reload.addEventListener('click', () => window.location.reload());
++
++    const dismiss = document.createElement('button');
++    dismiss.type = 'button';
++    dismiss.textContent = '关闭';
++    dismiss.style.cssText = [
++        'flex:0 0 auto', 'padding:10px 14px', 'border-radius:10px', 'cursor:pointer',
++        'border:1px solid rgba(148,163,184,0.35)', 'background:transparent',
++        'color:#cbd5e1', 'font:inherit',
++    ].join(';');
++    dismiss.addEventListener('click', () => host.remove());
++
++    actions.append(reload, dismiss);
++    host.appendChild(actions);
++    document.body.appendChild(host);
++};
++
++export const hideIncidentOverlay = (): void => {
++    if (typeof document === 'undefined') {
++        return;
++    }
++    document.getElementById(OVERLAY_ID)?.remove();
++};
+diff --git a/src/services/debug/incidents.ts b/src/services/debug/incidents.ts
+new file mode 100644
+index 0000000..bfc9bff
+--- /dev/null
++++ b/src/services/debug/incidents.ts
+@@ -0,0 +1,146 @@
++// src/services/debug/incidents.ts
++// What went wrong, kept somewhere a phone with no adb can still show it.
++//
++// A black screen is the worst possible bug report: `body` is #09090b, so an unmounted React tree
++// and a healthy app whose background layers stopped drawing look identical, and this device has no
++// console to ask (see frameSamples.ts for the same argument). Every path that can blank the screen
++// therefore records a line here, and the frame HUD prints the last one: "it went black again"
++// becomes a screenshot with a message in it.
++//
++// The ring lives in memory AND its tail is persisted, because the interesting case is the one where
++// the page had to be reloaded: the evidence has to outlive the document that produced it.
++
++export type IncidentKind = 'error' | 'rejection' | 'gl-lost' | 'gl-restored' | 'blank-root';
++
++export type Incident = {
++    /** Date.now() when it happened. */
++    at: number;
++    kind: IncidentKind;
++    detail: string;
++};
++
++/** Enough to see a pattern in one session; small enough that a stuck loop cannot grow it. */
++const CAPACITY = 64;
++
++/** Only the tail is persisted: localStorage holds one string and is written synchronously. */
++const PERSISTED = 8;
++
++const STORAGE_KEY = 'folia_incidents';
++
++/** Longest detail kept. An exception message with a stack can be thousands of characters. */
++const DETAIL_MAX = 220;
++
++const isIncidentKind = (value: unknown): value is IncidentKind =>
++    value === 'error' || value === 'rejection' || value === 'gl-lost'
++    || value === 'gl-restored' || value === 'blank-root';
++
++/** Collapses whitespace and clips: an exception message is often several lines of noise. */
++export const clipDetail = (detail: string): string => {
++    const flat = detail.replace(/\s+/g, ' ').trim();
++    return flat.length > DETAIL_MAX ? `${flat.slice(0, DETAIL_MAX - 1)}…` : flat;
++};
++
++/** Tolerant on purpose: a corrupt entry must cost that entry, never the whole log. */
++const readPersisted = (): Incident[] => {
++    if (typeof localStorage === 'undefined') {
++        return [];
++    }
++    try {
++        const raw = localStorage.getItem(STORAGE_KEY);
++        if (!raw) {
++            return [];
++        }
++        const parsed: unknown = JSON.parse(raw);
++        if (!Array.isArray(parsed)) {
++            return [];
++        }
++        return parsed.flatMap(entry => {
++            if (!entry || typeof entry !== 'object') {
++                return [];
++            }
++            const { at, kind, detail } = entry as Record<string, unknown>;
++            if (typeof at !== 'number' || !Number.isFinite(at) || !isIncidentKind(kind)) {
++                return [];
++            }
++            return [{ at, kind, detail: typeof detail === 'string' ? clipDetail(detail) : '' }];
++        }).slice(-PERSISTED);
++    } catch {
++        // Private mode, quota, or a JSON parser error: an empty log beats a module that throws on
++        // import, which would take the whole app down at boot.
++        return [];
++    }
++};
++
++const listeners = new Set<() => void>();
++
++/** Newest last, so the HUD and any overlay can read the tail without sorting. */
++let incidents: Incident[] = readPersisted();
++
++/** Serialisable snapshot for useSyncExternalStore consumers. */
++let snapshot: readonly Incident[] = incidents.slice();
++
++const persist = () => {
++    if (typeof localStorage === 'undefined') {
++        return;
++    }
++    try {
++        localStorage.setItem(STORAGE_KEY, JSON.stringify(incidents.slice(-PERSISTED)));
++    } catch {
++        // Same reasoning as above, in the other direction: losing the log must not break the app.
++    }
++};
++
++const publish = () => {
++    snapshot = incidents.slice();
++    listeners.forEach(listener => listener());
++};
++
++/** The one way anything gets written. Never throws. */
++export const recordIncident = (kind: IncidentKind, detail: string): Incident => {
++    const incident: Incident = { at: Date.now(), kind, detail: clipDetail(detail) };
++    incidents.push(incident);
++    if (incidents.length > CAPACITY) {
++        incidents = incidents.slice(-CAPACITY);
++    }
++    persist();
++    publish();
++    return incident;
++};
++
++export const readIncidents = (): readonly Incident[] => snapshot;
++
++/** The most recent entry of one kind, or of any kind when `kind` is omitted. */
++export const lastIncident = (kind?: IncidentKind): Incident | null => {
++    for (let index = incidents.length - 1; index >= 0; index -= 1) {
++        const incident = incidents[index];
++        if (!kind || incident.kind === kind) {
++            return incident;
++        }
++    }
++    return null;
++};
++
++export const countIncidents = (kind: IncidentKind): number =>
++    incidents.reduce((total, incident) => (incident.kind === kind ? total + 1 : total), 0);
++
++/** Both counts together: what the HUD's `gl` row shows. */
++export const countContextLosses = () => ({
++    lost: countIncidents('gl-lost'),
++    restored: countIncidents('gl-restored'),
++});
++
++export const subscribeToIncidents = (listener: () => void): (() => void) => {
++    listeners.add(listener);
++    return () => {
++        listeners.delete(listener);
++    };
++};
++
++export const clearIncidents = (): void => {
++    incidents = [];
++    persist();
++    publish();
++};
++
++/** Test seam: the limits are asserted rather than duplicated in the test. */
++export const INCIDENT_LIMITS = { CAPACITY, PERSISTED, STORAGE_KEY, DETAIL_MAX } as const;
+diff --git a/src/services/debug/installIncidentRecorders.ts b/src/services/debug/installIncidentRecorders.ts
+new file mode 100644
+index 0000000..52c8ff1
+--- /dev/null
++++ b/src/services/debug/installIncidentRecorders.ts
+@@ -0,0 +1,125 @@
++import { readIncidents, recordIncident } from './incidents';
++import { showIncidentOverlay } from './incidentOverlay';
++
++// src/services/debug/installIncidentRecorders.ts
++// Installs the listeners that turn a black screen into a line of text.
++//
++// Called once from bootstrap, before the first render, so an exception thrown during the first
++// commit is already covered. Everything here is passive: no polling of layout, no per-frame work,
++// and the only periodic timer is the blank-root watchdog, which reads one property twice a second.
++
++/** A canvas is worth naming precisely: on this app a context loss is either a background layer or a lyric surface. */
++export const describeIncidentTarget = (target: EventTarget | null): string => {
++    if (!(target instanceof HTMLCanvasElement)) {
++        return target instanceof Element ? `${target.tagName.toLowerCase()}` : 'unknown';
++    }
++    const parent = target.parentElement;
++    const parentLabel = parent
++        ? `${parent.tagName.toLowerCase()}${parent.className ? `.${String(parent.className).split(/\s+/).slice(0, 2).join('.')}` : ''}`
++        : 'no-parent';
++    return `canvas ${target.width}x${target.height} in ${parentLabel}`;
++};
++
++const describeRejection = (reason: unknown): string => {
++    if (reason instanceof Error) {
++        return `${reason.name}: ${reason.message}`;
++    }
++    if (typeof reason === 'string') {
++        return reason;
++    }
++    try {
++        return JSON.stringify(reason) ?? String(reason);
++    } catch {
++        return String(reason);
++    }
++};
++
++/**
++ * Every way the page can fail silently: uncaught exceptions, unhandled rejections, and WebGL
++ * context loss.
++ *
++ * Context loss is recorded from the document in the capture phase because the event does not
++ * bubble, and the canvases that lose contexts are created by third-party shader plumbing that has
++ * no reason to listen. `preventDefault` is deliberately NOT called here: it promises the browser a
++ * restore, and these layers cannot rebuild their pipelines, so allowing a restore would only
++ * replace "nothing drawn" with "restored context drawing nothing". Recording it is the point.
++ */
++export const installIncidentRecorders = (): void => {
++    if (typeof window === 'undefined') {
++        return;
++    }
++
++    window.addEventListener('error', event => {
++        const errorEvent = event as ErrorEvent;
++        // Resource load failures also land here (they reach window in the capture phase). They are
++        // worth a line, but the message has to say which URL failed, not just "Script error".
++        if (errorEvent.error instanceof Error) {
++            recordIncident('error', `${errorEvent.error.name}: ${errorEvent.error.message}`);
++            return;
++        }
++        const target = event.target;
++        if (target instanceof HTMLScriptElement) {
++            recordIncident('error', `script failed to load: ${target.src}`);
++            return;
++        }
++        if (target instanceof HTMLLinkElement) {
++            recordIncident('error', `stylesheet failed to load: ${target.href}`);
++            return;
++        }
++        if (errorEvent.message) {
++            recordIncident('error', `${errorEvent.message} @ ${errorEvent.filename ?? '?'}:${errorEvent.lineno ?? 0}`);
++        }
++    }, true);
++
++    window.addEventListener('unhandledrejection', event => {
++        recordIncident('rejection', describeRejection((event as PromiseRejectionEvent).reason));
++    });
++
++    document.addEventListener('webglcontextlost', event => {
++        recordIncident('gl-lost', describeIncidentTarget(event.target));
++    }, true);
++
++    document.addEventListener('webglcontextrestored', event => {
++        recordIncident('gl-restored', describeIncidentTarget(event.target));
++    }, true);
++};
++
++/** How often the root is checked. One property read twice a second is below anything measurable. */
++const BLANK_ROOT_POLL_MS = 1200;
++
++/**
++ * Starts the black-screen detector: if the React root ends up with no children after it has once
++ * had some, nothing can be rendered by the app any more, so the plain-DOM overlay is the only thing
++ * left that can speak.
++ *
++ * Two guards keep it honest: it does not arm until the root has actually held children (a check
++ * during the first paint would fire on every boot), and it fires once per document rather than
++ * once per poll.
++ */
++export const armBlankRootWatchdog = (root: HTMLElement): (() => void) => {
++    if (typeof window === 'undefined') {
++        return () => {};
++    }
++
++    let armed = false;
++    let reported = false;
++
++    const timer = window.setInterval(() => {
++        const populated = root.childElementCount > 0;
++        if (populated) {
++            armed = true;
++            return;
++        }
++        if (!armed || reported) {
++            return;
++        }
++        reported = true;
++        recordIncident('blank-root', 'React root has no children; the tree was unmounted');
++        showIncidentOverlay({
++            title: '界面已停止渲染（黑屏）',
++            incidents: readIncidents(),
++        });
++    }, BLANK_ROOT_POLL_MS);
++
++    return () => window.clearInterval(timer);
++};
+diff --git a/test/unit/services/debug/incidents.test.ts b/test/unit/services/debug/incidents.test.ts
+new file mode 100644
+index 0000000..fc9151d
+--- /dev/null
++++ b/test/unit/services/debug/incidents.test.ts
+@@ -0,0 +1,164 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++
++// test/unit/services/debug/incidents.test.ts
++// 黑屏事故日志。这个模块的存在理由是「这台设备没有 console」，所以它的容错方向只有一条：
++// 无论存储怎么坏、写不进去还是写不进去，它都不能在 import 时抛 —— 那会让应用在启动时就死。
++// 同时它必须真的留下证据：跨重载之后还能读到上一次会话里的那几条。
++
++describe('incident log', () => {
++    let values: Map<string, string>;
++
++    const installStorage = (throwOnRead = false, throwOnWrite = false) => {
++        const storage = {
++            getItem: (key: string) => {
++                if (throwOnRead) throw new Error('blocked');
++                return values.get(key) ?? null;
++            },
++            setItem: (key: string, value: string) => {
++                if (throwOnWrite) throw new Error('blocked');
++                values.set(key, value);
++            },
++        };
++        vi.stubGlobal('localStorage', storage);
++        vi.stubGlobal('window', { localStorage: storage });
++        vi.resetModules();
++    };
++
++    beforeEach(() => {
++        values = new Map();
++        installStorage();
++    });
++
++    afterEach(() => {
++        vi.unstubAllGlobals();
++        vi.resetModules();
++    });
++
++    const load = async () => import('@/services/debug/incidents');
++
++    it('记录之后能按顺序读回，最新的一条在最后', async () => {
++        const incidents = await load();
++        incidents.recordIncident('error', 'first');
++        incidents.recordIncident('gl-lost', 'canvas 640x360');
++
++        expect(incidents.readIncidents().map(entry => entry.detail)).toEqual(['first', 'canvas 640x360']);
++        expect(incidents.lastIncident()?.kind).toBe('gl-lost');
++        expect(incidents.lastIncident('error')?.detail).toBe('first');
++    });
++
++    it('detail 里的换行和多余空白会被压平并截断', async () => {
++        const incidents = await load();
++        expect(incidents.clipDetail('  a\n\n  b\tc  ')).toBe('a b c');
++
++        const long = 'x'.repeat(incidents.INCIDENT_LIMITS.DETAIL_MAX + 50);
++        const clipped = incidents.clipDetail(long);
++        expect(clipped.length).toBe(incidents.INCIDENT_LIMITS.DETAIL_MAX);
++        expect(clipped.endsWith('…')).toBe(true);
++    });
++
++    it('环形缓冲只保留最近 CAPACITY 条', async () => {
++        const incidents = await load();
++        const total = incidents.INCIDENT_LIMITS.CAPACITY + 7;
++        for (let index = 0; index < total; index += 1) {
++            incidents.recordIncident('error', `e${index}`);
++        }
++
++        const log = incidents.readIncidents();
++        expect(log.length).toBe(incidents.INCIDENT_LIMITS.CAPACITY);
++        expect(log[log.length - 1].detail).toBe(`e${total - 1}`);
++        expect(log[0].detail).toBe(`e${total - incidents.INCIDENT_LIMITS.CAPACITY}`);
++    });
++
++    it('落盘只保留尾部 PERSISTED 条，并且跨重载还能读到', async () => {
++        const incidents = await load();
++        const total = incidents.INCIDENT_LIMITS.PERSISTED + 5;
++        for (let index = 0; index < total; index += 1) {
++            incidents.recordIncident('rejection', `r${index}`);
++        }
++
++        const stored = JSON.parse(values.get(incidents.INCIDENT_LIMITS.STORAGE_KEY)!) as unknown[];
++        expect(stored.length).toBe(incidents.INCIDENT_LIMITS.PERSISTED);
++
++        vi.resetModules();
++        const reloaded = (await import('@/services/debug/incidents'));
++        expect(reloaded.readIncidents().length).toBe(incidents.INCIDENT_LIMITS.PERSISTED);
++        expect(reloaded.readIncidents().at(-1)?.detail).toBe(`r${total - 1}`);
++    });
++
++    it('存储里是垃圾时当作空日志，而不是让 import 抛', async () => {
++        values.set('folia_incidents', '{not json');
++        installStorage();
++        const incidents = await load();
++        expect(incidents.readIncidents()).toEqual([]);
++
++        values.set('folia_incidents', JSON.stringify({ wrong: 'shape' }));
++        installStorage();
++        expect((await load()).readIncidents()).toEqual([]);
++    });
++
++    it('单条形状不对只丢这一条，其余照读', async () => {
++        values.set('folia_incidents', JSON.stringify([
++            { at: 1, kind: 'error', detail: 'good' },
++            { at: 'x', kind: 'error', detail: 'bad at' },
++            { at: 2, kind: 'nonsense', detail: 'bad kind' },
++            null,
++            { at: 3, kind: 'gl-lost', detail: 42 },
++        ]));
++        installStorage();
++        const incidents = await load();
++
++        const log = incidents.readIncidents();
++        expect(log.map(entry => entry.detail)).toEqual(['good', '']);
++        expect(log[1].kind).toBe('gl-lost');
++    });
++
++    it('写不进去时不抛，本次会话仍然记得', async () => {
++        installStorage(false, true);
++        const incidents = await load();
++
++        expect(() => incidents.recordIncident('error', 'still counted')).not.toThrow();
++        expect(incidents.readIncidents().map(entry => entry.detail)).toEqual(['still counted']);
++    });
++
++    it('读不到存储时也能用', async () => {
++        installStorage(true);
++        const incidents = await load();
++        incidents.recordIncident('blank-root', 'root empty');
++        expect(incidents.countIncidents('blank-root')).toBe(1);
++    });
++
++    it('订阅只在有新记录时被通知，取消后不再收到', async () => {
++        const incidents = await load();
++        const listener = vi.fn();
++        const unsubscribe = incidents.subscribeToIncidents(listener);
++
++        incidents.recordIncident('error', 'one');
++        expect(listener).toHaveBeenCalledTimes(1);
++
++        // 没有新记录时读快照必须是同一个引用，否则 HUD 每 500ms 都会白白重渲染。
++        const before = incidents.readIncidents();
++        expect(incidents.readIncidents()).toBe(before);
++
++        unsubscribe();
++        incidents.recordIncident('error', 'two');
++        expect(listener).toHaveBeenCalledTimes(1);
++    });
++
++    it('countContextLosses 分开统计丢失与恢复', async () => {
++        const incidents = await load();
++        incidents.recordIncident('gl-lost', 'canvas');
++        incidents.recordIncident('gl-lost', 'canvas');
++        incidents.recordIncident('gl-restored', 'canvas');
++
++        expect(incidents.countContextLosses()).toEqual({ lost: 2, restored: 1 });
++    });
++
++    it('clearIncidents 清空内存与存储', async () => {
++        const incidents = await load();
++        incidents.recordIncident('error', 'bye');
++        incidents.clearIncidents();
++
++        expect(incidents.readIncidents()).toEqual([]);
++        expect(JSON.parse(values.get(incidents.INCIDENT_LIMITS.STORAGE_KEY)!)).toEqual([]);
++    });
++});

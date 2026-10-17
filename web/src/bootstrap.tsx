@@ -16,6 +16,7 @@ import { installFoliumHostEvents } from './mods/folium/hostEvents';
 import { installFoliumHomePageDismissal } from './components/app/home/foliumHomePageDismissal';
 import { installLibrarySuiteChromeCommands } from './library/app/installLibrarySuiteChromeCommands';
 import { installNativeDragGuard } from './utils/nativeDragGuard';
+import { installIncidentRecorders, armBlankRootWatchdog } from './services/debug/installIncidentRecorders';
 import { bootNavidromeServerPreset } from './services/navidromeServerPreset';
 import { isNavidromeEnabled } from './services/navidromeService';
 import { setNavidromeEnabledState } from './stores/useLibraryStore';
@@ -38,6 +39,10 @@ import './stores/useMotionSettingsStore';
 // here, for every surface this bundle mounts, rather than inside App so the remote-control and OBS
 // roots are covered too and App.tsx does not grow. See utils/nativeDragGuard.ts.
 installNativeDragGuard();
+
+// 黑屏唯一的证据来源。装在 createRoot 之前：首屏那次提交里抛的异常也要被记下。
+// 见 services/debug/installIncidentRecorders.ts —— 这台设备没有 adb，也就没有 console。
+installIncidentRecorders();
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -103,4 +108,7 @@ void Promise.allSettled([bootFolium(), bootNavidrome()])
     .finally(() => {
         initializeLocalCoverRuntime();
         renderApp();
+        // 组件树挂了之后，React 内部再没有任何东西能报信：这个看门狗直接在 #root 上数子节点，
+        // 掉到 0 就用非 React 的 DOM 把那条错误和重载按钮显示出来。
+        armBlankRootWatchdog(rootElement);
     });
