@@ -3,7 +3,7 @@
 把 [Folia](https://github.com/chthollyphile/folia-major) 带到手机上的非官方移植。
 
 - **Android**：一个自带 Web 产物的壳（WebView），所以离线是结构性的而不是"尽力而为"。
-- **iOS**：目前**没有**可用版本。可行形态只有两种，都还没做：纯 PWA（Safari 不支持 Screen Orientation API 的横屏锁定，且在线音源需要自部署实例），或一个 WKWebView 壳（能做到锁横屏和自带代理，但要 Mac + Apple 开发者账号）。iOS 这条路在真正开工前不承诺任何东西。
+- **iOS**：目前**没有**可用版本。可行形态只有两种，都还没做：纯 PWA（Safari 不支持 Screen Orientation API 的横屏锁定，且在线音源需要自部署实例），或一个 WKWebView 壳（能做到锁横屏和自带代理，但要 Mac + Apple 开发者账号）。iOS 这条路在真正开工前不承诺任何东西——为什么现在冻结、什么条件下会重新打开，写在 [`docs/ios-port.md`](docs/ios-port.md)。
 - 定位：**锁横屏的音乐观赏播放器**。
 
 > 本项目与上游 Folia 作者无隶属关系，是一个社区移植。
