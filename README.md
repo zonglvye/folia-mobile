@@ -209,6 +209,7 @@ patches/0019-fix-debug-measure-jank-against-the-session-s-own-fra.patch
 patches/0020-feat-ponder-let-the-touch-button-be-dragged-and-reme.patch
 patches/0021-test-ponder-cover-the-touch-button-s-drag-in-a-real-.patch
 patches/0022-feat-debug-record-what-happens-when-the-screen-goes-.patch
+patches/0023-fix-ponder-make-the-dragged-button-follow-the-finger.patch
 ```
 
 - **0001 无句柄本地导入**：新增 OPFS 音频字节仓、`importLocalFiles(File[])` 与文件选择器入口、让 `FileEntryForImport.handle` 可选、三个播放访问器加字节仓回退、无句柄根目录不可重扫、以及让本地页签在只有文件导入可用时也可进入。
@@ -233,7 +234,9 @@ patches/0022-feat-debug-record-what-happens-when-the-screen-goes-.patch
 - **0019 `jank` 用本次会话自己的帧时间做判据**：硬编码的 33.4ms（「漏两个 60Hz vsync」）在 90Hz 面板上会把「每三个 vsync 一帧」的齐整 33.3–33.5ms 判成 19% 卡顿。改为 `超过 max(33.4ms, 本窗口中位数 × 1.5)`，旧常数留作下界。同一补丁里，逐字发光在 `instant` / `fast` 展开模式下不再拆成每字一个 motion 节点（那两个变体在进入扫光分支前就返回，拆开只是让换行时多挂载一批节点）。
 - **0020 思索按钮可拖动**：触屏上那颗浮动入口从 `right-5 top-5` 改成可拖动的视口坐标（`ponderTouchButtonPosition` 负责钳位与序列化），拖动过程只写 DOM style 与 ref、不经过 React state，松手才写 store；96px 的召唤热区跟着按钮走；拖动不会触发打开思索，按住期间 4 秒的自动收起计时器不会把按钮从手指下面抽走。
 
-`web/` 的内容等于「上游 v0.7.20 + 这二十二个补丁」，可据此审计。
+`web/` 的内容等于「上游 v0.7.20 + 这二十三个补丁」，可据此审计。
+
+- **0023 拖动跟手**：位置从 `left`/`top` 改成 `translate3d`（前者每帧失效一次布局，而布局在主线程上；后者只挪一个已合成的图层），并给按钮加上 `touch-action: none`（否则浏览器会把拖动认成滚动平移、中途 `pointercancel` 掐断）与 `select-none`。`transition-all` 收窄成只过渡 `opacity`，按下缩放动画去掉（它与位置的 transform 抢同一个属性）。
 
 - **0022 黑屏取证**：`services/debug/incidents.ts` 记未捕获异常、未处理的 Promise 拒绝、WebGL 上下文丢失与恢复，64 条环形缓冲 + 尾部持久化（被迫重载之后证据还在）。`installIncidentRecorders.ts` 在 `createRoot` 之前装监听；另有一个「#root 子节点掉到 0」的看门狗 —— 那正是没有错误边界的 React 树被卸载之后的状态。此时用**非 React 的纯 DOM** 显示最近几条错误和一个重载按钮（那种状态下 React 里已经没有东西能画）。帧率 HUD 增加 `gl` / `err` / `blank` 三行和 `reload` 按钮。注意：上下文丢失刻意**不** `preventDefault` —— 那等于向浏览器承诺一次本层重建不了的恢复。
 

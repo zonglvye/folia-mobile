@@ -1,0 +1,166 @@
+From d8e2d40e2a6f712a22b80bef91a900c9d7f5b433 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 22:24:05 +0800
+Subject: [PATCH 23/23] fix(ponder): make the dragged button follow the finger
+
+Reported off the phone as "does not track the finger, cannot drag continuously",
+and both halves were real:
+
+- The drag wrote `left`/`top`. That invalidates layout on every move, and layout is
+  main-thread work: the HUD on the same device shows 97 ms long tasks, so the
+  button visibly trailed the finger. It is now `translate3d`, which only moves an
+  already-composited layer, and `will-change: transform` keeps that layer alive.
+  The position is still rounded and clamped in the same place.
+
+- The button never set `touch-action`. Without it the browser is free to read a
+  drag as a pan gesture, at which point it fires `pointercancel` and the drag ends
+  where it was - literally "cannot keep dragging". `touch-none` claims the gesture,
+  `select-none` stops a long press from turning into text selection, and the spec
+  asserts the computed value because this failure cannot happen with a mouse.
+
+The `transition-all` that used to cover opacity is narrowed to `transition-opacity`:
+a transition on transform turns the drag into a rubber band. The pressed-scale
+utility is dropped for the same reason - it shares the transform box now.
+
+Position assertions in the component spec read the transform matrix instead of
+`style.left/top`, and a seventh case pins `touch-action: none`.
+---
+ .../ponder/PagePonderTouchButton.tsx          | 43 +++++++++++++------
+ test/component/ponderTouchButton.spec.ts      | 16 +++++--
+ 2 files changed, 41 insertions(+), 18 deletions(-)
+
+diff --git a/src/components/ponder/PagePonderTouchButton.tsx b/src/components/ponder/PagePonderTouchButton.tsx
+index 1b3e025..b0c465c 100644
+--- a/src/components/ponder/PagePonderTouchButton.tsx
++++ b/src/components/ponder/PagePonderTouchButton.tsx
+@@ -37,6 +37,9 @@ const REVEAL_MS = 4000;
+ /** 热区的边长，px。按触摸目标给，不按视觉尺寸给；以按钮为中心外扩。 */
+ const HOTSPOT_SIZE_PX = 96;
+ 
++/** 收起时往上抬多少再淡出（原来是 `-translate-y-2`）。 */
++const HIDDEN_LIFT_PX = -8;
++
+ type PagePonderTouchButtonProps = {
+     accent: string;
+     isDaylight: boolean;
+@@ -106,15 +109,26 @@ const PagePonderTouchButton: React.FC<PagePonderTouchButtonProps> = ({ accent, i
+         return positionRef.current;
+     }, [storedPosition]);
+ 
+-    const paint = useCallback(() => {
++    /**
++     * 位置只走 transform，不走 left/top。
++     *
++     * 这不是微优化：改 left/top 会让每一帧都失效一次布局，而改 transform 只是把一个已经
++     * 合成好的图层挪个位置 —— 前者在主线程被占住的时候（这台机器上实测有 97ms 的长任务）
++     * 手指和按钮之间就出现肉眼可见的滞后，后者不会。`will-change: transform` 保证它一直
++     * 有自己的图层。
++     */
++    const applyTransform = useCallback((position: PonderTouchButtonPosition, revealed: boolean) => {
+         const node = buttonRef.current;
+         if (!node) return;
+-        const position = resolvePosition();
++        const lift = revealed ? 0 : HIDDEN_LIFT_PX;
++        node.style.transform = `translate3d(${position.x}px, ${position.y + lift}px, 0)`;
++    }, []);
++
++    const paint = useCallback(() => {
+         // 和 React 的 style 相比这是绕过去的写法，所以下面那个 layout effect 每渲染一次都重刷，
+         // 免得某次重渲染把拖动中的坐标打回去。
+-        node.style.left = `${position.x}px`;
+-        node.style.top = `${position.y}px`;
+-    }, [resolvePosition]);
++        applyTransform(resolvePosition(), isRevealedRef.current);
++    }, [applyTransform, resolvePosition]);
+ 
+     useLayoutEffect(() => {
+         paint();
+@@ -243,16 +257,13 @@ const PagePonderTouchButton: React.FC<PagePonderTouchButtonProps> = ({ accent, i
+                 return;
+             }
+             drag.moved = true;
+-            // transition-all 会把 left/top 也一起补间，拖起来像拖一条橡皮筋。
+-            event.currentTarget.style.transition = 'none';
+         }
+         const next = clampPonderTouchButtonPosition(
+             { x: drag.originX + dx, y: drag.originY + dy },
+             readViewport(),
+         );
+         positionRef.current = next;
+-        event.currentTarget.style.left = `${next.x}px`;
+-        event.currentTarget.style.top = `${next.y}px`;
++        event.currentTarget.style.transform = `translate3d(${next.x}px, ${next.y}px, 0)`;
+     };
+ 
+     const handleDragEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
+@@ -262,7 +273,6 @@ const PagePonderTouchButton: React.FC<PagePonderTouchButtonProps> = ({ accent, i
+         }
+         dragRef.current = null;
+         const node = event.currentTarget;
+-        node.style.transition = '';
+         try {
+             if (node.hasPointerCapture(event.pointerId)) {
+                 node.releasePointerCapture(event.pointerId);
+@@ -303,12 +313,17 @@ const PagePonderTouchButton: React.FC<PagePonderTouchButtonProps> = ({ accent, i
+             }}
+             aria-label={t('ponder.openPage')}
+             title={t('ponder.openPage')}
++            // 三个 CSS 细节都是拖动能不能跟手的一部分：
++            // - `left-0 top-0` + inline `transform`：位置只经过合成，不经过布局；
++            // - `touch-none`（`touch-action: none`）：否则浏览器会把横向/纵向的拖动认成滚动平移，
++            //   中途发一个 pointercancel 把拖动掐掉 —— 表现就是「拖一下就断」；
++            // - `select-none`：按住不放时别把手指当成在选文字。
+             // 收起来之后不可点：留着可点的话，它那块位置会变成一片看不见却能按的地方。
+-            // 坐标走 style（left/top），不走 right/top —— 拖动就是把 top/left 一路改过去。
+-            className={`fixed z-[190] flex h-12 w-12 items-center justify-center rounded-full border shadow-lg backdrop-blur-md transition-all duration-200 active:scale-95 ${
+-                isRevealed ? 'opacity-100' : 'pointer-events-none -translate-y-2 opacity-0'
++            // transition 只管 opacity：把 transform 也放进过渡的话，拖动会变成拖一条橡皮筋。
++            className={`fixed left-0 top-0 z-[190] flex h-12 w-12 touch-none select-none items-center justify-center rounded-full border shadow-lg backdrop-blur-md transition-opacity duration-200 will-change-transform ${
++                isRevealed ? 'opacity-100' : 'pointer-events-none opacity-0'
+             } ${isDaylight ? 'border-black/10 bg-white/80' : 'border-white/15 bg-zinc-900/80'}`}
+-            style={{ color: accent }}
++            style={{ color: accent, transform: 'translate3d(0, -100px, 0)' }}
+         >
+             <Lightbulb size={20} aria-hidden="true" />
+         </button>
+diff --git a/test/component/ponderTouchButton.spec.ts b/test/component/ponderTouchButton.spec.ts
+index 05e335a..d4a39eb 100644
+--- a/test/component/ponderTouchButton.spec.ts
++++ b/test/component/ponderTouchButton.spec.ts
+@@ -8,8 +8,8 @@ import { expect, test } from './fixtures';
+ // 桌面指针下这个组件返回 null，测的会是一片空白。第一条用例就是先把这个前提钉住 ——
+ // 它失败的时候，后面所有失败都是同一个原因。
+ //
+-// 位置一律读按钮自己的 inline `left` / `top`，不读 bounding box：拖动过程只写 DOM style，
+-// 而 bounding box 会带上亚像素取整，拿它比整数坐标差一像素。
++// 位置一律读按钮自己的 inline `transform`，不读 bounding box：拖动过程只写 DOM 的 transform
++// （位置走合成、不走布局，见组件里的注释），而 bounding box 会带上亚像素取整，拿它比整数坐标差一像素。
+ 
+ type Mount = (component: string) => Promise<unknown>;
+ 
+@@ -34,8 +34,10 @@ test.beforeEach(async ({ mount }) => {
+ /** 按钮现在停在哪（拖动过程中这是唯一的真相）。 */
+ async function positionOf(page: Page): Promise<{ x: number; y: number }> {
+     return page.locator(BUTTON).evaluate(node => {
+-        const style = (node as HTMLElement).style;
+-        return { x: Number.parseFloat(style.left), y: Number.parseFloat(style.top) };
++        // `translate3d(x, y, 0)` 读回一个 matrix，平移量在 m41/m42。
++        const transform = getComputedStyle(node).transform;
++        const matrix = transform === 'none' ? null : new DOMMatrix(transform);
++        return { x: Math.round(matrix?.m41 ?? 0), y: Math.round(matrix?.m42 ?? 0) };
+     });
+ }
+ 
+@@ -60,6 +62,12 @@ test.describe('触屏思索按钮', () => {
+         await expect(page.locator(BUTTON)).toBeVisible();
+     });
+ 
++    // 「拖一下就断」的那个 bug：没有 touch-action: none 时，浏览器会把拖动认成滚动平移，
++    // 中途发 pointercancel 把拖动掐掉。这条钉住它，因为它在桌面指针下不会复现。
++    test('按钮声明了 touch-action: none，拖动不会被浏览器抢走', async ({ page }) => {
++        await expect(page.locator(BUTTON)).toHaveCSS('touch-action', 'none');
++    });
++
+     test('默认停在右上角', async ({ page }) => {
+         expect(await positionOf(page)).toEqual({
+             x: VIEWPORT.width - SIZE - INSET,

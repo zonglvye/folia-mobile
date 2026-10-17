@@ -1,7 +1,7 @@
 From 5f89c1558bfc1c95e09552398ac1db20a630f05a Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 01:12:18 +0800
-Subject: [PATCH 02/22] feat(kugou): reach KuGou's public endpoints without a
+Subject: [PATCH 02/23] feat(kugou): reach KuGou's public endpoints without a
  self-hosted gateway
 
 The provider reported itself unconfigured whenever VITE_KUGOU_API_BASE was empty, so on the

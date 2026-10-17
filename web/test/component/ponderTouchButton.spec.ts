@@ -8,8 +8,8 @@ import { expect, test } from './fixtures';
 // 桌面指针下这个组件返回 null，测的会是一片空白。第一条用例就是先把这个前提钉住 ——
 // 它失败的时候，后面所有失败都是同一个原因。
 //
-// 位置一律读按钮自己的 inline `left` / `top`，不读 bounding box：拖动过程只写 DOM style，
-// 而 bounding box 会带上亚像素取整，拿它比整数坐标差一像素。
+// 位置一律读按钮自己的 inline `transform`，不读 bounding box：拖动过程只写 DOM 的 transform
+// （位置走合成、不走布局，见组件里的注释），而 bounding box 会带上亚像素取整，拿它比整数坐标差一像素。
 
 type Mount = (component: string) => Promise<unknown>;
 
@@ -34,8 +34,10 @@ test.beforeEach(async ({ mount }) => {
 /** 按钮现在停在哪（拖动过程中这是唯一的真相）。 */
 async function positionOf(page: Page): Promise<{ x: number; y: number }> {
     return page.locator(BUTTON).evaluate(node => {
-        const style = (node as HTMLElement).style;
-        return { x: Number.parseFloat(style.left), y: Number.parseFloat(style.top) };
+        // `translate3d(x, y, 0)` 读回一个 matrix，平移量在 m41/m42。
+        const transform = getComputedStyle(node).transform;
+        const matrix = transform === 'none' ? null : new DOMMatrix(transform);
+        return { x: Math.round(matrix?.m41 ?? 0), y: Math.round(matrix?.m42 ?? 0) };
     });
 }
 
@@ -58,6 +60,12 @@ test.describe('触屏思索按钮', () => {
         );
         expect(finePointer).toBe(false);
         await expect(page.locator(BUTTON)).toBeVisible();
+    });
+
+    // 「拖一下就断」的那个 bug：没有 touch-action: none 时，浏览器会把拖动认成滚动平移，
+    // 中途发 pointercancel 把拖动掐掉。这条钉住它，因为它在桌面指针下不会复现。
+    test('按钮声明了 touch-action: none，拖动不会被浏览器抢走', async ({ page }) => {
+        await expect(page.locator(BUTTON)).toHaveCSS('touch-action', 'none');
     });
 
     test('默认停在右上角', async ({ page }) => {

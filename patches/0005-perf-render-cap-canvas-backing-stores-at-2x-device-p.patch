@@ -1,7 +1,7 @@
 From fa8f2382d10f6ce0e1960084734bf79e60bd9568 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 10:58:00 +0800
-Subject: [PATCH 05/22] perf(render): cap canvas backing stores at 2x device
+Subject: [PATCH 05/23] perf(render): cap canvas backing stores at 2x device
  pixels
 
 A 3x phone was giving these canvases nine times the CSS-pixel area, and canvas
