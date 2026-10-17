@@ -61,6 +61,7 @@ public class MainActivity extends Activity {
 
     private static final int REQ_FILE_CHOOSER = 1001;
     private static final int REQ_NOTIFICATION = 1002;
+    private static final int REQ_AUDIO_PERMISSION = 1003;
     private static final String STATE_IMMERSIVE = "immersive";
 
     private FrameLayout rootLayout;
@@ -247,6 +248,13 @@ public class MainActivity extends Activity {
         WebResourceResponse proxyResponse = LyricProxyHandler.handle(request);
         if (proxyResponse != null) {
             return proxyResponse;
+        }
+        // The device's own music library. Tried before the asset loader for the same reason as the
+        // proxy: /api/ is not a file in the bundle, and the asset handler's SPA fallback would
+        // otherwise answer these paths with an HTML document.
+        WebResourceResponse deviceAudioResponse = DeviceAudioHandler.handle(this, request);
+        if (deviceAudioResponse != null) {
+            return deviceAudioResponse;
         }
         return assetLoader == null ? null : assetLoader.shouldInterceptRequest(url);
     }
@@ -509,6 +517,62 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{ Manifest.permission.POST_NOTIFICATIONS }, REQ_NOTIFICATION);
         }
         updatePortraitHint();
+    }
+
+    /**
+     * Asks for the media-read permission the device library needs. Called from the bridge, so it may
+     * arrive on the JavaScript bridge thread and has to be posted to the UI thread before the dialog
+     * can be shown.
+     *
+     * The answer goes back to the page as a DOM event rather than a return value: the page calls this
+     * from a click handler, and a permission dialog outlives that turn. One event name, dispatched
+     * whether the user granted, denied or the dialog could not be shown at all - the page treats
+     * every non-granted outcome the same way, by explaining the situation instead of retrying.
+     */
+    public void requestAudioPermission() {
+        runOnUiThread(() -> {
+            if (DeviceAudioLibrary.hasPermission(this)) {
+                dispatchAudioPermission(true);
+                return;
+            }
+            try {
+                requestPermissions(
+                        new String[]{ DeviceAudioLibrary.requiredPermission() },
+                        REQ_AUDIO_PERMISSION);
+            } catch (Exception unsupported) {
+                Log.w(TAG, "Audio permission dialog unavailable: " + unsupported);
+                dispatchAudioPermission(false);
+            }
+        });
+    }
+
+    /** Whether the device library is already readable; the page probes before showing anything. */
+    public boolean hasAudioPermission() {
+        return DeviceAudioLibrary.hasPermission(this);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                           int[] grantResults) {
+        if (requestCode == REQ_AUDIO_PERMISSION) {
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            dispatchAudioPermission(granted);
+            return;
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    private void dispatchAudioPermission(boolean granted) {
+        runOnUiThread(() -> {
+            if (webView == null) {
+                return;
+            }
+            webView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('folia-android-audio-permission',{detail:{granted:"
+                            + granted + "}}));",
+                    null);
+        });
     }
 
     @Override

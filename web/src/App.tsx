@@ -86,6 +86,7 @@ import { useElectronDisplaySleepBlocker } from './hooks/useElectronDisplaySleepB
 import { useSleepTimer } from './hooks/useSleepTimer';
 import { useElectronNeteaseApiStatus } from './hooks/useElectronNeteaseApiStatus';
 import { useLocalLibraryAutoScan } from './hooks/useLocalLibraryAutoScan';
+import { useDeviceAudioLibrary } from './hooks/useDeviceAudioLibrary';
 import { useElectronVideoExportController } from './hooks/useElectronVideoExportController';
 import { useElectronWindowPlaybackHandoff } from './hooks/useElectronWindowPlaybackHandoff';
 import { useMediaSessionBridge } from './hooks/useMediaSessionBridge';
@@ -258,6 +259,9 @@ export default function App() {
     useElectronNeteaseApiStatus(t);
     // Watches the imported local folders and rescans them when their contents change.
     useLocalLibraryAutoScan();
+    // The Android shell's own music collection: listed once per launch and merged into the local
+    // library. A no-op everywhere else, which is why it needs no platform branch here.
+    useDeviceAudioLibrary();
 
     // Auto-close the player panel when leaving the player view
     // (Effect moved to after useAppNavigation where currentView is defined)

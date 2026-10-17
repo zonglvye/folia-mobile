@@ -36,6 +36,7 @@ import { useLyricSettingsStore } from '../stores/useLyricSettingsStore';
 import { getLocalLyricFilePriority, isSameLocalLyricFormatOrder, normalizeLocalLyricFormatOrder, type LocalLyricFileFormat } from '../utils/lyrics/localLyricFormatOrder';
 import { readLyricFile } from '../utils/lyrics/lyricFileDecoding';
 import { isLocalFolderIgnored, normalizeLocalFolderPath, runLocalFolderMutation, setLocalFolderIgnored } from './localLibraryFolderIgnore';
+import { buildDeviceAudioStreamUrl, isDeviceAudioSong } from './deviceAudioLibrary';
 
 
 type EmbeddedMetadata = EmbeddedMetadataResult;
@@ -1899,6 +1900,13 @@ async function readStoredLocalSongFile(song: LocalSong): Promise<File | null> {
 // Get audio blob from local song using fileHandle
 // Returns blob URL if fileHandle exists, null otherwise
 export async function getAudioFromLocalSong(song: LocalSong): Promise<string | null> {
+    // A device song is streamed, not read: the shell answers with the original content:// item and
+    // supports byte ranges, so the URL behaves like any other media source - including seeking. It is
+    // deliberately not a blob URL, which is also why the callers' URL.revokeObjectURL is a no-op here.
+    if (isDeviceAudioSong(song)) {
+        return buildDeviceAudioStreamUrl(song.deviceAudioId as number);
+    }
+
     const fileHandle = await getAccessibleFileHandle(song);
 
     if (fileHandle) {
@@ -1936,6 +1944,12 @@ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | n
 
 /** Resolves the current File for playback recovery without changing the song or minting a URL. */
 export async function getFileFromLocalSong(song: LocalSong): Promise<File | null> {
+    // A device song has no picker File and reading its bytes would mean downloading the whole track
+    // into memory, which is exactly what streaming exists to avoid. Callers degrade on null.
+    if (isDeviceAudioSong(song)) {
+        return null;
+    }
+
     const fileHandle = await getAccessibleFileHandle(song);
     if (fileHandle) {
         try {
@@ -1969,6 +1983,13 @@ export async function getFileFromLocalSong(song: LocalSong): Promise<File | null
  * returns the ArrayBuffer. Null when none of the three can produce the bytes.
  */
 export async function getLocalSongArrayBuffer(song: LocalSong): Promise<ArrayBuffer | null> {
+    // Automix analyses a track by decoding all of it. For a device song that would mean pulling the
+    // whole file off the shell first, so it reports "no bytes" and the caller takes its documented
+    // fallback rather than the app silently buffering a hundred megabytes.
+    if (isDeviceAudioSong(song)) {
+        return null;
+    }
+
     const fileHandle = await getAccessibleFileHandle(song);
     if (fileHandle) {
         try {

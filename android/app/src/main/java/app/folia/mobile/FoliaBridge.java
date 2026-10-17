@@ -88,6 +88,25 @@ public class FoliaBridge {
         }
     }
 
+    /**
+     * Whether the device's own music collection is already readable. The page probes this before
+     * offering to scan, so a returning user is never asked for a permission they already gave.
+     */
+    @JavascriptInterface
+    public boolean hasAudioPermission() {
+        return activity.hasAudioPermission();
+    }
+
+    /**
+     * Shows the media-read permission dialog. Returns immediately and answers later through the
+     * `folia-android-audio-permission` DOM event, because a dialog cannot be resolved inside a
+     * synchronous bridge call.
+     */
+    @JavascriptInterface
+    public void requestAudioPermission() {
+        activity.requestAudioPermission();
+    }
+
     // Reserved for the next milestone, deliberately absent rather than stubbed so the page's
     // per-method capability probing stays truthful:
     //   pickAudioFolder / listAudioFolderEntries / readAudioChunk  - SAF folder import

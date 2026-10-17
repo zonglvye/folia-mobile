@@ -1,0 +1,646 @@
+From 9c14f76eb8002ba92f87bea9df8af90749707533 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sat, 17 Oct 2026 09:23:20 +0800
+Subject: [PATCH 3/3] feat(device-library): list and stream the phone's own
+ music collection
+
+The shell can read MediaStore for the user's audio and stream each track from
+its original content:// item with full Range support, so a phone library of
+thousands of tracks costs no disk, no OPFS quota and no import wait.
+
+- deviceAudioLibrary: probes window.foliaAndroid, asks for READ_MEDIA_AUDIO,
+  reads /api/device-audio and builds the stream / album-art URLs.
+- deviceAudioSync: merges the collection into local_music as ordinary
+  LocalSong rows, so the existing folder / album / artist grouping, lyric
+  matching and playlist code work on these songs unchanged. Re-syncing keeps
+  every user-produced field and only refreshes MediaStore's own ones; a
+  granted-but-empty read is refused rather than treated as "all music gone".
+- getAudioFromLocalSong routes a device song to its stream URL; the File and
+  ArrayBuffer readers return null for one instead of downloading it whole.
+- The local tab's refresh action re-reads the collection, which is also where
+  the permission dialog is raised from a real click.
+---
+ src/App.tsx                              |   4 +
+ src/hooks/useDeviceAudioLibrary.ts       |  22 ++
+ src/library/app/createLibraryHomePort.ts |  10 +-
+ src/services/deviceAudioLibrary.ts       | 209 +++++++++++++++++++
+ src/services/deviceAudioSync.ts          | 243 +++++++++++++++++++++++
+ src/services/localMusicService.ts        |  21 ++
+ src/types.ts                             |   6 +
+ 7 files changed, 514 insertions(+), 1 deletion(-)
+ create mode 100644 src/hooks/useDeviceAudioLibrary.ts
+ create mode 100644 src/services/deviceAudioLibrary.ts
+ create mode 100644 src/services/deviceAudioSync.ts
+
+diff --git a/src/App.tsx b/src/App.tsx
+index 261713b..c89b59b 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -86,6 +86,7 @@ import { useElectronDisplaySleepBlocker } from './hooks/useElectronDisplaySleepB
+ import { useSleepTimer } from './hooks/useSleepTimer';
+ import { useElectronNeteaseApiStatus } from './hooks/useElectronNeteaseApiStatus';
+ import { useLocalLibraryAutoScan } from './hooks/useLocalLibraryAutoScan';
++import { useDeviceAudioLibrary } from './hooks/useDeviceAudioLibrary';
+ import { useElectronVideoExportController } from './hooks/useElectronVideoExportController';
+ import { useElectronWindowPlaybackHandoff } from './hooks/useElectronWindowPlaybackHandoff';
+ import { useMediaSessionBridge } from './hooks/useMediaSessionBridge';
+@@ -258,6 +259,9 @@ export default function App() {
+     useElectronNeteaseApiStatus(t);
+     // Watches the imported local folders and rescans them when their contents change.
+     useLocalLibraryAutoScan();
++    // The Android shell's own music collection: listed once per launch and merged into the local
++    // library. A no-op everywhere else, which is why it needs no platform branch here.
++    useDeviceAudioLibrary();
+ 
+     // Auto-close the player panel when leaving the player view
+     // (Effect moved to after useAppNavigation where currentView is defined)
+diff --git a/src/hooks/useDeviceAudioLibrary.ts b/src/hooks/useDeviceAudioLibrary.ts
+new file mode 100644
+index 0000000..66b9a5b
+--- /dev/null
++++ b/src/hooks/useDeviceAudioLibrary.ts
+@@ -0,0 +1,22 @@
++import { useEffect } from 'react';
++import { startDeviceAudioLibrarySync } from '../services/deviceAudioSync';
++
++// src/hooks/useDeviceAudioLibrary.ts
++// Runs the launch-time scan of the device's own music collection, once, for the app's lifetime.
++// The work itself lives in services/deviceAudioSync: this hook only decides when it happens, so the
++// same routine is reachable from the local tab's refresh action without going through React.
++
++/** Call once, from the app root, next to the local-library folder watcher. */
++export const useDeviceAudioLibrary = (): void => {
++    useEffect(() => {
++        let cancelled = false;
++        void startDeviceAudioLibrarySync().then(() => {
++            // The scan already bails out on its own; this only stops a result from landing after the
++            // app root was torn down (StrictMode's double mount, or a reload during the dialog).
++            if (cancelled) return;
++        });
++        return () => {
++            cancelled = true;
++        };
++    }, []);
++};
+diff --git a/src/library/app/createLibraryHomePort.ts b/src/library/app/createLibraryHomePort.ts
+index e78410a..14c8372 100644
+--- a/src/library/app/createLibraryHomePort.ts
++++ b/src/library/app/createLibraryHomePort.ts
+@@ -3,6 +3,7 @@ import type { LibraryHomePort, LibraryHomeScanProgress } from '../core/contracts
+ import type { HomeSurfaceProps } from '../../components/app/home/homeSurfaceTypes';
+ import { translateHomeMessage } from '../core/model/homeSources';
+ import { importFolder, importLocalFilesViaInput, resyncAllFolders, LOCAL_MUSIC_SCAN_PROGRESS_EVENT } from '../../services/localMusicService';
++import { refreshDeviceAudioLibrary } from '../../services/deviceAudioSync';
+ import { getLocalLibraryAvailability } from '../../services/localLibraryAvailability';
+ import { importLocalPlaylistFile } from '../../services/localPlaylistFileService';
+ import { omni } from '../../services/onlineMusic/omni';
+@@ -23,7 +24,14 @@ export const createLibraryHomePort = (getSurface: () => HomePortSurface): Librar
+     localAvailability: () => getLocalLibraryAvailability(),
+     importFolder: async () => (await importFolder()).length,
+     importFiles: async () => (await importLocalFilesViaInput()).length,
+-    resyncAllFolders: async () => (await resyncAllFolders())?.length ?? 0,
++    resyncAllFolders: async () => {
++        const rescanned = (await resyncAllFolders())?.length ?? 0;
++        // The refresh action is also the way back to the device's music collection: it re-reads the
++        // shell's list (finding tracks added since last launch) and, when the permission is missing,
++        // raises the dialog from this very click. Returns 0 on the desktop and in a browser.
++        const syncedDeviceSongs = await refreshDeviceAudioLibrary();
++        return rescanned + syncedDeviceSongs;
++    },
+     importPlaylistFile: async (file) => {
+         const result = await importLocalPlaylistFile(file, getSurface().localSongs);
+         return {
+diff --git a/src/services/deviceAudioLibrary.ts b/src/services/deviceAudioLibrary.ts
+new file mode 100644
+index 0000000..c3f37e8
+--- /dev/null
++++ b/src/services/deviceAudioLibrary.ts
+@@ -0,0 +1,209 @@
++// src/services/deviceAudioLibrary.ts
++// Reads the Android shell's MediaStore view of the user's own music collection: whether the shell
++// can serve it at all, whether the media-read permission is granted, the track list itself, and the
++// same-origin URLs that stream a track and its album art.
++//
++// Nothing here copies audio. The shell answers /api/device-audio/* from the original content:// item,
++// so a library of thousands of tracks costs no disk and no import wait - the bytes stay where they are
++// and are streamed, with Range support, only when the track is played.
++
++import type { LocalSong } from '../types';
++
++/** The Android shell's JavaScript bridge, injected by `MainActivity` as `window.foliaAndroid`. */
++interface FoliaAndroidBridge {
++  /** Whether the media-read permission is already granted. Absent on older shells. */
++  hasAudioPermission?: () => boolean;
++  /** Shows the permission dialog; the answer arrives as a DOM event, not a return value. */
++  requestAudioPermission?: () => void;
++  getAppInfo?: () => string | null;
++  setImmersiveMode?: (enabled: boolean) => void;
++  setPlaybackSnapshot?: (snapshotJson: string) => void;
++  openBatteryOptimizationSettings?: () => void;
++  openAppDetailsSettings?: () => void;
++}
++
++declare global {
++  interface Window {
++    foliaAndroid?: FoliaAndroidBridge;
++  }
++}
++
++/** DOM event the shell dispatches with the permission dialog's outcome. */
++export const DEVICE_AUDIO_PERMISSION_EVENT = 'folia-android-audio-permission';
++
++/**
++ * The synthetic folder every device-backed song is filed under. It is a real local-library folder as
++ * far as the rest of the app is concerned: the existing folder / album / artist grouping, lyric
++ * matching and playlist code all work on these songs without knowing where they came from.
++ */
++export const DEVICE_AUDIO_ROOT_FOLDER = '手机音乐';
++
++/**
++ * Root segment of a device song's `filePath`. ASCII on purpose: `filePath` doubles as a lookup key
++ * and as the root name the folder-rescan code derives from it, and that code compares roots against
++ * persisted directory handles - which a device song never has, so those roots are skipped.
++ */
++export const DEVICE_AUDIO_ROOT_PATH = 'device-audio';
++
++const DEVICE_AUDIO_BASE = '/api/device-audio';
++
++export interface DeviceAudioTrack {
++  /** MediaStore `_ID`. Stable for as long as the file is on the device, and the song's identity. */
++  id: number;
++  title: string;
++  artist: string;
++  album: string;
++  albumId: number;
++  durationMs: number;
++  size: number;
++  mimeType: string;
++  fileName: string;
++  /** Milliseconds since epoch, converted from MediaStore's DATE_ADDED seconds. */
++  addedAt: number;
++  relativePath?: string;
++}
++
++export type DeviceAudioPermission = 'granted' | 'denied' | 'unavailable';
++
++export type DeviceAudioLibraryResult =
++  | { status: 'granted'; tracks: DeviceAudioTrack[] }
++  | { status: 'denied' }
++  | { status: 'unavailable' };
++
++/**
++ * Whether this build can read the device's music collection at all. The bridge is the only honest
++ * signal: the desktop build and a deployed web build have no shell, and probing the route instead
++ * would report "supported" exactly when the SPA fallback answered with an HTML document.
++ */
++export const isDeviceAudioLibrarySupported = (): boolean => (
++  typeof window !== 'undefined'
++  && typeof window.foliaAndroid?.hasAudioPermission === 'function'
++);
++
++/** The stream URL for one track. The player treats it as an ordinary media URL with byte ranges. */
++export const buildDeviceAudioStreamUrl = (deviceAudioId: number): string => (
++  `${DEVICE_AUDIO_BASE}/stream?id=${encodeURIComponent(String(deviceAudioId))}`
++);
++
++/** The album-art URL for one album, or null when there is no album to look up. */
++export const buildDeviceAudioCoverUrl = (albumId: number): string | null => (
++  Number.isFinite(albumId) && albumId > 0
++    ? `${DEVICE_AUDIO_BASE}/cover?albumId=${encodeURIComponent(String(albumId))}`
++    : null
++);
++
++/**
++ * A device song is recognised by this marker alone; no path or naming convention is involved.
++ *
++ * These two predicates live here, in the module that imports nothing from the local library, because
++ * the local music service needs them and the sync service needs the local music service - putting
++ * them in the sync service would close an import cycle.
++ */
++export const isDeviceAudioSong = (song: LocalSong): boolean => (
++  typeof song.deviceAudioId === 'number' && Number.isFinite(song.deviceAudioId)
++);
++
++/** Stable id for a device-backed song, derived from the MediaStore id so a re-sync matches it. */
++export const deviceAudioSongId = (deviceAudioId: number): string => `device_${deviceAudioId}`;
++
++/** Whether the permission is granted right now, asked of the shell rather than remembered. */
++export const hasDeviceAudioPermission = (): boolean => {
++  try {
++    return Boolean(window.foliaAndroid?.hasAudioPermission?.());
++  } catch {
++    return false;
++  }
++};
++
++const waitForPermissionAnswer = (timeoutMs: number): Promise<boolean> => (
++  new Promise<boolean>((resolve) => {
++    let settled = false;
++    const finish = (granted: boolean) => {
++      if (settled) return;
++      settled = true;
++      window.removeEventListener(DEVICE_AUDIO_PERMISSION_EVENT, handleAnswer);
++      window.clearTimeout(timer);
++      resolve(granted);
++    };
++    const handleAnswer = (event: Event) => {
++      finish(Boolean((event as CustomEvent<{ granted?: boolean; }>).detail?.granted));
++    };
++    // A dialog that is never answered (the app is backgrounded, the activity is recreated) would
++    // otherwise leave the caller pending forever. The timeout only ends the wait; it never claims
++    // the permission was refused, because the caller re-asks the shell for the real answer.
++    const timer = window.setTimeout(() => finish(false), timeoutMs);
++    window.addEventListener(DEVICE_AUDIO_PERMISSION_EVENT, handleAnswer);
++  })
++);
++
++/**
++ * Asks for the media-read permission, resolving with the truth rather than with the dialog's
++ * outcome. The dialog may never be shown at all (a permanently denied permission, a vendor ROM that
++ * suppresses it), and in that case the shell's own check is the only thing that knows.
++ */
++export const requestDeviceAudioPermission = async (): Promise<boolean> => {
++  if (!isDeviceAudioLibrarySupported()) return false;
++  if (hasDeviceAudioPermission()) return true;
++  try {
++    window.foliaAndroid?.requestAudioPermission?.();
++  } catch (error) {
++    console.warn('[DeviceAudio] Permission request failed:', error);
++    return false;
++  }
++  const granted = await waitForPermissionAnswer(180_000);
++  // The event can be lost (the page reloads mid-dialog), so the shell is asked either way.
++  return granted || hasDeviceAudioPermission();
++};
++
++const readTrack = (value: unknown): DeviceAudioTrack | null => {
++  if (!value || typeof value !== 'object') return null;
++  const raw = value as Record<string, unknown>;
++  const id = Number(raw.id);
++  if (!Number.isFinite(id) || id < 0) return null;
++  const text = (key: string): string => (typeof raw[key] === 'string' ? raw[key] as string : '');
++  const number = (key: string): number => {
++    const parsed = Number(raw[key]);
++    return Number.isFinite(parsed) ? parsed : 0;
++  };
++  return {
++    id,
++    title: text('title'),
++    artist: text('artist'),
++    album: text('album'),
++    albumId: number('albumId'),
++    durationMs: number('durationMs'),
++    size: number('size'),
++    mimeType: text('mimeType'),
++    fileName: text('fileName'),
++    addedAt: number('addedAt') || Date.now(),
++    relativePath: typeof raw.relativePath === 'string' ? raw.relativePath : undefined,
++  };
++};
++
++/**
++ * The device's music collection as the shell sees it. A denied permission is reported as its own
++ * status rather than as an error, because the two lead to different behaviour: denied means "ask the
++ * user once", unavailable means "stop offering this".
++ */
++export const fetchDeviceAudioLibrary = async (): Promise<DeviceAudioLibraryResult> => {
++  if (!isDeviceAudioLibrarySupported()) return { status: 'unavailable' };
++  try {
++    const response = await fetch(DEVICE_AUDIO_BASE, { cache: 'no-store' });
++    if (response.status === 403) return { status: 'denied' };
++    if (!response.ok) {
++      console.warn(`[DeviceAudio] Library request failed with ${response.status}`);
++      return { status: 'unavailable' };
++    }
++    const payload = await response.json() as { permission?: string; tracks?: unknown[]; };
++    if (payload.permission !== 'granted') {
++      return payload.permission === 'denied' ? { status: 'denied' } : { status: 'unavailable' };
++    }
++    const tracks = (Array.isArray(payload.tracks) ? payload.tracks : [])
++      .map(readTrack)
++      .filter((track): track is DeviceAudioTrack => track !== null);
++    return { status: 'granted', tracks };
++  } catch (error) {
++    console.warn('[DeviceAudio] Library request threw:', error);
++    return { status: 'unavailable' };
++  }
++};
+diff --git a/src/services/deviceAudioSync.ts b/src/services/deviceAudioSync.ts
+new file mode 100644
+index 0000000..4b260fb
+--- /dev/null
++++ b/src/services/deviceAudioSync.ts
+@@ -0,0 +1,243 @@
++// src/services/deviceAudioSync.ts
++// Reconciles the device's music collection into the local library, so the songs the shell can stream
++// become ordinary `LocalSong` rows. That is the whole trick behind "open the app and your music is
++// there": nothing downstream of the library - the folder / album / artist grouping, lyric matching,
++// playlists, the player - has to know these songs were never imported.
++//
++// The reconciliation is a merge, not a rebuild. A song that is already in the library keeps every
++// field the user produced (a matched lyric, a marked-as-instrumental flag, a chosen lyric source) and
++// only has the MediaStore-owned fields refreshed, so re-syncing never costs the user their edits.
++
++import type { LocalSong } from '../types';
++import { getLocalSongs, saveLocalSongs } from './db';
++import { deleteLocalSong, LOCAL_MUSIC_UPDATED_EVENT } from './localMusicService';
++import {
++    DEVICE_AUDIO_ROOT_FOLDER,
++    DEVICE_AUDIO_ROOT_PATH,
++    deviceAudioSongId,
++    fetchDeviceAudioLibrary,
++    hasDeviceAudioPermission,
++    isDeviceAudioLibrarySupported,
++    isDeviceAudioSong,
++    requestDeviceAudioPermission,
++    type DeviceAudioTrack,
++} from './deviceAudioLibrary';
++
++export interface DeviceAudioSyncResult {
++    created: number;
++    updated: number;
++    removed: number;
++    total: number;
++}
++
++const stripExtension = (fileName: string): string => {
++    const dot = fileName.lastIndexOf('.');
++    return dot > 0 ? fileName.slice(0, dot) : fileName;
++};
++
++/** The MediaStore-owned half of a device song's record, as it should look for this track. */
++const deviceFieldsOf = (track: DeviceAudioTrack): Partial<LocalSong> => {
++    const taggedTitle = track.title.trim();
++    const fallbackTitle = stripExtension(track.fileName) || `设备音乐 ${track.id}`;
++    const title = taggedTitle || fallbackTitle;
++    const artistNames = track.artist.trim() ? [track.artist.trim()] : [];
++    return {
++        deviceAudioId: track.id,
++        fileName: track.fileName || `${title}.mp3`,
++        filePath: `${DEVICE_AUDIO_ROOT_PATH}/${track.id}`,
++        folderName: DEVICE_AUDIO_ROOT_FOLDER,
++        duration: track.durationMs,
++        fileSize: track.size,
++        // A device track has no File and therefore no lastModified; the signature still has to change
++        // when the underlying file is replaced, which the MediaStore size and id capture well enough.
++        fileSignature: `device:${track.id}:${track.size}:${track.durationMs}`,
++        mimeType: track.mimeType || 'application/octet-stream',
++        addedAt: track.addedAt || Date.now(),
++        title,
++        titleOrigin: 'import',
++        // MediaStore reads the file's own tags, so a title that came from there IS the embedded one;
++        // falling back to the file name is the honest label for a track with no tags at all.
++        importedMetadata: {
++            title,
++            titleSource: taggedTitle ? 'embedded' : 'filename',
++            artistNames,
++            albumName: track.album.trim() || undefined,
++        },
++    };
++};
++
++/**
++ * Whether a stored device song already agrees with what MediaStore now reports. Rewriting a record
++ * that has not changed would touch the whole local_music table on every launch for a library of
++ * thousands of tracks, so the merge skips identical rows instead.
++ */
++const needsUpdate = (song: LocalSong, next: Partial<LocalSong>): boolean => (
++    song.title !== next.title
++    || song.fileName !== next.fileName
++    || song.duration !== next.duration
++    || song.fileSize !== next.fileSize
++    || song.mimeType !== next.mimeType
++    || song.fileSignature !== next.fileSignature
++    || song.importedMetadata?.artistNames?.[0] !== next.importedMetadata?.artistNames?.[0]
++    || song.importedMetadata?.albumName !== next.importedMetadata?.albumName
++);
++
++/**
++ * Merges the device collection into the local library. Returns what changed, or null when the sync
++ * was refused because the answer could not be trusted (see below).
++ *
++ * Deleting is the only destructive part, so it is gated: a "granted" answer that lists nothing while
++ * the library still holds device songs is treated as a transient read (MediaStore still scanning
++ * after a boot) rather than as "the user deleted all their music". Every other granted answer is
++ * authoritative and removes the tracks that are genuinely gone.
++ */
++export const syncDeviceAudioLibrary = async (
++    tracks: readonly DeviceAudioTrack[],
++): Promise<DeviceAudioSyncResult | null> => {
++    const existing = await getLocalSongs();
++    const existingDeviceSongs = existing.filter(isDeviceAudioSong);
++
++    if (tracks.length === 0 && existingDeviceSongs.length > 0) {
++        console.warn('[DeviceAudio] Sync skipped: the collection read as empty while the library still '
++            + `holds ${existingDeviceSongs.length} device songs.`);
++        return null;
++    }
++
++    const existingByDeviceId = new Map<number, LocalSong>();
++    existingDeviceSongs.forEach(song => existingByDeviceId.set(song.deviceAudioId as number, song));
++
++    const presentIds = new Set<number>();
++    const toSave: LocalSong[] = [];
++    let created = 0;
++    let updated = 0;
++
++    tracks.forEach(track => {
++        presentIds.add(track.id);
++        const fields = deviceFieldsOf(track);
++        const current = existingByDeviceId.get(track.id);
++        if (!current) {
++            toSave.push({ id: deviceAudioSongId(track.id), ...fields } as LocalSong);
++            created += 1;
++            return;
++        }
++        if (needsUpdate(current, fields)) {
++            // `...current` first: everything the user produced survives, only MediaStore's own
++            // fields are replaced.
++            toSave.push({ ...current, ...fields });
++            updated += 1;
++        }
++    });
++
++    const removedSongs = existingDeviceSongs.filter(song => !presentIds.has(song.deviceAudioId as number));
++
++    if (toSave.length > 0) {
++        await saveLocalSongs(toSave);
++    }
++    for (const song of removedSongs) {
++        await deleteLocalSong(song.id);
++    }
++
++    const result: DeviceAudioSyncResult = {
++        created,
++        updated,
++        removed: removedSongs.length,
++        total: tracks.length,
++    };
++    if (created > 0 || updated > 0 || result.removed > 0) {
++        console.log(`[DeviceAudio] Sync: ${created} new, ${updated} updated, ${result.removed} removed `
++            + `(of ${tracks.length} on the device).`);
++        // The app reloads the local library on this event, the same way a folder scan announces itself.
++        window.dispatchEvent(new CustomEvent(LOCAL_MUSIC_UPDATED_EVENT));
++    }
++    return result;
++};
++
++/** How many device-backed songs the library currently holds. */
++export const countDeviceAudioSongs = async (): Promise<number> => (
++    (await getLocalSongs()).filter(isDeviceAudioSong).length
++);
++
++// ---- the two entry points the app calls ------------------------------------------------
++
++const PERMISSION_ASKED_KEY = 'folia-device-audio-permission-asked';
++
++/**
++ * Whether the permission dialog has already been shown once. A single "no" has to be remembered:
++ * asking on every launch is how an app trains its user to deny it reflexively, and the refresh
++ * action stays available as the deliberate way back.
++ */
++export const wasDeviceAudioPermissionAsked = (): boolean => {
++    try {
++        return window.localStorage.getItem(PERMISSION_ASKED_KEY) === '1';
++    } catch {
++        // A blocked localStorage must not make the app re-ask on every launch.
++        return true;
++    }
++};
++
++export const markDeviceAudioPermissionAsked = (): void => {
++    try {
++        window.localStorage.setItem(PERMISSION_ASKED_KEY, '1');
++    } catch {
++        // Nothing to do; the flag is an optimisation, not a requirement.
++    }
++};
++
++/**
++ * Fetches the device collection and merges it into the library, asking for the permission first when
++ * it is missing. Returns how many songs were added or refreshed.
++ *
++ * This is what the local tab's refresh action calls, which is the important part: the permission
++ * dialog is raised from a click the user just made, and the same gesture doubles as "look for music
++ * I added since last time". Returns 0 - never throws - when there is no shell, no permission or
++ * nothing to change, because a failed scan must not break the refresh that contains it.
++ */
++export const refreshDeviceAudioLibrary = async (): Promise<number> => {
++    try {
++        if (!isDeviceAudioLibrarySupported()) return 0;
++        let granted = hasDeviceAudioPermission();
++        if (!granted) {
++            markDeviceAudioPermissionAsked();
++            granted = await requestDeviceAudioPermission();
++        }
++        if (!granted) {
++            console.log('[DeviceAudio] Refresh skipped: the media-read permission is not granted.');
++            return 0;
++        }
++        const result = await fetchDeviceAudioLibrary();
++        if (result.status !== 'granted') {
++            console.log(`[DeviceAudio] Refresh skipped: collection ${result.status}.`);
++            return 0;
++        }
++        const sync = await syncDeviceAudioLibrary(result.tracks);
++        return sync ? sync.created + sync.updated : 0;
++    } catch (error) {
++        console.error('[DeviceAudio] Refresh failed:', error);
++        return 0;
++    }
++};
++
++/**
++ * The launch-time scan: silent by design. It only runs when the permission is already granted, or
++ * when the dialog has never been shown - asking once is what makes "open the app and your music is
++ * there" true, and never asking twice is what keeps it from becoming noise.
++ */
++export const startDeviceAudioLibrarySync = async (): Promise<void> => {
++    if (!isDeviceAudioLibrarySupported()) return;
++    try {
++        let granted = hasDeviceAudioPermission();
++        if (!granted) {
++            if (wasDeviceAudioPermissionAsked()) return;
++            markDeviceAudioPermissionAsked();
++            granted = await requestDeviceAudioPermission();
++        }
++        if (!granted) return;
++        const result = await fetchDeviceAudioLibrary();
++        if (result.status !== 'granted') return;
++        await syncDeviceAudioLibrary(result.tracks);
++    } catch (error) {
++        // A music scan failing is never a reason for the app not to start.
++        console.error('[DeviceAudio] Launch scan failed:', error);
++    }
++};
++
+diff --git a/src/services/localMusicService.ts b/src/services/localMusicService.ts
+index c4dce0d..9dca648 100644
+--- a/src/services/localMusicService.ts
++++ b/src/services/localMusicService.ts
+@@ -36,6 +36,7 @@ import { useLyricSettingsStore } from '../stores/useLyricSettingsStore';
+ import { getLocalLyricFilePriority, isSameLocalLyricFormatOrder, normalizeLocalLyricFormatOrder, type LocalLyricFileFormat } from '../utils/lyrics/localLyricFormatOrder';
+ import { readLyricFile } from '../utils/lyrics/lyricFileDecoding';
+ import { isLocalFolderIgnored, normalizeLocalFolderPath, runLocalFolderMutation, setLocalFolderIgnored } from './localLibraryFolderIgnore';
++import { buildDeviceAudioStreamUrl, isDeviceAudioSong } from './deviceAudioLibrary';
+ 
+ 
+ type EmbeddedMetadata = EmbeddedMetadataResult;
+@@ -1899,6 +1900,13 @@ async function readStoredLocalSongFile(song: LocalSong): Promise<File | null> {
+ // Get audio blob from local song using fileHandle
+ // Returns blob URL if fileHandle exists, null otherwise
+ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | null> {
++    // A device song is streamed, not read: the shell answers with the original content:// item and
++    // supports byte ranges, so the URL behaves like any other media source - including seeking. It is
++    // deliberately not a blob URL, which is also why the callers' URL.revokeObjectURL is a no-op here.
++    if (isDeviceAudioSong(song)) {
++        return buildDeviceAudioStreamUrl(song.deviceAudioId as number);
++    }
++
+     const fileHandle = await getAccessibleFileHandle(song);
+ 
+     if (fileHandle) {
+@@ -1936,6 +1944,12 @@ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | n
+ 
+ /** Resolves the current File for playback recovery without changing the song or minting a URL. */
+ export async function getFileFromLocalSong(song: LocalSong): Promise<File | null> {
++    // A device song has no picker File and reading its bytes would mean downloading the whole track
++    // into memory, which is exactly what streaming exists to avoid. Callers degrade on null.
++    if (isDeviceAudioSong(song)) {
++        return null;
++    }
++
+     const fileHandle = await getAccessibleFileHandle(song);
+     if (fileHandle) {
+         try {
+@@ -1969,6 +1983,13 @@ export async function getFileFromLocalSong(song: LocalSong): Promise<File | null
+  * returns the ArrayBuffer. Null when none of the three can produce the bytes.
+  */
+ export async function getLocalSongArrayBuffer(song: LocalSong): Promise<ArrayBuffer | null> {
++    // Automix analyses a track by decoding all of it. For a device song that would mean pulling the
++    // whole file off the shell first, so it reports "no bytes" and the caller takes its documented
++    // fallback rather than the app silently buffering a hundred megabytes.
++    if (isDeviceAudioSong(song)) {
++        return null;
++    }
++
+     const fileHandle = await getAccessibleFileHandle(song);
+     if (fileHandle) {
+         try {
+diff --git a/src/types.ts b/src/types.ts
+index 9e5b5dc..5396ccc 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -1285,6 +1285,12 @@ export interface LocalSong {
+   fileSize: number; // bytes
+   fileLastModified?: number; // milliseconds since epoch
+   fileSignature?: string; // Lightweight file identity for incremental scans
++  /**
++   * MediaStore `_ID` when this song is streamed from the device's own music collection instead of
++   * being imported. Its presence is what routes playback to the shell's streaming endpoint: such a
++   * song has no `fileHandle` and no bytes in the audio store, and its `filePath` is synthetic.
++   */
++  deviceAudioId?: number;
+   mimeType: string;
+   bitrate?: number; // bps
+   addedAt: number; // timestamp

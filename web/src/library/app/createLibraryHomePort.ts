@@ -3,6 +3,7 @@ import type { LibraryHomePort, LibraryHomeScanProgress } from '../core/contracts
 import type { HomeSurfaceProps } from '../../components/app/home/homeSurfaceTypes';
 import { translateHomeMessage } from '../core/model/homeSources';
 import { importFolder, importLocalFilesViaInput, resyncAllFolders, LOCAL_MUSIC_SCAN_PROGRESS_EVENT } from '../../services/localMusicService';
+import { refreshDeviceAudioLibrary } from '../../services/deviceAudioSync';
 import { getLocalLibraryAvailability } from '../../services/localLibraryAvailability';
 import { importLocalPlaylistFile } from '../../services/localPlaylistFileService';
 import { omni } from '../../services/onlineMusic/omni';
@@ -23,7 +24,14 @@ export const createLibraryHomePort = (getSurface: () => HomePortSurface): Librar
     localAvailability: () => getLocalLibraryAvailability(),
     importFolder: async () => (await importFolder()).length,
     importFiles: async () => (await importLocalFilesViaInput()).length,
-    resyncAllFolders: async () => (await resyncAllFolders())?.length ?? 0,
+    resyncAllFolders: async () => {
+        const rescanned = (await resyncAllFolders())?.length ?? 0;
+        // The refresh action is also the way back to the device's music collection: it re-reads the
+        // shell's list (finding tracks added since last launch) and, when the permission is missing,
+        // raises the dialog from this very click. Returns 0 on the desktop and in a browser.
+        const syncedDeviceSongs = await refreshDeviceAudioLibrary();
+        return rescanned + syncedDeviceSongs;
+    },
     importPlaylistFile: async (file) => {
         const result = await importLocalPlaylistFile(file, getSurface().localSongs);
         return {

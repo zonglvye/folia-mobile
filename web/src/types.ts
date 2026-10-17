@@ -1285,6 +1285,12 @@ export interface LocalSong {
   fileSize: number; // bytes
   fileLastModified?: number; // milliseconds since epoch
   fileSignature?: string; // Lightweight file identity for incremental scans
+  /**
+   * MediaStore `_ID` when this song is streamed from the device's own music collection instead of
+   * being imported. Its presence is what routes playback to the shell's streaming endpoint: such a
+   * song has no `fileHandle` and no bytes in the audio store, and its `filePath` is synthetic.
+   */
+  deviceAudioId?: number;
   mimeType: string;
   bitrate?: number; // bps
   addedAt: number; // timestamp

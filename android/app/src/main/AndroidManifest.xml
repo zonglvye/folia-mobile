@@ -3,10 +3,11 @@
   Folia Mobile shell manifest.
 
   Deliberate differences from the third-party shell this design was informed by:
-  - No cleartext traffic: `usesCleartextTraffic` stays false. The other shell enabled it
+  - No global cleartext traffic: `usesCleartextTraffic` stays false. The other shell enabled it
     globally through network_security_config just to make one CDN work; that is too broad a
-    concession, and v1 plays local files only.
-  - No REQUEST_INSTALL_PACKAGES: v1 ships no self-update channel.
+    concession, so the two source hosts that genuinely need it are allowlisted by name in
+    res/xml/network_security_config.xml instead.
+  - No REQUEST_INSTALL_PACKAGES: the shell ships no self-update channel.
   - Landscape is the product decision ("观赏播放器"), so the activity declares it. The system
     rotation lock can still override it, which is why MainActivity keeps a portrait fallback.
 -->
@@ -14,6 +15,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Device music library: reading the user's own audio collection through MediaStore. Android 13
+         split the old storage permission into per-type ones, so the modern permission is declared
+         plainly and the legacy one is capped at API 32 - asking for READ_EXTERNAL_STORAGE on 33+
+         is granted but silently ignored, which would look like "the dialog was accepted and nothing
+         happened". Nothing here is written back: the shell only ever reads this collection. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <!-- Background playback: the media notification and lock-screen transport need a
          foreground service. Android 14+ requires the mediaPlayback subtype to be declared. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
