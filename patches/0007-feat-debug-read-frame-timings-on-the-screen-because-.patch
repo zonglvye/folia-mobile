@@ -1,7 +1,7 @@
 From 450943566362773d0ed6c67d0bd783ccef7a92b4 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 10:58:00 +0800
-Subject: [PATCH 07/20] feat(debug): read frame timings on the screen, because
+Subject: [PATCH 07/21] feat(debug): read frame timings on the screen, because
  adb cannot reach this device
 
 The phone this ships to runs HarmonyOS, whose USB debug function is HDC on the
