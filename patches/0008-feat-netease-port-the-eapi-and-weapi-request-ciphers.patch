@@ -1,7 +1,7 @@
 From 8c9bb7b2ea0fdd409ca1f0d410786fe4818ec74c Mon Sep 17 00:00:00 2001
 From: folia-mobile <mobile@folia.local>
 Date: Sat, 17 Oct 2026 11:19:09 +0800
-Subject: [PATCH 08/10] feat(netease): port the eapi and weapi request ciphers
+Subject: [PATCH 08/11] feat(netease): port the eapi and weapi request ciphers
  to WebCrypto
 
 The Android shell has no NetEase API instance next to it, and the platform's

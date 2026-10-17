@@ -37,22 +37,28 @@ type BravaisSeamTitleAreaProps = {
 export const BravaisSeamTitleArea: React.FC<BravaisSeamTitleAreaProps> = ({ title, fontSize, label, onCollapse }) => {
     const titleId = useId();
     const handlers = useBravaisSeamTitleClick(onCollapse);
+    // 标题为空时（集合还没拿到名字）这一块仍然要被渲染出来：它 flex: 1 1 auto，是信息条里唯一撑高度、
+    // 把动作排压到底部的那一段，删掉整条排版会塌。但两个装饰引号必须跟着标题一起收掉——单独挂在那里，
+    // 看上去就是一条空带的两端各有一个没有意义的标点。同时让它不可聚焦、不进读屏（空按钮没有可读的名字）。
+    const hasTitle = title.trim().length > 0;
     return (
         <button
             type="button"
             className="bravais-seam-title-area"
             data-bravais-seam-action="spine"
             data-bravais-seam-toggle=""
-            aria-label={label}
-            aria-describedby={titleId}
-            title={label}
+            aria-label={hasTitle ? label : undefined}
+            aria-describedby={hasTitle ? titleId : undefined}
+            aria-hidden={hasTitle ? undefined : true}
+            tabIndex={hasTitle ? undefined : -1}
+            title={hasTitle ? label : undefined}
             {...handlers}
         >
-            <span className="bravais-seam-quote" aria-hidden>”</span>
+            {hasTitle && <span className="bravais-seam-quote" aria-hidden>”</span>}
             <span className="bravais-seam-vtitle-wrap">
                 <span id={titleId} className="bravais-seam-vtitle" data-bravais-seam-title style={{ fontSize }}>{title}</span>
             </span>
-            <span className="bravais-seam-quote is-closing" aria-hidden>“</span>
+            {hasTitle && <span className="bravais-seam-quote is-closing" aria-hidden>“</span>}
         </button>
     );
 };

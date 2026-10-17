@@ -1,0 +1,58 @@
+From 6d47cb429c1b6aaabccf84072bed90ab5eed17d6 Mon Sep 17 00:00:00 2001
+From: folia-mobile <mobile@folia.local>
+Date: Sat, 17 Oct 2026 12:42:38 +0800
+Subject: [PATCH 11/11] fix(bravais): do not draw the seam title quotes around
+ nothing
+
+The full seam's title area is the collapse control: opening quote, vertical
+title, closing quote. When the title comes through empty the band still has its
+flex height, so all that is left is two faint quote marks at the ends of an
+empty strip - verified at 5x zoom that no glyph exists between them. They now
+render only alongside a title, and the empty button stays out of the tab order
+and out of the accessibility tree, since a button with no readable name should
+not be focusable.
+
+Note: title and crumb come from the same displayTitle, so a title is expected
+here and this does not explain an invisible vertical title. Tracked separately.
+---
+ src/library/suites/bravais/BravaisSeamTitle.tsx | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/src/library/suites/bravais/BravaisSeamTitle.tsx b/src/library/suites/bravais/BravaisSeamTitle.tsx
+index 9b78f62..7c580d1 100644
+--- a/src/library/suites/bravais/BravaisSeamTitle.tsx
++++ b/src/library/suites/bravais/BravaisSeamTitle.tsx
+@@ -37,22 +37,28 @@ type BravaisSeamTitleAreaProps = {
+ export const BravaisSeamTitleArea: React.FC<BravaisSeamTitleAreaProps> = ({ title, fontSize, label, onCollapse }) => {
+     const titleId = useId();
+     const handlers = useBravaisSeamTitleClick(onCollapse);
++    // 标题为空时（集合还没拿到名字）这一块仍然要被渲染出来：它 flex: 1 1 auto，是信息条里唯一撑高度、
++    // 把动作排压到底部的那一段，删掉整条排版会塌。但两个装饰引号必须跟着标题一起收掉——单独挂在那里，
++    // 看上去就是一条空带的两端各有一个没有意义的标点。同时让它不可聚焦、不进读屏（空按钮没有可读的名字）。
++    const hasTitle = title.trim().length > 0;
+     return (
+         <button
+             type="button"
+             className="bravais-seam-title-area"
+             data-bravais-seam-action="spine"
+             data-bravais-seam-toggle=""
+-            aria-label={label}
+-            aria-describedby={titleId}
+-            title={label}
++            aria-label={hasTitle ? label : undefined}
++            aria-describedby={hasTitle ? titleId : undefined}
++            aria-hidden={hasTitle ? undefined : true}
++            tabIndex={hasTitle ? undefined : -1}
++            title={hasTitle ? label : undefined}
+             {...handlers}
+         >
+-            <span className="bravais-seam-quote" aria-hidden>”</span>
++            {hasTitle && <span className="bravais-seam-quote" aria-hidden>”</span>}
+             <span className="bravais-seam-vtitle-wrap">
+                 <span id={titleId} className="bravais-seam-vtitle" data-bravais-seam-title style={{ fontSize }}>{title}</span>
+             </span>
+-            <span className="bravais-seam-quote is-closing" aria-hidden>“</span>
++            {hasTitle && <span className="bravais-seam-quote is-closing" aria-hidden>“</span>}
+         </button>
+     );
+ };
