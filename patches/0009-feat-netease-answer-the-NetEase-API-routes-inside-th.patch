@@ -1,4 +1,4 @@
-From 3dd8ee8765c0929b025afb02a3b198b0b5f22711 Mon Sep 17 00:00:00 2001
+From b547a322f10da1f44bb308d6ca9d7cadd7582e49 Mon Sep 17 00:00:00 2001
 From: folia-mobile <mobile@folia.local>
 Date: Sat, 17 Oct 2026 11:19:15 +0800
 Subject: [PATCH 9/9] feat(netease): answer the NetEase API routes inside the
@@ -19,13 +19,18 @@ paths keep working unchanged. Listening reports (scrobble/v1) are NOT
 implemented - they need the NCBL log upload, and a fake 200 would claim a play
 that no server accepted.
 
-An explicitly configured instance still wins: someone who set an address in
-settings asked for that backend, so the built-in path must not silently replace
-it.
+Three things are deliberately conservative, because the cost of being wrong here
+is a flagged account rather than a visible bug:
 
-Two details worth knowing: the QR image is drawn locally (the instance only
-builds a URL too), and playback URLs are forced to https because the page origin
-is https and http audio would be blocked as mixed content.
+- The guest-token bootstrap is throttled to one attempt per ten minutes, kept in
+  storage so a reload does not re-hammer it. Retrying on every request would
+  double the traffic exactly when a failure suggests something is already
+  looking.
+- An explicitly configured instance address still wins, so nobody's existing
+  setup silently changes backend.
+- The QR image is drawn locally (the instance only builds a URL too), and
+  playback URLs are forced to https because http audio would be blocked as
+  mixed content on this origin.
 
 Whether NetEase's anti-bot accepts this is unproven on a device. The package
 ships xeapi/neapi for exactly that reason; if this gets refused, do not paper
@@ -36,11 +41,11 @@ over it here.
  src/services/netease.ts                       |  11 +
  .../onlineMusic/neteaseDeviceProfile.ts       | 115 +++++
  .../onlineMusic/neteaseEapiTransport.ts       | 201 +++++++++
- src/services/onlineMusic/neteaseLocalApi.ts   | 407 ++++++++++++++++++
+ src/services/onlineMusic/neteaseLocalApi.ts   | 421 ++++++++++++++++++
  src/services/onlineMusic/neteaseQrImage.ts    |  38 ++
  .../onlineMusic/neteaseEapiTransport.test.ts  | 166 +++++++
- test/unit/onlineMusic/neteaseLocalApi.test.ts | 127 ++++++
- 9 files changed, 1087 insertions(+), 19 deletions(-)
+ test/unit/onlineMusic/neteaseLocalApi.test.ts | 150 +++++++
+ 9 files changed, 1124 insertions(+), 19 deletions(-)
  create mode 100644 src/services/onlineMusic/neteaseDeviceProfile.ts
  create mode 100644 src/services/onlineMusic/neteaseEapiTransport.ts
  create mode 100644 src/services/onlineMusic/neteaseLocalApi.ts
@@ -680,10 +685,10 @@ index 0000000..d8a1d80
 +};
 diff --git a/src/services/onlineMusic/neteaseLocalApi.ts b/src/services/onlineMusic/neteaseLocalApi.ts
 new file mode 100644
-index 0000000..a1ac710
+index 0000000..f1d7228
 --- /dev/null
 +++ b/src/services/onlineMusic/neteaseLocalApi.ts
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,421 @@
 +import md5 from 'blueimp-md5';
 +
 +import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from './providerStorage';
@@ -990,6 +995,16 @@ index 0000000..a1ac710
 +};
 +
 +/**
++ * 游客凭证重试的最小间隔。
++ *
++ * 注册失败时如果每个请求都再试一次，一次搜索会变成两个请求，而失败本身又最可能发生在被风控盯上的时候——
++ * 正好是最不该加倍请求量的场合。参考实现把游客 token 缓存在进程里，这里用持久化的时间窗口达到同样效果，
++ * 额外的好处是刷新页面、重开应用也不会重新锤一遍。
++ */
++const ANONYMOUS_RETRY_INTERVAL_MS = 10 * 60 * 1000;
++const ANONYMOUS_RETRY_KEY = 'anonymous_retry_at';
++
++/**
 + * 没有登录态也没有游客 token 时，先换一张游客凭证。
 + *
 + * 与参考实现一样是“尽力而为”：注册失败不阻断请求，网易大部分读接口匿名也能用，
@@ -997,6 +1012,10 @@ index 0000000..a1ac710
 + */
 +const ensureAnonymousSession = async (session: NeteaseSession): Promise<void> => {
 +    if (session.jar.MUSIC_U || session.jar.MUSIC_A) return;
++    const lastAttempt = Number(readProviderSessionValue('netease', ANONYMOUS_RETRY_KEY) ?? 0);
++    if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < ANONYMOUS_RETRY_INTERVAL_MS) return;
++    writeProviderSessionValue('netease', ANONYMOUS_RETRY_KEY, String(Date.now()));
++
 +    const route = ROUTES['/register/anonimous'];
 +    try {
 +        const { data, cookies } = await callNeteaseEapi(session, route.uri, route.payload(new URLSearchParams()));
@@ -1309,10 +1328,10 @@ index 0000000..db46154
 +});
 diff --git a/test/unit/onlineMusic/neteaseLocalApi.test.ts b/test/unit/onlineMusic/neteaseLocalApi.test.ts
 new file mode 100644
-index 0000000..bc0a8c2
+index 0000000..5e1ce23
 --- /dev/null
 +++ b/test/unit/onlineMusic/neteaseLocalApi.test.ts
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,150 @@
 +import { afterEach, describe, expect, it, vi } from 'vitest';
 +
 +import {
@@ -1423,6 +1442,29 @@ index 0000000..bc0a8c2
 +
 +        const response = await requestLocalNetease('/login/status');
 +        expect(response.data.profile).toEqual({ userId: 7 });
++    });
++});
++
++describe('guest session bootstrap', () => {
++    const createMemoryStorage = () => {
++        const entries = new Map<string, string>();
++        return {
++            getItem: (key: string) => (entries.has(key) ? entries.get(key)! : null),
++            setItem: (key: string, value: string) => { entries.set(key, value); },
++            removeItem: (key: string) => { entries.delete(key); },
++        };
++    };
++
++    it('does not retry a rejected registration on every following request', async () => {
++        // 失败时每次都重试，等于把一次搜索变成两个请求，而失败本身就说明可能已经被盯上了。
++        vi.stubGlobal('localStorage', createMemoryStorage());
++        const calls = stubProxy(['{"code":500}', '{"code":200,"result":{"songs":[]}}']);
++
++        await requestLocalNetease('/cloudsearch?keywords=a');
++        await requestLocalNetease('/cloudsearch?keywords=b');
++
++        const registrations = calls.filter(call => (call.get('url') ?? '').includes('register/anonimous'));
++        expect(registrations).toHaveLength(1);
 +    });
 +});
 +

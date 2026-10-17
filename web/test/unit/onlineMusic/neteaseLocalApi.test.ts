@@ -111,6 +111,29 @@ describe('route shapes the app consumes', () => {
     });
 });
 
+describe('guest session bootstrap', () => {
+    const createMemoryStorage = () => {
+        const entries = new Map<string, string>();
+        return {
+            getItem: (key: string) => (entries.has(key) ? entries.get(key)! : null),
+            setItem: (key: string, value: string) => { entries.set(key, value); },
+            removeItem: (key: string) => { entries.delete(key); },
+        };
+    };
+
+    it('does not retry a rejected registration on every following request', async () => {
+        // 失败时每次都重试，等于把一次搜索变成两个请求，而失败本身就说明可能已经被盯上了。
+        vi.stubGlobal('localStorage', createMemoryStorage());
+        const calls = stubProxy(['{"code":500}', '{"code":200,"result":{"songs":[]}}']);
+
+        await requestLocalNetease('/cloudsearch?keywords=a');
+        await requestLocalNetease('/cloudsearch?keywords=b');
+
+        const registrations = calls.filter(call => (call.get('url') ?? '').includes('register/anonimous'));
+        expect(registrations).toHaveLength(1);
+    });
+});
+
 describe('unsupported routes', () => {
     it('answers with the instance shape that the missing-route classification already understands', async () => {
         const response = await requestLocalNetease('/album?id=1');

@@ -304,6 +304,16 @@ const ROUTES: Record<string, NeteaseRoute> = {
 };
 
 /**
+ * 游客凭证重试的最小间隔。
+ *
+ * 注册失败时如果每个请求都再试一次，一次搜索会变成两个请求，而失败本身又最可能发生在被风控盯上的时候——
+ * 正好是最不该加倍请求量的场合。参考实现把游客 token 缓存在进程里，这里用持久化的时间窗口达到同样效果，
+ * 额外的好处是刷新页面、重开应用也不会重新锤一遍。
+ */
+const ANONYMOUS_RETRY_INTERVAL_MS = 10 * 60 * 1000;
+const ANONYMOUS_RETRY_KEY = 'anonymous_retry_at';
+
+/**
  * 没有登录态也没有游客 token 时，先换一张游客凭证。
  *
  * 与参考实现一样是“尽力而为”：注册失败不阻断请求，网易大部分读接口匿名也能用，
@@ -311,6 +321,10 @@ const ROUTES: Record<string, NeteaseRoute> = {
  */
 const ensureAnonymousSession = async (session: NeteaseSession): Promise<void> => {
     if (session.jar.MUSIC_U || session.jar.MUSIC_A) return;
+    const lastAttempt = Number(readProviderSessionValue('netease', ANONYMOUS_RETRY_KEY) ?? 0);
+    if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < ANONYMOUS_RETRY_INTERVAL_MS) return;
+    writeProviderSessionValue('netease', ANONYMOUS_RETRY_KEY, String(Date.now()));
+
     const route = ROUTES['/register/anonimous'];
     try {
         const { data, cookies } = await callNeteaseEapi(session, route.uri, route.payload(new URLSearchParams()));

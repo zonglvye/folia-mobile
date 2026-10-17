@@ -127,6 +127,7 @@ v0.3.0 起，应用会读取手机自身的音乐收藏，并把这些歌**当�
 
 - **风控未验证**。参考包里除了 eapi/weapi，还躺着 xeapi（X25519 + AES-GCM）和 neapi（chacha20-poly1305 + zstd），说明网易在往上加固。这里选 eapi/weapi 是因为端点模块自己还在用它们；如果真机被拦（返回空、code 报错、要验证码），正确的做法是评估换 xeapi，而不是在现有代码里硬凑。
 - **会员曲目仍受版权限制**。播放地址依赖登录态，非会员遇到 VIP 曲目照样是 `url: null`，壳会如实报出来。
+- **游客凭证失败后十分钟内不重试**。没登录时每个请求前会先换一张游客 token；如果这一步一直被拒，逐请求重试就等于把一次搜索变成两个请求。这里用持久化的时间窗口兜住，刷新页面也不会重新锤一遍。
 
 ### 另一条路：部署一个实例，然后在应用里填地址
 
@@ -202,7 +203,7 @@ patches/0009-feat-netease-answer-the-NetEase-API-routes-inside-th.patch
 - **0006 手机壳首启默认 60 帧**：新增 `isAndroidShell`（看 `window.foliaAndroid` 是否存在，不看 UA）与 `ensureVisualizerFrameRateDefault`（只在存储里没有记录时播种，写进存储而不是只交给限帧器，保证图形设置与实际生效一致），启动期在装上限帧器之前调用。桌面与浏览器构建不受影响。
 - **0007 应用内帧率 HUD**：新增 `frameSamples` 采样器（预分配环形缓冲、每帧零分配、不碰 React；采样走限帧器保存的原生 rAF，否则只会测到我们自己的上限；超过 250ms 的间隔不计入，那是切后台而非掉帧）与 `FrameStatsHud`（500ms 轮询，长按左上角开关，监听挂在 window 捕获阶段且不 `preventDefault`，不会抢走播放器的输入）。
 - **0008 网易请求加密**：`neteaseCrypto` 移植 eapi（AES-128-ECB + MD5 摘要签名）与 weapi（双层 AES-CBC + 教科书式 RSA）。WebCrypto 没有 ECB，也没有无填充 RSA，所以 ECB 用单块零 IV CBC 拼出来，`encSecKey` 用 BigInt 做平方-乘。单测向量由参考实现生成后钉死，常量一漂就红。
-- **0009 网易路由内置**：`neteaseDeviceProfile`（跨会话稳定的设备身份）、`neteaseEapiTransport`（请求组装与投递）、`neteaseLocalApi`（路由表 + cookie jar + 二维码本地生成）、`neteaseQrImage`。`netease.ts` 的 `fetchWithCreds` 在 `isAndroidShell()` 时走本地实现，桌面与网页版路径不变。壳侧新增 `NeteaseProxyHandler.java`。
+- **0009 网易路由内置**：`neteaseDeviceProfile`（跨会话稳定的设备身份）、`neteaseEapiTransport`（请求组装与投递）、`neteaseLocalApi`（路由表 + cookie jar + 二维码本地生成 + 游客凭证十分钟重试窗口）、`neteaseQrImage`。`netease.ts` 的 `fetchWithCreds` 在 `isAndroidShell()` 且没有配置实例地址时走本地实现，桌面与网页版路径不变。壳侧新增 `NeteaseProxyHandler.java`。
 
 `web/` 的内容等于「上游 v0.7.20 + 这九个补丁」，可据此审计。
 
