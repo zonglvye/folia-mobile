@@ -1,7 +1,7 @@
 From 1966466b241bd55915975bcfafb198539adbc239 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 10:58:00 +0800
-Subject: [PATCH 6/9] perf(runtime): default the frame-rate gate to 60 on the
+Subject: [PATCH 06/10] perf(runtime): default the frame-rate gate to 60 on the
  Android shell
 
 The gate existed but nothing turned it on. With no stored choice the parser

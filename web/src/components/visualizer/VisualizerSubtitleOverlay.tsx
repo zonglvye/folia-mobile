@@ -11,6 +11,7 @@ import {
 } from '../../utils/lyrics/subtitleTrackStyle';
 import { colorWithAlpha } from './colorMix';
 import { usePlayerSubtitleBottomPx } from '../../hooks/usePlayerBottomBarBottomPx';
+import { isAndroidShell } from '../../utils/platform';
 
 // Some songs' lyric data carries pure marker/separator lines ("//", "●●●", dashes, stray slashes from
 // instrumental breaks or credits formatting). Those are timing placeholders, never display text: a
@@ -53,7 +54,8 @@ export const resolveVisualizerSubtitleOverlayContent = ({
     hideTranslationSubtitle = false,
     showSubtitleTranslation = true,
     subtitleContentMode,
-}: Pick<VisualizerSubtitleOverlayProps, 'showText' | 'activeLine' | 'recentCompletedLine' | 'nextLines' | 'hideTranslationSubtitle' | 'showSubtitleTranslation' | 'subtitleContentMode'>) => {
+    compactUpcomingPreview = false,
+}: Pick<VisualizerSubtitleOverlayProps, 'showText' | 'activeLine' | 'recentCompletedLine' | 'nextLines' | 'hideTranslationSubtitle' | 'showSubtitleTranslation' | 'subtitleContentMode'> & { compactUpcomingPreview?: boolean }) => {
     if (!showText || hideTranslationSubtitle) {
         return {
             shouldRenderOverlay: false,
@@ -69,7 +71,10 @@ export const resolveVisualizerSubtitleOverlayContent = ({
         .find(tracks => tracks.length > 0) ?? [];
     // Flattened text of all rows; kept for callers that only care whether any subtitle text exists.
     const subtitleText = subtitleTracks.length > 0 ? subtitleTracks.map(track => track.text).join(' / ') : null;
-    const previewLines = nextLines.filter((line) => hasReadableText(line.fullText));
+    // 手机壳只留紧跟的一句：两行加一圈底色在矮屏上会变成画面中央的一块黑框。
+    const previewLines = nextLines
+        .filter((line) => hasReadableText(line.fullText))
+        .slice(0, compactUpcomingPreview ? 1 : undefined);
 
     return {
         shouldRenderOverlay: true,
@@ -98,6 +103,13 @@ const VisualizerSubtitleOverlay: React.FC<VisualizerSubtitleOverlayProps> = ({
     showSubtitleTranslation = true,
     subtitleContentMode,
 }) => {
+    // 手机壳上，「下一句预览」收成一行并去掉底下那圈椭圆底色。
+    //
+    // 实测几何：字幕基线在屏幕底之上 112px，底部条顶边在 121px，也就是说这块东西本来就已经
+    // 贴着进度条上方了。让它在横屏手机上看着像"悬在画面中间一块黑框"的，是两行文字加上
+    // -inset-y-6 + blur-2xl 的光晕一共 122px 高，顶上就伸进了画面中部。收成一行、去掉底色之后
+    // 它回到一行高，位置不动就是"进度条上方那一行"。桌面构建维持原样。
+    const compactUpcomingPreview = isAndroidShell();
     // 底栏布局全部收在这个 hook 里：它自己判断当前是不是播放页那棵树，
     // 预览和 OBS 走默认值，不受播放页的偏移量和隐藏开关影响。
     const subtitleBottomPx = usePlayerSubtitleBottomPx(Boolean(isPlayerChromeHidden));
@@ -112,6 +124,7 @@ const VisualizerSubtitleOverlay: React.FC<VisualizerSubtitleOverlayProps> = ({
         hideTranslationSubtitle,
         showSubtitleTranslation,
         subtitleContentMode,
+        compactUpcomingPreview,
     });
     const resolvedOpacity = subtitleOverlayOpacity ?? opacity;
     const scaleFontSize = (fontSize: string, factor = 1) => fontSize.replace(/(-?\d*\.?\d+)(rem|vw|px)/g, (_match, value, unit) => `${(Number(value) * subtitleFontScale * factor).toFixed(3)}${unit}`);
@@ -187,7 +200,7 @@ const VisualizerSubtitleOverlay: React.FC<VisualizerSubtitleOverlayProps> = ({
                         </div>
                     ) : activeLine && upcomingLines.length > 0 ? (
                         <div className={`${contentClassName} space-y-2`}>
-                            {subtitleOverlayBackground && (
+                            {subtitleOverlayBackground && !compactUpcomingPreview && (
                                 <div
                                     aria-hidden="true"
                                     className="pointer-events-none absolute -inset-x-10 -inset-y-6 z-0 blur-2xl"

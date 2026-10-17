@@ -24,8 +24,9 @@
 
 /* 按钮上方的一列：面板与队列浮岛在里面，从下往上排（column-reverse：DOM 里面板在前、浮岛在后，Tab 顺序是
    面板 → 浮岛 → 按钮，视觉上浮岛在面板上方）；定位在这一层，面板自己不 absolute。
-   max-height 是按钮上方到窗口顶的距离，顶上让出 --wall-tools-top-reserve（标题栏 + 间距）：窗口矮时只压缩浮岛
-   （它 flex-shrink、最小 112px），面板不缩；浮岛压到最小还放不下时由帮助列表让（见文件末尾的预算）。
+   max-height 是按钮上方到窗口顶的距离，顶上让出 --wall-tools-top-reserve（标题栏 + 间距）：窗口矮时浮岛先压
+   （它 flex-shrink、最小 112px），面板再压到只剩滚动区（见 .lattice-tools-panel 的 overflow-y）；
+   还放不下时由帮助列表让（见文件末尾的预算）。
    --wall-tools-bottom 是按钮此刻的底距（WallToolsSurface 随底栏抬升量写到根节点上）。 */
 .lattice-tools-stack {
     position: absolute;
@@ -40,12 +41,22 @@
 
 .lattice-tools-panel {
     display: flex;
-    flex: none;
+    /* 视口够高时按内容自然展开；矮到放不下时允许收缩，纵向交给 overflow-y 滚动。
+       原来这里是 flex: none + overflow: hidden：面板一旦比 stack 的 max-height 还高，就会顶出
+       屏幕上沿并被裁掉，而面板自己没有滚动条，没有任何补救手段。手机横屏正好是这种情况。
+       下面那套“先压浮岛、再压帮助列表”的预算仍然有效，两者可以同时收缩。 */
+    flex: 0 1 auto;
+    /* 收缩到一个还看得见几行的下界就停，剩下的靠滚动；不设 0 是为了避免极矮视口里面板整个消失。 */
+    min-height: 120px;
     width: var(--wall-tools-panel-width);
     flex-direction: column;
     gap: 2px;
     padding: 10px;
-    overflow: hidden;
+    /* 横向仍要裁（圆角与内部浮层靠它），纵向改成滚动。 */
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
     border: 1px solid rgb(255 255 255 / 8%);
     border-radius: 24px;
     background: rgb(0 0 0 / 40%);

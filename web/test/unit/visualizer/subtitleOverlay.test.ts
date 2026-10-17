@@ -137,6 +137,27 @@ describe('VisualizerSubtitleOverlay content resolution', () => {
         expect(onlyTranslation.subtitleTracks).toEqual([{ role: 'translation', text: '你好' }]);
     });
 
+    it('keeps only the nearest upcoming line in compact mode, which the Android shell asks for', () => {
+        // 两行加一圈底色在横屏手机的矮视口里会漂到画面中央，看起来像一块悬空的黑框。
+        const upcoming = [nextLine, { ...nextLine, startTime: 3, endTime: 4, fullText: 'Again' }];
+        const full = resolveVisualizerSubtitleOverlayContent({
+            showText: true,
+            activeLine: { ...activeLine, translation: undefined, romanization: undefined },
+            recentCompletedLine: null,
+            nextLines: upcoming,
+        });
+        const compact = resolveVisualizerSubtitleOverlayContent({
+            showText: true,
+            activeLine: { ...activeLine, translation: undefined, romanization: undefined },
+            recentCompletedLine: null,
+            nextLines: upcoming,
+            compactUpcomingPreview: true,
+        });
+
+        expect(full.upcomingLines).toEqual(upcoming);
+        expect(compact.upcomingLines).toEqual([nextLine]);
+    });
+
     it('behaves like today when a both-mode line has neither track', () => {
         const content = resolveVisualizerSubtitleOverlayContent({
             showText: true,
