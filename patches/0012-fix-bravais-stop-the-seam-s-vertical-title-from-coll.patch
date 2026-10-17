@@ -1,0 +1,73 @@
+From 418d6900918c25959693783ba3c29fac7635c09d Mon Sep 17 00:00:00 2001
+From: folia-mobile <mobile@folia.local>
+Date: Sat, 17 Oct 2026 13:21:48 +0800
+Subject: [PATCH 12/12] fix(bravais): stop the seam's vertical title from
+ collapsing to nothing
+
+Reproduced outside the app instead of guessing again: the exact title-area rules
+were copied into a standalone page and screenshotted headlessly at three widths
+of seam height. At 300x300 the vertical title is gone entirely and only the two
+decorative quotes are left; at 368 it starts clipping; 465 is fine. A phone in
+landscape lands in the 300-340 range, which is the screenshot the user sent.
+
+Two rules combined to cause it: the wrap is flex:1 1 auto with min-height:0, so
+after the crumbs, filter and action rows take their share it is squeezed to
+zero, and max-height:100% on the title pinned its box inside that collapsed
+area - with the parent's overflow:hidden nothing survived.
+
+The wrap now has a 96px floor, the title sizes to its text, and the full seam
+scrolls vertically as a backstop so the action rows cannot be pushed out of
+reach on very short screens. Verified at 300x300 and 300x340 in the same
+harness: title visible, buttons visible.
+
+Also note the previous fix (hide the quotes when the title is empty) never
+applied here - title and crumb share displayTitle and the crumb renders, so the
+title was never empty. That is why 0.5.2 changed nothing on this screen.
+---
+ src/library/suites/bravais/bravais.css | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/src/library/suites/bravais/bravais.css b/src/library/suites/bravais/bravais.css
+index acfa7b4..4f403ed 100644
+--- a/src/library/suites/bravais/bravais.css
++++ b/src/library/suites/bravais/bravais.css
+@@ -228,7 +228,10 @@
+ }
+ 
+ .bravais-seam-vtitle {
+-    max-height: 100%;
++    /* 原来是 max-height: 100%：在矮缝里这一条把标题的盒子钉死在（被压扁的）区域内，再叠上父级的
++       overflow: hidden，标题连一个字都不剩。让盒子随文字走，超出部分由父级裁剪——顶端对齐（safe center）
++       保证被裁掉的是结尾而不是开头。 */
++    max-height: none;
+     margin: 0;
+     padding: 0;
+     border: 0;
+@@ -297,6 +300,11 @@
+     gap: 14px;
+     padding: 22px 22px 0;
+     box-sizing: border-box;
++    /* 标题区有了下界之后，极矮的缝里内容可能比缝还高：允许整条纵向滚动，动作行与「列表 / 更多」
++       就不会被挤出可视区。够高时内容不满，这条不生效。 */
++    overflow-y: auto;
++    overscroll-behavior: contain;
++    scrollbar-width: thin;
+ }
+ 
+ .bravais-seam-crumbs {
+@@ -370,10 +378,13 @@
+     box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 6%, transparent);
+ }
+ 
+-/* 竖排大标题在上下引号之间的区域里水平、垂直都居中（实测反馈）；比区域还长时 safe 退回顶端对齐，不从两头裁。 */
++/* 竖排大标题在上下引号之间的区域里水平、垂直都居中（实测反馈）；比区域还长时 safe 退回顶端对齐，不从两头裁。
++ * 下面这个下界不是排版余量，是修正：手机横屏的缝只有约 300–340px 高，标题区按 flex 分完 crumbs / 过滤 / 动作行之后
++ * 只剩几十像素，min-height: 0 会让这一块被压到 0，竖排标题在 overflow: hidden 里整块消失——屏幕上就只剩上下两个
++ * 装饰引号挂在一条空带两端，看起来像两个没有意义的标点（本地以 300x300 复现并验证）。 */
+ .bravais-seam-vtitle-wrap {
+     display: flex;
+-    min-height: 0;
++    min-height: 96px;
+     flex: 1 1 auto;
+     align-items: safe center;
+     justify-content: safe center;

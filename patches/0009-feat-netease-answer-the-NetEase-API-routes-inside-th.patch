@@ -1,7 +1,7 @@
 From b547a322f10da1f44bb308d6ca9d7cadd7582e49 Mon Sep 17 00:00:00 2001
 From: folia-mobile <mobile@folia.local>
 Date: Sat, 17 Oct 2026 11:19:15 +0800
-Subject: [PATCH 09/11] feat(netease): answer the NetEase API routes inside the
+Subject: [PATCH 09/12] feat(netease): answer the NetEase API routes inside the
  shell, with no server
 
 The app talks to a NetEase API instance over plain JSON: that instance is what
