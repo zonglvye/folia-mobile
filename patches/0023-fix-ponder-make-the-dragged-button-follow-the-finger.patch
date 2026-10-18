@@ -1,7 +1,7 @@
 From d8e2d40e2a6f712a22b80bef91a900c9d7f5b433 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 22:24:05 +0800
-Subject: [PATCH 23/23] fix(ponder): make the dragged button follow the finger
+Subject: [PATCH 23/24] fix(ponder): make the dragged button follow the finger
 
 Reported off the phone as "does not track the finger, cannot drag continuously",
 and both halves were real:

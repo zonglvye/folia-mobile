@@ -20,8 +20,8 @@ import {
  * 壳里没有实例，所以这些路由在这里实现，响应形态与实例逐个对齐（`shape` 里逐条注明），
  * `services/netease.ts` 完全不用改。
  *
- * 分期范围：扫码登录、登录态、搜索、歌曲详情、播放地址、歌词。其余路由返回
- * `{code:404,msg:'Not Found',data:null}`——与真实实例的“没有这个路由”同形，现有代码靠
+ * 分期范围：扫码登录、登录态、搜索、歌曲详情、播放地址、歌词、歌手页（详情 / 专辑 / 热门歌曲）。
+ * 其余路由返回 `{code:404,msg:'Not Found',data:null}`——与真实实例的“没有这个路由”同形，现有代码靠
  * `isNeteaseRouteMissingResponse` 识别它的降级路径照旧工作。
  *
  * 一个已知的取舍：`/song/url/v1` 和 `/register/anonimous` 在参考实现里默认走 xeapi
@@ -39,8 +39,13 @@ const ANONYMOUS_ID_XOR_KEY = '3go8&$8*3*3h0k(2)2';
 type NeteaseRoute = {
     /** 上游加密方式。 */
     mode: 'eapi' | 'weapi';
-    /** 上游路径，含 `/api/` 前缀——它是 eapi 签名材料的一部分。 */
-    uri: string;
+    /**
+     * 上游路径，含 `/api/` 前缀——它是 eapi 签名材料的一部分。
+     *
+     * 少数路由把 id 放在路径里（`/api/artist/albums/{id}`），所以这里允许一个函数，
+     * 拿应用侧 query 拼出真实路径。
+     */
+    uri: string | ((query: URLSearchParams) => string);
     /** 应用侧 query → 上游 payload。 */
     payload: (query: URLSearchParams) => Record<string, unknown>;
     /** 上游 body → 应用侧期望的响应形态；缺省原样返回。 */
@@ -55,6 +60,16 @@ const readNumber = (value: string | null, fallback: number): number => {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
+
+/** 允许 `0` 的整数读取：分页的 offset 就是 0 起算，`readNumber` 会把它当成没给。 */
+const readOffset = (value: string | null): number => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+};
+
+const resolveRouteUri = (route: NeteaseRoute, query: URLSearchParams): string => (
+    typeof route.uri === 'function' ? route.uri(query) : route.uri
+);
 
 /** 把 `k=v; k=v`（或实例返回的 `k=v;k=v`）读成对象；空值表示删除。 */
 export const parseCookieString = (text: string | null | undefined): NeteaseCookieJar => {
@@ -313,6 +328,37 @@ const ROUTES: Record<string, NeteaseRoute> = {
         uri: '/api/song/chorus',
         payload: query => ({ ids: JSON.stringify([query.get('id')]) }),
     },
+
+    // --- 歌手页 ------------------------------------------------------------------
+    // 参考实现 module/artist_detail.js、artist_album.js、artist_top_song.js。
+    //
+    // 这三条之前整片缺失，而从搜索点进歌手页正好只打这三条：`/artist/detail` 拿封面与简介、
+    // `/artist/album` 拿专辑列表、`/artist/top/song` 拿热门歌曲。缺了它们，页面拿到的是
+    // `{code:404}`，展示出来就是「暂无内容」——而网易是本机的默认音源，所以歌手页整个是不可用的。
+    //
+    // 形态原样透传，和实例一致：`netease.ts` 读的是 `data.artist`、`hotAlbums`/`more`、`songs`/`privileges`。
+    '/artist/detail': {
+        // 参考实现用的是默认 crypto（实例配置 encrypt=true 时为 eapi），与这里其它路由一致。
+        mode: 'eapi',
+        uri: '/api/artist/head/info/get',
+        payload: query => ({ id: query.get('id') }),
+    },
+    '/artist/album': {
+        mode: 'weapi',
+        // 歌手的 id 在路径里，不在 payload 里。
+        uri: query => `/api/artist/albums/${query.get('id') ?? ''}`,
+        payload: query => ({
+            limit: readNumber(query.get('limit'), 30),
+            offset: readOffset(query.get('offset')),
+            // 实例会带上它，翻页时靠响应的 `more` 判断还有没有下一页。
+            total: true,
+        }),
+    },
+    '/artist/top/song': {
+        mode: 'weapi',
+        uri: '/api/artist/top/song',
+        payload: query => ({ id: query.get('id') }),
+    },
 };
 
 /**
@@ -339,7 +385,8 @@ const ensureAnonymousSession = async (session: NeteaseSession): Promise<void> =>
 
     const route = ROUTES['/register/anonimous'];
     try {
-        const { data, cookies } = await callNeteaseEapi(session, route.uri, route.payload(new URLSearchParams()));
+        const anonQuery = new URLSearchParams();
+        const { data, cookies } = await callNeteaseEapi(session, resolveRouteUri(route, anonQuery), route.payload(anonQuery));
         session.jar = mergeSetCookies(session.jar, cookies);
         session.profile = resolveNeteaseDeviceProfile();
         if (Number(data?.code) !== 200) {
@@ -424,7 +471,7 @@ export const requestLocalNetease = async (endpoint: string): Promise<any> => {
     }
 
     const call = route.mode === 'weapi' ? callNeteaseWeapi : callNeteaseEapi;
-    const { data, cookies } = await call(session, route.uri, payload);
+    const { data, cookies } = await call(session, resolveRouteUri(route, query), payload);
 
     session.jar = mergeSetCookies(session.jar, cookies);
     persistSession(session);

@@ -111,6 +111,49 @@ describe('route shapes the app consumes', () => {
     });
 });
 
+describe('artist page routes', () => {
+    // 歌手页只打这三条；缺任何一条，从搜索点进去就是「暂无内容」——而网易是本机默认音源。
+    // 参考实现：module/artist_detail.js、artist_album.js、artist_top_song.js。
+
+    it('artist/album puts the artist id in the upstream path, not the payload', async () => {
+        const calls = stubProxy([ANONYMOUS_RESPONSE, '{"code":200,"hotAlbums":[],"more":false}']);
+
+        await requestLocalNetease('/artist/album?id=6452&limit=50&offset=100');
+
+        const upstream = calls.map(call => call.get('url') ?? '');
+        expect(upstream.some(url => url.includes('/artist/albums/6452'))).toBe(true);
+        // 旧实现把它当未实现路由，上游一次都不会被请求。
+        expect(upstream.some(url => url.includes('artist/album?'))).toBe(false);
+    });
+
+    it('artist/album passes hotAlbums and more through, which is how paging stops', async () => {
+        const page = { code: 200, hotAlbums: [{ id: 1, name: 'A' }], more: true, artist: { id: 6452 } };
+        stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(page)]);
+
+        await expect(requestLocalNetease('/artist/album?id=6452&limit=1&offset=0')).resolves.toEqual(page);
+    });
+
+    it('artist/detail reaches the head info endpoint that the instance maps it to', async () => {
+        const detail = { code: 200, data: { artist: { id: 6452, name: '告五人' } } };
+        const calls = stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(detail)]);
+
+        const response = await requestLocalNetease('/artist/detail?id=6452');
+
+        expect(calls.some(call => (call.get('url') ?? '').includes('artist/head/info/get'))).toBe(true);
+        expect(response.data.artist.name).toBe('告五人');
+    });
+
+    it('artist/top/song reaches the top song endpoint and keeps privileges in place', async () => {
+        const top = { code: 200, songs: [{ id: 11 }], privileges: [{ id: 11, pl: 320000 }] };
+        const calls = stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(top)]);
+
+        const response = await requestLocalNetease('/artist/top/song?id=6452');
+
+        expect(calls.some(call => (call.get('url') ?? '').includes('artist/top/song'))).toBe(true);
+        expect(response.privileges).toEqual([{ id: 11, pl: 320000 }]);
+    });
+});
+
 describe('guest session bootstrap', () => {
     const createMemoryStorage = () => {
         const entries = new Map<string, string>();

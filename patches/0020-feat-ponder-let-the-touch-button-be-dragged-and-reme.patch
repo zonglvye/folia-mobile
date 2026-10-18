@@ -1,7 +1,7 @@
 From 364e35f1e0e2151f2b882a84135ddc57b2497e18 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 21:37:33 +0800
-Subject: [PATCH 20/23] feat(ponder): let the touch button be dragged, and
+Subject: [PATCH 20/24] feat(ponder): let the touch button be dragged, and
  remember where
 
 The button is a permanent floating element over every page, and on a phone the

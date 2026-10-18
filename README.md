@@ -123,9 +123,12 @@ v0.3.0 起，应用会读取手机自身的音乐收藏，并把这些歌**当�
 | 播放与歌词 | `/song/url/v1`、`/lyric/new`、`/song/chorus` |
 | 曲库 | `/user/playlist`、`/playlist/detail`、`/playlist/track/all`、`/likelist`、`/like` |
 | 推荐 | `/recommend/songs`、`/personal_fm` |
+| 歌手页（v0.6.3） | `/artist/detail`、`/artist/album`、`/artist/top/song` |
 | 游客态 | `/register/anonimous` |
 
-**没实现**的路由（歌手/专辑详情、云盘等）返回实例同形的 `{code:404,msg:"Not Found"}`，走原有的「这条路由不支持」降级，不会假装成功。尤其是 `/scrobble/v1` 听歌打卡：它需要一套 NCBL 日志上传，这里没编，也**不会**返回 200 假装记了一次播放。
+**没实现**的路由（专辑详情、云盘等）返回实例同形的 `{code:404,"Not Found"}`，走原有的「这条路由不支持」降级，不会假装成功。尤其是 `/scrobble/v1` 听歌打卡：它需要一套 NCBL 日志上传，这里没编，也**不会**返回 200 假装记了一次播放。
+
+v0.6.3 补上的歌手页那三条是这么发现的：从搜索结果点进歌手页会停在「暂无内容」——那三条路由整片缺失，页面拿到的就是 404，于是墙上一张卡都没有、只剩歌手的名字被放大占满整屏。三条路由的上游路径照 `@neteasecloudmusicapienhanced/api` 的 `module/artist_*.js` 翻译，并且用 `test/manual/netease_artist_probe.ts` 直接打真接口验证过形态（`data.artist` / `hotAlbums`+`more` / `songs`+`privileges`）。
 
 两点必须诚实说明：
 
@@ -211,6 +214,7 @@ patches/0020-feat-ponder-let-the-touch-button-be-dragged-and-reme.patch
 patches/0021-test-ponder-cover-the-touch-button-s-drag-in-a-real-.patch
 patches/0022-feat-debug-record-what-happens-when-the-screen-goes-.patch
 patches/0023-fix-ponder-make-the-dragged-button-follow-the-finger.patch
+patches/0024-feat-netease-answer-the-artist-page-which-was-404-fo.patch
 ```
 
 - **0001 无句柄本地导入**：新增 OPFS 音频字节仓、`importLocalFiles(File[])` 与文件选择器入口、让 `FileEntryForImport.handle` 可选、三个播放访问器加字节仓回退、无句柄根目录不可重扫、以及让本地页签在只有文件导入可用时也可进入。
@@ -235,7 +239,9 @@ patches/0023-fix-ponder-make-the-dragged-button-follow-the-finger.patch
 - **0019 `jank` 用本次会话自己的帧时间做判据**：硬编码的 33.4ms（「漏两个 60Hz vsync」）在 90Hz 面板上会把「每三个 vsync 一帧」的齐整 33.3–33.5ms 判成 19% 卡顿。改为 `超过 max(33.4ms, 本窗口中位数 × 1.5)`，旧常数留作下界。同一补丁里，逐字发光在 `instant` / `fast` 展开模式下不再拆成每字一个 motion 节点（那两个变体在进入扫光分支前就返回，拆开只是让换行时多挂载一批节点）。
 - **0020 思索按钮可拖动**：触屏上那颗浮动入口从 `right-5 top-5` 改成可拖动的视口坐标（`ponderTouchButtonPosition` 负责钳位与序列化），拖动过程只写 DOM style 与 ref、不经过 React state，松手才写 store；96px 的召唤热区跟着按钮走；拖动不会触发打开思索，按住期间 4 秒的自动收起计时器不会把按钮从手指下面抽走。
 
-`web/` 的内容等于「上游 v0.7.20 + 这二十三个补丁」，可据此审计。
+`web/` 的内容等于「上游 v0.7.20 + 这二十四个补丁」，可据此审计。
+
+- **0024 歌手页**：补上 `/artist/detail`（→ `/api/artist/head/info/get`，eapi）、`/artist/album`（→ `/api/artist/albums/{id}`，weapi，id 在路径里所以路由表的 `uri` 改为可接受函数）、`/artist/top/song`（→ `/api/artist/top/song`，weapi）三条路由。缺它们时从搜索结果点进歌手页只会拿到 `{code:404}`，页面渲染成零张专辑。上游路径照参考实现翻译，并用 `test/manual/netease_artist_probe.ts` 直连真接口验证过形态。
 
 - **0023 拖动跟手**：位置从 `left`/`top` 改成 `translate3d`（前者每帧失效一次布局，而布局在主线程上；后者只挪一个已合成的图层），并给按钮加上 `touch-action: none`（否则浏览器会把拖动认成滚动平移、中途 `pointercancel` 掐断）与 `select-none`。`transition-all` 收窄成只过渡 `opacity`，按下缩放动画去掉（它与位置的 transform 抢同一个属性）。
 

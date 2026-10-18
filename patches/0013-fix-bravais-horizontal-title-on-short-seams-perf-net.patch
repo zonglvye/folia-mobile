@@ -1,7 +1,7 @@
 From 303463a5a56ff204615018c42c97c1af8548c7c6 Mon Sep 17 00:00:00 2001
 From: folia-mobile <mobile@folia.local>
 Date: Sat, 17 Oct 2026 13:36:39 +0800
-Subject: [PATCH 13/23] fix(bravais): horizontal title on short seams;
+Subject: [PATCH 13/24] fix(bravais): horizontal title on short seams;
  perf(netease): cut per-request work
 
 Seam: on a landscape phone the seam is ~300-340px tall, and an 18-character

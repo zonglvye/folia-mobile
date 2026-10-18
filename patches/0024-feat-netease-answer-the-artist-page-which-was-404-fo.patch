@@ -1,0 +1,309 @@
+From 758f6e0faa3b23b14bc7227ae2a3a8d3740808f4 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sun, 18 Oct 2026 14:47:24 +0800
+Subject: [PATCH 24/24] feat(netease): answer the artist page, which was 404
+ for its whole lifetime
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Opening an artist from search showed an empty page - and on the wall layout that
+means one poster filling the screen, so the artist's name was blown up over the
+seam while every label under it said "(nothing)". The cause was not layout: the
+local implementation never had the three routes that page is built from, so
+`/artist/detail`, `/artist/album` and `/artist/top/song` all fell through to the
+"no such route" answer of `{code:404}`, and the page dutifully rendered nothing.
+
+All three are now translated from the reference implementation
+(@neteasecloudmusicapienhanced/api, module/artist_detail.js, artist_album.js,
+artist_top_song.js):
+
+- `/artist/detail` → `/api/artist/head/info/get` over eapi, which is what the
+  reference's default crypto resolves to;
+- `/artist/album` → `/api/artist/albums/{id}` over weapi with limit, offset and
+  total. The id is in the PATH here, not the payload, so the route table's `uri`
+  now accepts a function as well as a string;
+- `/artist/top/song` → `/api/artist/top/song` over weapi.
+
+Responses pass through untouched, because the reference passes them through too:
+`netease.ts` reads `data.artist`, then `hotAlbums`/`more`, then `songs`/`privileges`.
+
+Verified against the live API rather than assumed - test/manual/netease_artist_probe.ts
+replays the shell's own proxy envelope from Node and hits music.163.com with this
+transport, and all three answer 200 with those shapes (probe output recorded in the
+file's header). The unit tests pin the two things that are easy to get wrong and
+invisible when wrong: the artist id reaching the URL path, and the payload surviving
+the trip unchanged.
+---
+ src/services/onlineMusic/neteaseLocalApi.ts   |  59 ++++++++--
+ test/manual/netease_artist_probe.ts           | 101 ++++++++++++++++++
+ test/unit/onlineMusic/neteaseLocalApi.test.ts |  43 ++++++++
+ 3 files changed, 197 insertions(+), 6 deletions(-)
+ create mode 100644 test/manual/netease_artist_probe.ts
+
+diff --git a/src/services/onlineMusic/neteaseLocalApi.ts b/src/services/onlineMusic/neteaseLocalApi.ts
+index 7cfdd37..9e6e65b 100644
+--- a/src/services/onlineMusic/neteaseLocalApi.ts
++++ b/src/services/onlineMusic/neteaseLocalApi.ts
+@@ -20,8 +20,8 @@ import {
+  * 壳里没有实例，所以这些路由在这里实现，响应形态与实例逐个对齐（`shape` 里逐条注明），
+  * `services/netease.ts` 完全不用改。
+  *
+- * 分期范围：扫码登录、登录态、搜索、歌曲详情、播放地址、歌词。其余路由返回
+- * `{code:404,msg:'Not Found',data:null}`——与真实实例的“没有这个路由”同形，现有代码靠
++ * 分期范围：扫码登录、登录态、搜索、歌曲详情、播放地址、歌词、歌手页（详情 / 专辑 / 热门歌曲）。
++ * 其余路由返回 `{code:404,msg:'Not Found',data:null}`——与真实实例的“没有这个路由”同形，现有代码靠
+  * `isNeteaseRouteMissingResponse` 识别它的降级路径照旧工作。
+  *
+  * 一个已知的取舍：`/song/url/v1` 和 `/register/anonimous` 在参考实现里默认走 xeapi
+@@ -39,8 +39,13 @@ const ANONYMOUS_ID_XOR_KEY = '3go8&$8*3*3h0k(2)2';
+ type NeteaseRoute = {
+     /** 上游加密方式。 */
+     mode: 'eapi' | 'weapi';
+-    /** 上游路径，含 `/api/` 前缀——它是 eapi 签名材料的一部分。 */
+-    uri: string;
++    /**
++     * 上游路径，含 `/api/` 前缀——它是 eapi 签名材料的一部分。
++     *
++     * 少数路由把 id 放在路径里（`/api/artist/albums/{id}`），所以这里允许一个函数，
++     * 拿应用侧 query 拼出真实路径。
++     */
++    uri: string | ((query: URLSearchParams) => string);
+     /** 应用侧 query → 上游 payload。 */
+     payload: (query: URLSearchParams) => Record<string, unknown>;
+     /** 上游 body → 应用侧期望的响应形态；缺省原样返回。 */
+@@ -56,6 +61,16 @@ const readNumber = (value: string | null, fallback: number): number => {
+     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+ };
+ 
++/** 允许 `0` 的整数读取：分页的 offset 就是 0 起算，`readNumber` 会把它当成没给。 */
++const readOffset = (value: string | null): number => {
++    const parsed = Number(value);
++    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
++};
++
++const resolveRouteUri = (route: NeteaseRoute, query: URLSearchParams): string => (
++    typeof route.uri === 'function' ? route.uri(query) : route.uri
++);
++
+ /** 把 `k=v; k=v`（或实例返回的 `k=v;k=v`）读成对象；空值表示删除。 */
+ export const parseCookieString = (text: string | null | undefined): NeteaseCookieJar => {
+     const jar: NeteaseCookieJar = {};
+@@ -313,6 +328,37 @@ const ROUTES: Record<string, NeteaseRoute> = {
+         uri: '/api/song/chorus',
+         payload: query => ({ ids: JSON.stringify([query.get('id')]) }),
+     },
++
++    // --- 歌手页 ------------------------------------------------------------------
++    // 参考实现 module/artist_detail.js、artist_album.js、artist_top_song.js。
++    //
++    // 这三条之前整片缺失，而从搜索点进歌手页正好只打这三条：`/artist/detail` 拿封面与简介、
++    // `/artist/album` 拿专辑列表、`/artist/top/song` 拿热门歌曲。缺了它们，页面拿到的是
++    // `{code:404}`，展示出来就是「暂无内容」——而网易是本机的默认音源，所以歌手页整个是不可用的。
++    //
++    // 形态原样透传，和实例一致：`netease.ts` 读的是 `data.artist`、`hotAlbums`/`more`、`songs`/`privileges`。
++    '/artist/detail': {
++        // 参考实现用的是默认 crypto（实例配置 encrypt=true 时为 eapi），与这里其它路由一致。
++        mode: 'eapi',
++        uri: '/api/artist/head/info/get',
++        payload: query => ({ id: query.get('id') }),
++    },
++    '/artist/album': {
++        mode: 'weapi',
++        // 歌手的 id 在路径里，不在 payload 里。
++        uri: query => `/api/artist/albums/${query.get('id') ?? ''}`,
++        payload: query => ({
++            limit: readNumber(query.get('limit'), 30),
++            offset: readOffset(query.get('offset')),
++            // 实例会带上它，翻页时靠响应的 `more` 判断还有没有下一页。
++            total: true,
++        }),
++    },
++    '/artist/top/song': {
++        mode: 'weapi',
++        uri: '/api/artist/top/song',
++        payload: query => ({ id: query.get('id') }),
++    },
+ };
+ 
+ /**
+@@ -339,7 +385,8 @@ const ensureAnonymousSession = async (session: NeteaseSession): Promise<void> =>
+ 
+     const route = ROUTES['/register/anonimous'];
+     try {
+-        const { data, cookies } = await callNeteaseEapi(session, route.uri, route.payload(new URLSearchParams()));
++        const anonQuery = new URLSearchParams();
++        const { data, cookies } = await callNeteaseEapi(session, resolveRouteUri(route, anonQuery), route.payload(anonQuery));
+         session.jar = mergeSetCookies(session.jar, cookies);
+         session.profile = resolveNeteaseDeviceProfile();
+         if (Number(data?.code) !== 200) {
+@@ -424,7 +471,7 @@ export const requestLocalNetease = async (endpoint: string): Promise<any> => {
+     }
+ 
+     const call = route.mode === 'weapi' ? callNeteaseWeapi : callNeteaseEapi;
+-    const { data, cookies } = await call(session, route.uri, payload);
++    const { data, cookies } = await call(session, resolveRouteUri(route, query), payload);
+ 
+     session.jar = mergeSetCookies(session.jar, cookies);
+     persistSession(session);
+diff --git a/test/manual/netease_artist_probe.ts b/test/manual/netease_artist_probe.ts
+new file mode 100644
+index 0000000..9fca43d
+--- /dev/null
++++ b/test/manual/netease_artist_probe.ts
+@@ -0,0 +1,101 @@
++import process from 'node:process';
++
++// test/manual/netease_artist_probe.ts
++//
++// 直接把本机实现的 artist 三条路由打到真的网易上，看响应形态。
++//
++// 为什么需要它：`neteaseLocalApi` 是照着参考实现（@neteasecloudmusicapienhanced/api 的
++// module/artist_*.js）翻译的，但「路径对不对」和「上游认不认」只有真请求能回答，而这个 App
++// 的本地实现没有可用的实例后端可以对着比。手机的壳里同样的活由 NeteaseProxyHandler.java 干，
++// 这里用一个 fetch 垫片重做一遍：拆信封、发真 POST、包回 JSON 信封。
++//
++// 用法（出口 IP 在境外时网易可能拒绝游客注册，但这三条路由仍然会回 200）：
++//   npx tsx test/manual/netease_artist_probe.ts [artistId]
++//
++// 已知结论（2026-10-17，id=6452 周杰伦）：
++//   /artist/detail    → {code:200, data:{artist:{...}}}，cover/avatar 是 http://，由 netease.ts 改 https
++//   /artist/album     → {code:200, artist:{...}, hotAlbums:[...], more:bool}
++//   /artist/top/song  → {code:200, songs:[...], more:bool, privileges:[...]}
++
++const realFetch = globalThis.fetch;
++const store = new Map<string, string>();
++
++// 会话与设备身份都读 localStorage；navigator 只是设备档案里的一份材料。
++const installShims = () => {
++    const localStorageShim = {
++        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
++        setItem: (key: string, value: string) => { store.set(key, String(value)); },
++        removeItem: (key: string) => { store.delete(key); },
++        clear: () => store.clear(),
++        key: (index: number) => [...store.keys()][index] ?? null,
++        get length() { return store.size; },
++    };
++    (globalThis as any).localStorage = localStorageShim;
++    (globalThis as any).window = { localStorage: localStorageShim };
++    if (!(globalThis as any).navigator) {
++        (globalThis as any).navigator = { userAgent: 'Mozilla/5.0 (Linux; Android 14) FoliaProbe' };
++    }
++};
++
++/** 壳里 NeteaseProxyHandler 的等价物：页面只发信封，原生侧发真请求。 */
++const installProxyShim = () => {
++    (globalThis as any).fetch = async (input: any, init?: any) => {
++        const url = new URL(String(input), 'https://appassets.androidplatform.net');
++        if (url.pathname !== '/api/netease-proxy') {
++            return realFetch(input, init);
++        }
++        const target = url.searchParams.get('url') ?? '';
++        const body = url.searchParams.get('body') ?? '';
++        const cookie = url.searchParams.get('cookie') ?? '';
++        const userAgent = url.searchParams.get('ua') ?? '';
++        const referer = url.searchParams.get('referer') ?? '';
++
++        const headers: Record<string, string> = {
++            'Content-Type': 'application/x-www-form-urlencoded',
++            'User-Agent': userAgent,
++        };
++        if (cookie) headers.Cookie = cookie;
++        if (referer) headers.Referer = referer;
++
++        const response = await realFetch(target, { method: 'POST', headers, body });
++        const text = await response.text();
++        const setCookie = (response.headers as any).getSetCookie?.().join('; ')
++            ?? response.headers.get('set-cookie')
++            ?? '';
++        return new Response(JSON.stringify({ status: response.status, cookie: setCookie, body: text }), { status: 200 });
++    };
++};
++
++const main = async () => {
++    installShims();
++    installProxyShim();
++
++    const artistId = process.argv[2] ?? '6452';
++    const { requestLocalNetease } = await import('../../src/services/onlineMusic/neteaseLocalApi');
++
++    const probes: [string, string][] = [
++        [`/artist/detail?id=${artistId}`, 'artist/detail'],
++        [`/artist/album?id=${artistId}&limit=5&offset=0`, 'artist/album'],
++        [`/artist/top/song?id=${artistId}`, 'artist/top/song'],
++    ];
++
++    for (const [endpoint, label] of probes) {
++        const started = Date.now();
++        try {
++            const data: any = await requestLocalNetease(endpoint);
++            console.log(`\n=== ${label} (${Date.now() - started}ms) code=${data?.code}`);
++            console.log(JSON.stringify(data).slice(0, 600));
++            if (data?.code === 404) {
++                console.log('!! 还是未实现路由的 404 形态：路由表里没有这一条');
++            }
++        } catch (error) {
++            console.log(`\n=== ${label} FAILED`);
++            console.log(String(error));
++        }
++    }
++};
++
++void main().catch(error => {
++    console.error('probe crashed', error);
++    process.exitCode = 1;
++});
+diff --git a/test/unit/onlineMusic/neteaseLocalApi.test.ts b/test/unit/onlineMusic/neteaseLocalApi.test.ts
+index 5e1ce23..bf81fcc 100644
+--- a/test/unit/onlineMusic/neteaseLocalApi.test.ts
++++ b/test/unit/onlineMusic/neteaseLocalApi.test.ts
+@@ -111,6 +111,49 @@ describe('route shapes the app consumes', () => {
+     });
+ });
+ 
++describe('artist page routes', () => {
++    // 歌手页只打这三条；缺任何一条，从搜索点进去就是「暂无内容」——而网易是本机默认音源。
++    // 参考实现：module/artist_detail.js、artist_album.js、artist_top_song.js。
++
++    it('artist/album puts the artist id in the upstream path, not the payload', async () => {
++        const calls = stubProxy([ANONYMOUS_RESPONSE, '{"code":200,"hotAlbums":[],"more":false}']);
++
++        await requestLocalNetease('/artist/album?id=6452&limit=50&offset=100');
++
++        const upstream = calls.map(call => call.get('url') ?? '');
++        expect(upstream.some(url => url.includes('/artist/albums/6452'))).toBe(true);
++        // 旧实现把它当未实现路由，上游一次都不会被请求。
++        expect(upstream.some(url => url.includes('artist/album?'))).toBe(false);
++    });
++
++    it('artist/album passes hotAlbums and more through, which is how paging stops', async () => {
++        const page = { code: 200, hotAlbums: [{ id: 1, name: 'A' }], more: true, artist: { id: 6452 } };
++        stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(page)]);
++
++        await expect(requestLocalNetease('/artist/album?id=6452&limit=1&offset=0')).resolves.toEqual(page);
++    });
++
++    it('artist/detail reaches the head info endpoint that the instance maps it to', async () => {
++        const detail = { code: 200, data: { artist: { id: 6452, name: '告五人' } } };
++        const calls = stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(detail)]);
++
++        const response = await requestLocalNetease('/artist/detail?id=6452');
++
++        expect(calls.some(call => (call.get('url') ?? '').includes('artist/head/info/get'))).toBe(true);
++        expect(response.data.artist.name).toBe('告五人');
++    });
++
++    it('artist/top/song reaches the top song endpoint and keeps privileges in place', async () => {
++        const top = { code: 200, songs: [{ id: 11 }], privileges: [{ id: 11, pl: 320000 }] };
++        const calls = stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(top)]);
++
++        const response = await requestLocalNetease('/artist/top/song?id=6452');
++
++        expect(calls.some(call => (call.get('url') ?? '').includes('artist/top/song'))).toBe(true);
++        expect(response.privileges).toEqual([{ id: 11, pl: 320000 }]);
++    });
++});
++
+ describe('guest session bootstrap', () => {
+     const createMemoryStorage = () => {
+         const entries = new Map<string, string>();
