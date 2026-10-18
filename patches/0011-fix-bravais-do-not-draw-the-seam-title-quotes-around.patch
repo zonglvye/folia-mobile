@@ -1,7 +1,7 @@
 From 6d47cb429c1b6aaabccf84072bed90ab5eed17d6 Mon Sep 17 00:00:00 2001
 From: folia-mobile <mobile@folia.local>
 Date: Sat, 17 Oct 2026 12:42:38 +0800
-Subject: [PATCH 11/27] fix(bravais): do not draw the seam title quotes around
+Subject: [PATCH 11/29] fix(bravais): do not draw the seam title quotes around
  nothing
 
 The full seam's title area is the collapse control: opening quote, vertical

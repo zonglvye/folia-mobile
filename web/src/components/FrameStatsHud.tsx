@@ -10,6 +10,7 @@ import {
 } from '../services/debug/frameSamples';
 import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
 import { countContextLosses, lastIncident, readIncidents } from '../services/debug/incidents';
+import { describeAudioStart, readAudioStart } from '../services/playback/audioStartupProbe';
 import { useVisualizerSettingsStore } from '../stores/useVisualizerSettingsStore';
 import { DEFAULT_VISUALIZER_BACKGROUND_MODE } from '../types/visualizerModes';
 
@@ -128,6 +129,7 @@ const FrameStatsHud: React.FC = () => {
     const errorIncident = lastIncident('error') ?? lastIncident('rejection');
     const errorCount = incidents.filter(entry => entry.kind === 'error' || entry.kind === 'rejection').length;
     const blankRoot = lastIncident('blank-root');
+    const audioStart = readAudioStart();
 
     return (
         <div
@@ -186,6 +188,13 @@ const FrameStatsHud: React.FC = () => {
             <Row label="vis" value={`${visualizerMode}${randomModePerSong ? ' ·random' : ''}`} />
             <Row label="bg" value={backgroundMode ?? `${DEFAULT_VISUALIZER_BACKGROUND_MODE} (default)`} />
             <Row label="glow" value={glowOnCompositor ? 'compositor' : 'shadow'} />
+            {/* 播放启动取证：连蓝牙耳机后「点播放毫无反应、进度条不动」时，这一行说明卡在哪个等待点。
+                正常播放时就是 `resume:ok …` / `play:ok running`，不值得看。 */}
+            <Row
+                label="audio"
+                value={describeAudioStart(audioStart)}
+                tone={audioStart && audioStart.outcome !== 'ok' ? '#fb7185' : undefined}
+            />
             {/* 黑屏那一类故障的证据：上下文丢失次数与最后一条异常。没有 adb 时，这两行就是全部线索。 */}
             <Row
                 label="gl"

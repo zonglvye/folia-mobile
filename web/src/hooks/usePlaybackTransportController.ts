@@ -10,6 +10,8 @@ import { markProgrammaticPause, playbackFade, type PlaybackFadeSettleReason } fr
 import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
 import { getPlaybackFailureMessage, isPlaybackFailureStatus } from '../services/playbackRecovery/playbackFailurePolicy';
 import type { OnlineRecoveryOptions, OnlineRecoveryResult, PlaybackFailure } from '../types/playbackFailure';
+import { AUDIO_START_TIMEOUT_MS, recordAudioStart } from '../services/playback/audioStartupProbe';
+import { settleWithin } from '../utils/settleWithin';
 
 // src/hooks/usePlaybackTransportController.ts
 
@@ -117,12 +119,16 @@ export function usePlaybackTransportController({
         const shouldAutoplay = () => wantsPlayback.current && isSameSource();
 
         setupAudioAnalyzer();
-        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-            try {
-                await audioContextRef.current.resume();
-            } catch (error) {
+        // 两个 await 都带期限（audioStartupProbe 里有完整的来龙去脉）：它们可以永不决议，而这个函数的
+        // 第一行状态写入就在它们后面，卡住时界面上只表现为「按了没反应」。超时不取消原 promise。
+        const startedAt = performance.now();
+        const context = audioContextRef.current;
+        if (context && context.state === 'suspended') {
+            const resumed = await settleWithin(context.resume(), AUDIO_START_TIMEOUT_MS.resume);
+            recordAudioStart('resume', resumed.status, startedAt, context, audio);
+            if (resumed.status === 'rejected') {
                 if (!isCurrent()) return;
-                throw error;
+                throw resumed.error;
             }
         }
         if (!isCurrent()) return;
@@ -152,7 +158,29 @@ export function usePlaybackTransportController({
             ? playbackFade.prepareFadeIn()
             : null;
         try {
-            await audio.play();
+            // play() 按规范在真正开始播放时才决议，所以「一直不决议」就是音频链路没起来 —— 安卓壳上
+            // 连蓝牙耳机时正是这个表现。给它一个期限只为两件事：把结局记进 HUD 的 audio 行，以及在
+            // 它迟到地起来时把界面补正（否则这一页就永久停在「按了没反应」）。
+            const playPromise = audio.play();
+            const played = await settleWithin(playPromise, AUDIO_START_TIMEOUT_MS.play);
+            recordAudioStart('play', played.status, startedAt, context, audio);
+            if (played.status === 'rejected') throw played.error;
+            if (played.status === 'timeout') {
+                void playPromise.then(() => {
+                    if (!isCurrent()) {
+                        playbackFade.abortFadeIn(fadeToken);
+                        return;
+                    }
+                    playbackFade.runFadeIn(fadeToken);
+                    setPlayerState(PlayerState.PLAYING);
+                    setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? null : prev));
+                }).catch(() => {
+                    // 迟到的拒绝：界面状态上面已经不再动它（元素自己的 onError 会走既有的失败路径），
+                    // 只把结局改记成 rejected，HUD 才不会一直说「超时」。
+                    recordAudioStart('play', 'rejected', startedAt, context, audio);
+                });
+                return;
+            }
             if (!isCurrent()) { playbackFade.abortFadeIn(fadeToken); return; }
             playbackFade.runFadeIn(fadeToken);
             setPlayerState(PlayerState.PLAYING);

@@ -15,6 +15,7 @@ import { BRAVAIS_CAMERA_TWEEN_S, BRAVAIS_CULL_EDGE_MARGIN, BRAVAIS_OVERSCAN } fr
 import { rubberBand } from './bravaisFiniteWall';
 import { computeBravaisFrame, getTiltReach } from './bravaisFrame';
 import type { BravaisFrameState } from './useBravaisFrame';
+import { beginPerfPhase } from '../../../services/debug/perfPhases';
 
 // src/library/suites/bravais/useBravaisCamera.ts
 // 相机：真源是视图中心（缝基准线下的世界点，B5 的约定），存在帧状态里；拖动 / 滚轮 / 惯性复用 wall 的
@@ -98,7 +99,12 @@ export const useBravaisCamera = ({
         cullFrameRef.current = requestAnimationFrame(() => {
             cullFrameRef.current = null;
             const visible = getVisibleWorldBounds(frameRef.current);
-            if (visible) setBounds(visible);
+            if (!visible) return;
+            // 重算这一下（槽位计算 + 那一圈新磁贴的渲染与布局）就是滑动时 HUD 上那条
+            // `block (no phase) … ms`。开一个 phase，让 HUD 把它记成 `wall cull` —— 否则改完
+            // 之后下一次读数还是「无归属」，分不清是这一下有没有变便宜。
+            beginPerfPhase('wall cull');
+            setBounds(visible);
         });
     }, [frameRef]);
 

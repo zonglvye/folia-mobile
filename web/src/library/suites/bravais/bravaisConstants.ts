@@ -41,10 +41,30 @@ export const BRAVAIS_SHORT_VIEWPORT_PX = 480;
 /** 上面那一档的查询串：脚本里要按它分支的部分（列表面板的行高）走这里，不另写一个数字。 */
 export const BRAVAIS_SHORT_VIEWPORT_QUERY = `(max-height: ${BRAVAIS_SHORT_VIEWPORT_PX}px)`;
 
-/** 视口外多渲染的世界距离（世界单位）；翻牌也只翻这个范围以内的磁贴。 */
+/**
+ * 视口外多渲染的世界距离（世界单位）；翻牌也只翻这个范围以内的磁贴。
+ *
+ * 2026-10 真机读数（`longtasks 23 · max 210 ms`、`block (no phase)`）之后**没有收它**，理由记在这里，
+ * 免得下次又有人想「少挂一点就快了」：同时挂载的磁贴总量按它线性长（手机横屏约一百张），但每次重算的
+ * 那一圈厚度是 `OVERSCAN − CULL_EDGE_MARGIN`，收小 OVERSCAN 会让这一圈变薄 —— 重算次数跟着变多。
+ * 实测试着收到 300 时，`bravaisPerf` 的 drift 用例立刻挂掉：原来「在范围内平移不产生任何工作」的距离
+ * 已经越过了新的门槛。也就是说少挂一些换来的是**更频繁**的重算，总工作量反而更大。
+ * 真正治那一圈的是分帧挂载（useBravaisStaggeredSlots）：一圈二三十张摊成三帧、每帧 10 张。
+ */
 export const BRAVAIS_OVERSCAN = 420;
-/** 离已渲染范围的边缘还剩这么多（世界单位）时重新裁剪。 */
+/**
+ * 离已渲染范围的边缘还剩这么多（世界单位）时重新裁剪。与 OVERSCAN 一起决定两件事：
+ * 一次重算新增的那一圈厚度 = `OVERSCAN − CULL_EDGE_MARGIN`（420 − 160 = 260 世界单位，缩放下约 166px），
+ * 以及翻页途中至少留住的余量 = CULL_EDGE_MARGIN 本身（约 102px）。
+ */
 export const BRAVAIS_CULL_EDGE_MARGIN = 160;
+/**
+ * 一次重算新增的磁贴分几帧挂完：每帧这么多个（useBravaisStaggeredSlots）。
+ * 那一圈在视野外，晚一两帧看不见；一次 90ms 的卡顿摊成三次 30ms 的手感完全不同。
+ */
+export const BRAVAIS_WALL_MOUNT_BATCH = 10;
+/** 新增超过这么多就不再摊：那不是滑动带出来的一圈，而是整面墙换了内容，摊开会让人看着墙一直不画完。 */
+export const BRAVAIS_WALL_MOUNT_MAX_STAGGERED = 80;
 
 /** 相机缩放档位，与 Lattice 的 PosterWall 相同（<640: .52，<1100: .64，否则 .76）。 */
 export const getBravaisScale = (viewportWidth: number) => (

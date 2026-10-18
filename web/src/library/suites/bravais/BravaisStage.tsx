@@ -17,6 +17,7 @@ import BravaisSeam from './BravaisSeam';
 import BravaisStageChrome from './BravaisStageChrome';
 import BravaisWall from './BravaisWall';
 import { useBravaisCamera } from './useBravaisCamera';
+import { useBravaisStaggeredSlots } from './useBravaisStaggeredSlots';
 import { useBravaisChromeActions } from './useBravaisChromeActions';
 import { useBravaisDisplay } from './useBravaisDisplay';
 import { useBravaisFocus } from './useBravaisFocus';
@@ -262,6 +263,10 @@ const BravaisStage: React.FC<LibrarySuiteStageProps> = ({
         suppressEntrance: () => resolveBravaisWallHandoffState(useWallHandoffStore.getState().session).role === 'in',
     });
     displayBridgeRef.current = displayRef.current;
+
+    // 挂载分帧（bravaisSlotStagger）：只影响交给墙渲染的那一份，逻辑仍然用上面那份全量的。
+    // 整墙入场 / 出场波次期间不摊 —— 摊开会把波次打散。
+    const wallSlots = useBravaisStaggeredSlots(slots, display?.entrance == null);
     // B11 transitions.beforePush：宿主压栈之前，没经过墙上磁贴的打开用键盘焦点所在的 slot 当起点磁贴。
     const getFocusedSlotKey = useCallback(() => focus.focusedRef.current, [focus.focusedRef]);
     useBravaisBeforePush(displayRef, getFocusedSlotKey);
@@ -531,7 +536,7 @@ const BravaisStage: React.FC<LibrarySuiteStageProps> = ({
                 onClick={onFieldClick}
             >
                 <BravaisWall
-                    slots={view ? slots : []}
+                    slots={view ? wallSlots : []}
                     display={display}
                     anchorX={seam.anchorX}
                     reflow={focus.reflow}

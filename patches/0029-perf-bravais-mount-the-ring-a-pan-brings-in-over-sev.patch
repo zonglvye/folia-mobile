@@ -1,0 +1,339 @@
+From db7aa6f9ea5942b66fefa022f8318e3fc533ca8d Mon Sep 17 00:00:00 2001
+From: folia <folia@local>
+Date: Sun, 18 Oct 2026 21:05:53 +0800
+Subject: [PATCH 29/29] perf(bravais): mount the ring a pan brings in over
+ several frames
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机读数（墙面滑动）：`longtasks 23 · max 210 ms`、`block (no phase) 210 ms · 23x`、
+`jank 10.6%`。长任务没有归属，说明不在取色那类记过账的代码里 —— 是重算裁剪时那一圈新磁贴的
+渲染 + 样式 + 布局：手机上缩放 0.64，裁剪门槛换算下来约每滑 166px 重算一次，每次挂上二三十张。
+
+- 新增 bravaisSlotStagger / useBravaisStaggeredSlots：一次重算新增的磁贴按每帧 10 张分帧挂完。
+  那一圈本来就在视野外（overscan 的全部意义），晚一两帧看不见；一次 90–210ms 的卡顿摊成三次
+  ~30ms，每次都在长任务门槛（50ms）以下。首帧、换层、整墙入场波次、以及整面墙换内容（新增超过
+  80 张）都不摊，只有滑动带出来的一圈摊。
+- 只影响交给墙渲染的那份列表：slotsRef、键盘焦点、定位仍然拿全量。
+- 给重算开了 `wall cull` 的 perf phase，HUD 的 `block` 行不再写「(no phase)」，下一次读数就能
+  看出这一下有没有变便宜。
+
+试过把 OVERSCAN 从 420 收到 300（少挂一点），结论是**不要**：同时挂载量确实少 29%，但每次重算
+的那一圈厚度由 `OVERSCAN − CULL_EDGE_MARGIN` 决定，收小它等于让重算更频繁，总工作量反而更大，
+而且 bravaisPerf 的 drift 用例（「在范围内平移不产生任何工作」）当场就挂。理由写进常量注释了。
+---
+ src/library/suites/bravais/BravaisStage.tsx   |  7 +-
+ .../suites/bravais/bravaisConstants.ts        | 24 ++++++-
+ .../suites/bravais/bravaisSlotStagger.ts      | 51 +++++++++++++
+ .../suites/bravais/useBravaisCamera.ts        |  8 ++-
+ .../bravais/useBravaisStaggeredSlots.ts       | 67 +++++++++++++++++
+ .../bravais/bravaisSlotStagger.test.ts        | 72 +++++++++++++++++++
+ 6 files changed, 225 insertions(+), 4 deletions(-)
+ create mode 100644 src/library/suites/bravais/bravaisSlotStagger.ts
+ create mode 100644 src/library/suites/bravais/useBravaisStaggeredSlots.ts
+ create mode 100644 test/unit/library/bravais/bravaisSlotStagger.test.ts
+
+diff --git a/src/library/suites/bravais/BravaisStage.tsx b/src/library/suites/bravais/BravaisStage.tsx
+index 1d7b800..77c48be 100644
+--- a/src/library/suites/bravais/BravaisStage.tsx
++++ b/src/library/suites/bravais/BravaisStage.tsx
+@@ -17,6 +17,7 @@ import BravaisSeam from './BravaisSeam';
+ import BravaisStageChrome from './BravaisStageChrome';
+ import BravaisWall from './BravaisWall';
+ import { useBravaisCamera } from './useBravaisCamera';
++import { useBravaisStaggeredSlots } from './useBravaisStaggeredSlots';
+ import { useBravaisChromeActions } from './useBravaisChromeActions';
+ import { useBravaisDisplay } from './useBravaisDisplay';
+ import { useBravaisFocus } from './useBravaisFocus';
+@@ -262,6 +263,10 @@ const BravaisStage: React.FC<LibrarySuiteStageProps> = ({
+         suppressEntrance: () => resolveBravaisWallHandoffState(useWallHandoffStore.getState().session).role === 'in',
+     });
+     displayBridgeRef.current = displayRef.current;
++
++    // 挂载分帧（bravaisSlotStagger）：只影响交给墙渲染的那一份，逻辑仍然用上面那份全量的。
++    // 整墙入场 / 出场波次期间不摊 —— 摊开会把波次打散。
++    const wallSlots = useBravaisStaggeredSlots(slots, display?.entrance == null);
+     // B11 transitions.beforePush：宿主压栈之前，没经过墙上磁贴的打开用键盘焦点所在的 slot 当起点磁贴。
+     const getFocusedSlotKey = useCallback(() => focus.focusedRef.current, [focus.focusedRef]);
+     useBravaisBeforePush(displayRef, getFocusedSlotKey);
+@@ -531,7 +536,7 @@ const BravaisStage: React.FC<LibrarySuiteStageProps> = ({
+                 onClick={onFieldClick}
+             >
+                 <BravaisWall
+-                    slots={view ? slots : []}
++                    slots={view ? wallSlots : []}
+                     display={display}
+                     anchorX={seam.anchorX}
+                     reflow={focus.reflow}
+diff --git a/src/library/suites/bravais/bravaisConstants.ts b/src/library/suites/bravais/bravaisConstants.ts
+index b4d44a7..f73dd45 100644
+--- a/src/library/suites/bravais/bravaisConstants.ts
++++ b/src/library/suites/bravais/bravaisConstants.ts
+@@ -41,10 +41,30 @@ export const BRAVAIS_SHORT_VIEWPORT_PX = 480;
+ /** 上面那一档的查询串：脚本里要按它分支的部分（列表面板的行高）走这里，不另写一个数字。 */
+ export const BRAVAIS_SHORT_VIEWPORT_QUERY = `(max-height: ${BRAVAIS_SHORT_VIEWPORT_PX}px)`;
+ 
+-/** 视口外多渲染的世界距离（世界单位）；翻牌也只翻这个范围以内的磁贴。 */
++/**
++ * 视口外多渲染的世界距离（世界单位）；翻牌也只翻这个范围以内的磁贴。
++ *
++ * 2026-10 真机读数（`longtasks 23 · max 210 ms`、`block (no phase)`）之后**没有收它**，理由记在这里，
++ * 免得下次又有人想「少挂一点就快了」：同时挂载的磁贴总量按它线性长（手机横屏约一百张），但每次重算的
++ * 那一圈厚度是 `OVERSCAN − CULL_EDGE_MARGIN`，收小 OVERSCAN 会让这一圈变薄 —— 重算次数跟着变多。
++ * 实测试着收到 300 时，`bravaisPerf` 的 drift 用例立刻挂掉：原来「在范围内平移不产生任何工作」的距离
++ * 已经越过了新的门槛。也就是说少挂一些换来的是**更频繁**的重算，总工作量反而更大。
++ * 真正治那一圈的是分帧挂载（useBravaisStaggeredSlots）：一圈二三十张摊成三帧、每帧 10 张。
++ */
+ export const BRAVAIS_OVERSCAN = 420;
+-/** 离已渲染范围的边缘还剩这么多（世界单位）时重新裁剪。 */
++/**
++ * 离已渲染范围的边缘还剩这么多（世界单位）时重新裁剪。与 OVERSCAN 一起决定两件事：
++ * 一次重算新增的那一圈厚度 = `OVERSCAN − CULL_EDGE_MARGIN`（420 − 160 = 260 世界单位，缩放下约 166px），
++ * 以及翻页途中至少留住的余量 = CULL_EDGE_MARGIN 本身（约 102px）。
++ */
+ export const BRAVAIS_CULL_EDGE_MARGIN = 160;
++/**
++ * 一次重算新增的磁贴分几帧挂完：每帧这么多个（useBravaisStaggeredSlots）。
++ * 那一圈在视野外，晚一两帧看不见；一次 90ms 的卡顿摊成三次 30ms 的手感完全不同。
++ */
++export const BRAVAIS_WALL_MOUNT_BATCH = 10;
++/** 新增超过这么多就不再摊：那不是滑动带出来的一圈，而是整面墙换了内容，摊开会让人看着墙一直不画完。 */
++export const BRAVAIS_WALL_MOUNT_MAX_STAGGERED = 80;
+ 
+ /** 相机缩放档位，与 Lattice 的 PosterWall 相同（<640: .52，<1100: .64，否则 .76）。 */
+ export const getBravaisScale = (viewportWidth: number) => (
+diff --git a/src/library/suites/bravais/bravaisSlotStagger.ts b/src/library/suites/bravais/bravaisSlotStagger.ts
+new file mode 100644
+index 0000000..99995c8
+--- /dev/null
++++ b/src/library/suites/bravais/bravaisSlotStagger.ts
+@@ -0,0 +1,51 @@
++// src/library/suites/bravais/bravaisSlotStagger.ts
++// 「一次重算新增的磁贴要不要分帧挂」的纯规则。
++//
++// 起因（2026-10 真机读数）：墙面滑动时 HUD 报 `longtasks 23 · max 210 ms`、`block (no phase)`。
++// 长任务没有归属，说明不在取色那类记过账的代码里 —— 是重算裁剪时那一圈新磁贴的渲染 + 样式 + 布局。
++// 手机上相机缩放 0.64，裁剪门槛 `OVERSCAN − CULL_EDGE_MARGIN` 换算下来约每滑 160px 就重算一次，
++// 每次挂上二三十个新磁贴，正好一次长任务。
++//
++// 那一圈磁贴本来就在视野外（overscan 的全部意义），所以把它们摊到几帧挂是看不见的：一次 90ms
++// 的卡顿变成三次 30ms。这条规则只决定「这一轮哪些立刻可见、哪些排队」，rAF 的节奏在 hook 里。
++
++import type { WallSlot } from '../../../components/wall/wallSlots';
++
++export type StaggerPlan = {
++    /** 这一轮立刻可见的 key。 */
++    shown: ReadonlySet<string>;
++    /** 需要分帧挂载的 key，按 slots 原本的顺序。 */
++    queued: readonly string[];
++};
++
++/**
++ * 一次 `slots` 变化之后该怎么放行。
++ *
++ * - `previous === null`（首帧、换层后重新挂载）：一次全给，否则墙会一格一格地长出来；
++ * - `enabled === false`（墙上正在跑整墙入场 / 出场波次）：一次全给，摊开会把波次打散；
++ * - 新增超过 `maxStaggered`：一次全给 —— 那不是滑动带出来的一圈，而是整面墙换了内容，摊开
++ *   只会让人看着墙一直不画完。
++ * - 只减不增：立刻丢掉离场的 key，不排队。
++ */
++export const planStaggeredRelease = (
++    previous: ReadonlySet<string> | null,
++    slots: readonly WallSlot[],
++    { enabled, maxStaggered }: { enabled: boolean; maxStaggered: number },
++): StaggerPlan => {
++    const current = new Set(slots.map(slot => slot.key));
++    const all = (): StaggerPlan => ({ shown: current, queued: [] });
++
++    if (previous === null || !enabled) return all();
++
++    const added: string[] = [];
++    const kept = new Set<string>();
++    for (const key of current) {
++        if (previous.has(key)) kept.add(key);
++        else added.push(key);
++    }
++
++    if (added.length === 0) return { shown: kept, queued: [] };
++    if (added.length > maxStaggered) return all();
++
++    return { shown: kept, queued: added };
++};
+diff --git a/src/library/suites/bravais/useBravaisCamera.ts b/src/library/suites/bravais/useBravaisCamera.ts
+index 3fa53a9..4dcd351 100644
+--- a/src/library/suites/bravais/useBravaisCamera.ts
++++ b/src/library/suites/bravais/useBravaisCamera.ts
+@@ -15,6 +15,7 @@ import { BRAVAIS_CAMERA_TWEEN_S, BRAVAIS_CULL_EDGE_MARGIN, BRAVAIS_OVERSCAN } fr
+ import { rubberBand } from './bravaisFiniteWall';
+ import { computeBravaisFrame, getTiltReach } from './bravaisFrame';
+ import type { BravaisFrameState } from './useBravaisFrame';
++import { beginPerfPhase } from '../../../services/debug/perfPhases';
+ 
+ // src/library/suites/bravais/useBravaisCamera.ts
+ // 相机：真源是视图中心（缝基准线下的世界点，B5 的约定），存在帧状态里；拖动 / 滚轮 / 惯性复用 wall 的
+@@ -98,7 +99,12 @@ export const useBravaisCamera = ({
+         cullFrameRef.current = requestAnimationFrame(() => {
+             cullFrameRef.current = null;
+             const visible = getVisibleWorldBounds(frameRef.current);
+-            if (visible) setBounds(visible);
++            if (!visible) return;
++            // 重算这一下（槽位计算 + 那一圈新磁贴的渲染与布局）就是滑动时 HUD 上那条
++            // `block (no phase) … ms`。开一个 phase，让 HUD 把它记成 `wall cull` —— 否则改完
++            // 之后下一次读数还是「无归属」，分不清是这一下有没有变便宜。
++            beginPerfPhase('wall cull');
++            setBounds(visible);
+         });
+     }, [frameRef]);
+ 
+diff --git a/src/library/suites/bravais/useBravaisStaggeredSlots.ts b/src/library/suites/bravais/useBravaisStaggeredSlots.ts
+new file mode 100644
+index 0000000..9035ef9
+--- /dev/null
++++ b/src/library/suites/bravais/useBravaisStaggeredSlots.ts
+@@ -0,0 +1,67 @@
++import { useEffect, useMemo, useRef, useState } from 'react';
++import type { WallSlot } from '../../../components/wall/wallSlots';
++import { BRAVAIS_WALL_MOUNT_BATCH, BRAVAIS_WALL_MOUNT_MAX_STAGGERED } from './bravaisConstants';
++import { planStaggeredRelease } from './bravaisSlotStagger';
++
++// src/library/suites/bravais/useBravaisStaggeredSlots.ts
++// 交给墙去渲染的 slot 列表：一次重算新增的那一圈磁贴分几帧挂完（规则见 bravaisSlotStagger）。
++// 只影响「画哪些」，不影响任何逻辑用的完整列表 —— stage 的 slotsRef / 键盘焦点 / 定位仍然拿全量的。
++//
++// 每一步只改一个字符串集合，React 每帧挂一批（BRAVAIS_WALL_MOUNT_BATCH 个）。换层、再来一次重算、
++// 组件卸载都由 effect 的 cleanup 收掉，不会有两个泵同时在跑。
++
++const sameKeys = (left: ReadonlySet<string>, right: ReadonlySet<string>) => (
++    left.size === right.size && [...left].every(key => right.has(key))
++);
++
++export const useBravaisStaggeredSlots = (
++    slots: readonly WallSlot[],
++    enabled: boolean,
++): readonly WallSlot[] => {
++    /** 已经放行的 key；null = 还没放过任何一轮（首帧整面墙一次给）。 */
++    const [shown, setShown] = useState<ReadonlySet<string> | null>(null);
++    const shownRef = useRef<ReadonlySet<string> | null>(null);
++    shownRef.current = shown;
++
++    useEffect(() => {
++        const plan = planStaggeredRelease(shownRef.current, slots, {
++            enabled,
++            maxStaggered: BRAVAIS_WALL_MOUNT_MAX_STAGGERED,
++        });
++        const queue = [...plan.queued];
++
++        // 没有要摊的：一次落定（首帧、换层、只减不增都走这里）。集合没变就不碰 state。
++        if (queue.length === 0) {
++            if (shownRef.current === null || !sameKeys(shownRef.current, plan.shown)) {
++                shownRef.current = plan.shown;
++                setShown(plan.shown);
++            }
++            return undefined;
++        }
++
++        let frame: number | null = null;
++        let released = 0;
++        let cancelled = false;
++        const step = () => {
++            frame = null;
++            if (cancelled) return;
++            released = Math.min(queue.length, released + BRAVAIS_WALL_MOUNT_BATCH);
++            const next = new Set(plan.shown);
++            for (let index = 0; index < released; index += 1) next.add(queue[index]);
++            shownRef.current = next;
++            setShown(next);
++            if (released < queue.length) frame = requestAnimationFrame(step);
++        };
++        // 第一帧先放行第一批，剩下的交给 rAF。
++        step();
++        return () => {
++            cancelled = true;
++            if (frame !== null) cancelAnimationFrame(frame);
++        };
++    }, [enabled, slots]);
++
++    return useMemo(() => {
++        if (shown === null) return slots;
++        return slots.filter(slot => shown.has(slot.key));
++    }, [shown, slots]);
++};
+diff --git a/test/unit/library/bravais/bravaisSlotStagger.test.ts b/test/unit/library/bravais/bravaisSlotStagger.test.ts
+new file mode 100644
+index 0000000..547b354
+--- /dev/null
++++ b/test/unit/library/bravais/bravaisSlotStagger.test.ts
+@@ -0,0 +1,72 @@
++import { describe, expect, it } from 'vitest';
++import { planStaggeredRelease } from '@/library/suites/bravais/bravaisSlotStagger';
++import type { WallSlot } from '@/components/wall/wallSlots';
++
++// test/unit/library/bravais/bravaisSlotStagger.test.ts
++// 一次重算新增的那一圈磁贴要不要分帧挂。起因是真机读数：滑动时 `longtasks 23 · max 210 ms`、
++// `block (no phase)` —— 每次都栽在重算裁剪那一下。挑错这一条会直接看出来：首帧一格一格长、
++// 或换层时波次被打散。
++
++const slot = (column: number, row: number): WallSlot => ({
++    key: `${column},${row},0`,
++    column,
++    row,
++    slotIndex: 0,
++    x: column * 136,
++    y: row * 136,
++    width: 128,
++    height: 128,
++    centerX: column * 136 + 64,
++    centerY: row * 136 + 64,
++    area: 1,
++});
++
++const keys = (set: ReadonlySet<string>) => [...set].sort();
++const limits = { enabled: true, maxStaggered: 80 };
++
++describe('staggered wall mounting', () => {
++    it('gives the whole wall on the first pass, so it never grows in cell by cell', () => {
++        const slots = [slot(0, 0), slot(1, 0), slot(2, 0)];
++        const plan = planStaggeredRelease(null, slots, limits);
++        expect(keys(plan.shown)).toEqual(['0,0,0', '1,0,0', '2,0,0']);
++        expect(plan.queued).toEqual([]);
++    });
++
++    it('holds the ring a pan just added, and queues it in slot order', () => {
++        const before = [slot(0, 0), slot(1, 0)];
++        const after = [...before, slot(2, 0), slot(3, 0)];
++        const plan = planStaggeredRelease(new Set(before.map(entry => entry.key)), after, limits);
++        // 已经挂着的两张立刻留着：滑动中它们就在视野里，绝不能因为分帧而消失一帧。
++        expect(keys(plan.shown)).toEqual(['0,0,0', '1,0,0']);
++        expect(plan.queued).toEqual(['2,0,0', '3,0,0']);
++    });
++
++    it('drops keys that left without queueing anything', () => {
++        const before = [slot(0, 0), slot(1, 0)];
++        const after = [slot(1, 0)];
++        const plan = planStaggeredRelease(new Set(before.map(entry => entry.key)), after, limits);
++        expect(keys(plan.shown)).toEqual(['1,0,0']);
++        expect(plan.queued).toEqual([]);
++    });
++
++    it('does not stagger while a whole-wall entrance is playing', () => {
++        const after = [slot(0, 0), slot(1, 0), slot(2, 0)];
++        const plan = planStaggeredRelease(new Set([slot(0, 0).key]), after, { ...limits, enabled: false });
++        expect(keys(plan.shown)).toEqual(['0,0,0', '1,0,0', '2,0,0']);
++        expect(plan.queued).toEqual([]);
++    });
++
++    it('does not stagger a wholesale content swap: that is not a pan ring', () => {
++        const after = Array.from({ length: 82 }, (_, index) => slot(index, 0));
++        const plan = planStaggeredRelease(new Set([slot(0, 0).key]), after, limits);
++        expect(plan.queued).toEqual([]);
++        expect(plan.shown.size).toBe(82);
++    });
++
++    it('staggers right up to the cap', () => {
++        const after = Array.from({ length: 81 }, (_, index) => slot(index, 0));
++        const plan = planStaggeredRelease(new Set([slot(0, 0).key]), after, limits);
++        expect(plan.queued).toHaveLength(80);
++        expect(plan.shown.size).toBe(1);
++    });
++});
