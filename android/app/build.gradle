@@ -19,8 +19,8 @@ android {
         // unconditional, which removes a large amount of SDK_INT branching from the shell.
         minSdk 26
         targetSdk 35
-        versionCode 19
-        versionName '0.6.3'
+        versionCode 20
+        versionName '0.6.4'
         // The web bundle is a large JS payload; the shell itself has no native ABI to filter.
     }
 

@@ -1,0 +1,389 @@
+From 49facd55d4db2548041a34c3de2a3c9c8ab00390 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sun, 18 Oct 2026 16:37:41 +0800
+Subject: [PATCH 25/27] fix(debug): stop the stale service worker from blanking
+ the app
+
+The black-screen recorder caught its first real case, and the answer was in the
+overlay it put on the screen:
+
+    modulepreload failed to load: .../assets/BravaisCollection-Cys-1Rmu.js
+    TypeError: Failed to fetch dynamically imported module: .../BravaisCollection-Cys-1Rmu.js
+    React root has no children; the tree was unmounted
+
+That chunk name does not exist in the installed APK (it ships
+`BravaisCollection-6pBslNSm.js`), so the document that asked for it was older than
+the APK: the service worker's precache still held the previous version's
+index.html. On the web that is harmless - the old chunk files are still on the
+server - but in a bundled shell they are GONE, so a stale document requests files
+that cannot exist, the lazy import rejects, and with no error boundary React
+unmounts the whole tree.
+
+Two fixes, one for the cause and one for the class of failure:
+
+- The Android shell no longer registers a service worker, and retires the one
+  already on the device (unregister + drop `workbox-*` caches, leaving other
+  origins' and features' Cache Storage alone). Offline in the shell is structural
+  - the bundle is inside the APK - so the precache has nothing to add and a
+  version skew to lose. Registration moved from vite-plugin-pwa's injected script
+  (`injectRegister: false`) to src/index.tsx, because it now has to depend on the
+  runtime. Web and desktop keep registering exactly as before.
+- The root now has an error boundary, which this app never had. A failed lazy
+  chunk means the page code is gone, so it reloads once (guarded by sessionStorage
+  against a reload loop); anything else renders a readable message with a reload
+  button instead of unmounting into a black screen.
+
+Also corrected the recorder's label: a `modulepreload` link failure was reported
+as "stylesheet failed to load", which pointed away from the actual cause.
+---
+ src/bootstrap.tsx                             |  28 ++--
+ src/components/AppErrorBoundary.tsx           | 131 ++++++++++++++++++
+ src/index.tsx                                 |  34 +++++
+ .../debug/installIncidentRecorders.ts         |   6 +-
+ src/utils/chunkLoadFailure.ts                 |  21 +++
+ src/vite-env.d.ts                             |   3 +
+ test/unit/utils/chunkLoadFailure.test.ts      |  33 +++++
+ vite.config.ts                                |   3 +
+ 8 files changed, 249 insertions(+), 10 deletions(-)
+ create mode 100644 src/components/AppErrorBoundary.tsx
+ create mode 100644 src/utils/chunkLoadFailure.ts
+ create mode 100644 test/unit/utils/chunkLoadFailure.test.ts
+
+diff --git a/src/bootstrap.tsx b/src/bootstrap.tsx
+index 8eb5cee..bd4cd66 100644
+--- a/src/bootstrap.tsx
++++ b/src/bootstrap.tsx
+@@ -4,6 +4,7 @@ import './i18n/config';
+ import './index.css';
+ import App from './App';
+ import AppSplashGate from './components/AppSplashGate';
++import AppErrorBoundary from './components/AppErrorBoundary';
+ import RemoteControlApp from './components/remote/RemoteControlApp';
+ import ObsBrowserSourceApp from './components/obs/ObsBrowserSourceApp';
+ import ObsNowPlayingSourceApp from './components/obs/ObsNowPlayingSourceApp';
+@@ -59,18 +60,27 @@ const isRemoteControl = isRemoteControlSurface;
+ // also has the Electron bridge, but mod state pushes only reach the main
+ // window, so a client activated there would never be torn down.
+ const isMainApp = isMainAppSurface;
++// 兜底界面上的名字，用来区分是哪个根挂了。
++const surfaceLabel = isNowPlayingObsSource ? 'OBS 正在播放'
++  : isPlayerCapObsSource ? 'OBS 播放卡'
++    : isObsBrowserSource ? 'OBS 源'
++      : isRemoteControl ? '远程控制'
++        : '主界面';
+ const renderApp = () => root.render(
+     <React.StrictMode>
+       <AppSplashGate>
+-        {isNowPlayingObsSource
+-          ? <ObsNowPlayingSourceApp />
+-          : isPlayerCapObsSource
+-            ? <ObsPlayerCapSourceApp />
+-            : isObsBrowserSource
+-              ? <ObsBrowserSourceApp />
+-              : isRemoteControl
+-                ? <RemoteControlApp />
+-                : <App />}
++        {/* 根上必须有错误边界，否则一次懒加载失败就会卸载整棵树（实机上就这样黑过一次）。 */}
++        <AppErrorBoundary surface={surfaceLabel}>
++          {isNowPlayingObsSource
++            ? <ObsNowPlayingSourceApp />
++            : isPlayerCapObsSource
++              ? <ObsPlayerCapSourceApp />
++              : isObsBrowserSource
++                ? <ObsBrowserSourceApp />
++                : isRemoteControl
++                  ? <RemoteControlApp />
++                  : <App />}
++        </AppErrorBoundary>
+       </AppSplashGate>
+     </React.StrictMode>
+   );
+diff --git a/src/components/AppErrorBoundary.tsx b/src/components/AppErrorBoundary.tsx
+new file mode 100644
+index 0000000..19bb2e3
+--- /dev/null
++++ b/src/components/AppErrorBoundary.tsx
+@@ -0,0 +1,131 @@
++import React from 'react';
++import { recordIncident } from '../services/debug/incidents';
++import { isDynamicImportFailure } from '../utils/chunkLoadFailure';
++
++// src/components/AppErrorBoundary.tsx
++// 根组件树的最后一道网。
++//
++// 为什么需要它：这个应用之前**一个错误边界都没有**，于是任何一个 render / effect 里的异常都会让
++// React 把整棵树卸载 —— 屏幕上只剩 `body` 的 #09090b。实机上抓到的那次就是这么黑的：
++// `TypeError: Failed to fetch dynamically imported module: …/BravaisCollection-Cys-1Rmu.js`。
++//
++// 分两条路处理，因为这两种失败的正确应对不一样：
++//
++// 1. **懒加载 chunk 拿不到**：chunk 名是内容哈希，APK 一更新旧名字就没了（典型原因是旧的
++//    service worker 还在用缓存里的旧 index.html 指向旧 chunk）。正确的处理是重载一次去拿新的，
++//    所以这里自动重载，并用 sessionStorage 保证一次会话只重载一次——重载成环比黑屏更糟。
++// 2. **其它异常**：渲染一张能读的说明 + 重载按钮，先让人能出来，再去修。
++//
++// 两条路都会写进事故日志（services/debug/incidents.ts），黑屏之后还能读到发生了什么。
++
++/** 一次会话里自动重载的时间窗；窗口内第二次同类失败就不再重载，交给兜底界面。 */
++const AUTO_RELOAD_WINDOW_MS = 60_000;
++const AUTO_RELOAD_KEY = 'folia_chunk_reload_at';
++
++type AppErrorBoundaryProps = {
++    children: React.ReactNode;
++    /** 显示在兜底界面上的名字，用来区分主界面 / 远程控制 / OBS 源。 */
++    surface?: string;
++};
++
++type AppErrorBoundaryState = {
++    error: Error | null;
++};
++
++class AppErrorBoundary extends React.Component<AppErrorBoundaryProps, AppErrorBoundaryState> {
++    state: AppErrorBoundaryState = { error: null };
++
++    static getDerivedStateFromError(error: Error): AppErrorBoundaryState {
++        return { error };
++    }
++
++    componentDidCatch(error: Error) {
++        recordIncident('error', `${error.name}: ${error.message}`);
++        if (!isDynamicImportFailure(error.message)) {
++            return;
++        }
++        try {
++            const last = Number(window.sessionStorage.getItem(AUTO_RELOAD_KEY) ?? 0);
++            if (Number.isFinite(last) && Date.now() - last < AUTO_RELOAD_WINDOW_MS) {
++                return;
++            }
++            window.sessionStorage.setItem(AUTO_RELOAD_KEY, String(Date.now()));
++        } catch {
++            // 隐私模式拿不到 sessionStorage：宁可让用户手动点，也不要冒重载成环的风险。
++            return;
++        }
++        window.location.reload();
++    }
++
++    private handleReload = () => {
++        window.location.reload();
++    };
++
++    render() {
++        const { error } = this.state;
++        if (!error) {
++            return this.props.children;
++        }
++
++        const surface = this.props.surface ? `（${this.props.surface}）` : '';
++        const chunk = isDynamicImportFailure(error.message);
++
++        return (
++            <div
++                style={{
++                    position: 'fixed',
++                    inset: 0,
++                    zIndex: 2147483600,
++                    display: 'flex',
++                    flexDirection: 'column',
++                    gap: 12,
++                    padding: 20,
++                    boxSizing: 'border-box',
++                    background: 'rgba(9,9,11,0.97)',
++                    color: '#e4e4e7',
++                    font: '500 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace',
++                }}
++            >
++                <div style={{ fontSize: 15, fontWeight: 700, color: '#fca5a5' }}>
++                    界面渲染出错{surface}
++                </div>
++                <div style={{ opacity: 0.62 }}>
++                    {chunk
++                        ? '有一块页面代码没加载上（通常是应用刚更新过）。重新加载一般就好。'
++                        : '这一处出错之后 React 会卸载整棵树，所以先把界面停在这里，而不是留下一片黑屏。'}
++                </div>
++                <div
++                    style={{
++                        padding: '8px 10px',
++                        borderRadius: 8,
++                        background: 'rgba(148,163,184,0.12)',
++                        wordBreak: 'break-word',
++                    }}
++                >
++                    {error.name}: {error.message}
++                </div>
++                <div style={{ display: 'flex', gap: 10 }}>
++                    <button
++                        type="button"
++                        onClick={this.handleReload}
++                        style={{
++                            flex: '1 1 auto',
++                            padding: '10px 14px',
++                            borderRadius: 10,
++                            border: '1px solid rgba(147,197,253,0.5)',
++                            background: 'rgba(59,130,246,0.25)',
++                            color: '#dbeafe',
++                            font: 'inherit',
++                            fontWeight: 700,
++                            cursor: 'pointer',
++                        }}
++                    >
++                        重新加载
++                    </button>
++                </div>
++            </div>
++        );
++    }
++}
++
++export default AppErrorBoundary;
+diff --git a/src/index.tsx b/src/index.tsx
+index e1ec34e..d793075 100644
+--- a/src/index.tsx
++++ b/src/index.tsx
+@@ -28,4 +28,38 @@ if (isAndroidShell()) {
+ }
+ installGlobalVisualizerFrameRateLimiter();
+ 
++// ---- service worker 策略 -------------------------------------------------------------
++// 手机壳里**不注册** service worker，并且把以前注册过的那份清掉。
++//
++// 这不是省事：壳的离线本来就是结构性的（产物在 APK 里），SW 在这里没有一件事可做，却能出错。
++// 实机上抓到的那次黑屏就是它造成的：旧版本的 SW 把旧的 index.html 留在 precache 里，装上
++// 新版本之后那份旧 HTML 仍然引用旧哈希的 chunk（`BravaisCollection-Cys-1Rmu.js`），而那个
++// 文件在新 APK 里已经不存在了 —— 懒加载 404 → 未捕获异常 → React 卸载整棵树 → 黑屏。
++// 网页形态下同一份旧 HTML 没事（旧文件还在服务器上），所以这个坑只在壳里致命。
++const retireBundledServiceWorker = () => {
++    try {
++        if ('serviceWorker' in navigator) {
++            void navigator.serviceWorker.getRegistrations()
++                .then(registrations => Promise.all(registrations.map(registration => registration.unregister())))
++                .catch(() => { /* 拿不到注册列表就算了，不影响启动 */ });
++        }
++        if (typeof caches !== 'undefined') {
++            // 只删 workbox 自己的缓存：别的 Cache Storage 归属别的功能，不该跟着一起没。
++            void caches.keys()
++                .then(keys => Promise.all(keys.filter(key => key.startsWith('workbox-')).map(key => caches.delete(key))))
++                .catch(() => { /* 同上 */ });
++        }
++    } catch {
++        // 隐私模式等：没有 SW 就没有这个问题。
++    }
++};
++
++if (isAndroidShell()) {
++    retireBundledServiceWorker();
++} else if ('serviceWorker' in navigator) {
++    void import('virtual:pwa-register')
++        .then(({ registerSW }) => registerSW({ immediate: true }))
++        .catch(() => { /* 注册失败只是没有离线缓存，不该影响启动 */ });
++}
++
+ void import('./bootstrap');
+diff --git a/src/services/debug/installIncidentRecorders.ts b/src/services/debug/installIncidentRecorders.ts
+index 52c8ff1..4afc09a 100644
+--- a/src/services/debug/installIncidentRecorders.ts
++++ b/src/services/debug/installIncidentRecorders.ts
+@@ -63,7 +63,11 @@ export const installIncidentRecorders = (): void => {
+             return;
+         }
+         if (target instanceof HTMLLinkElement) {
+-            recordIncident('error', `stylesheet failed to load: ${target.href}`);
++            // 不写死 "stylesheet"：动态 import 的 chunk 在 Chromium 上是经
++            // `<link rel="modulepreload">` 预载的，失败时 target 是 link 而不是 script。
++            // 实测那条黑屏事故就是这么被记成 "stylesheet failed to load" 的，反而遮住了真相。
++            const rel = target.rel ? `${target.rel} ` : '';
++            recordIncident('error', `${rel}failed to load: ${target.href}`);
+             return;
+         }
+         if (errorEvent.message) {
+diff --git a/src/utils/chunkLoadFailure.ts b/src/utils/chunkLoadFailure.ts
+new file mode 100644
+index 0000000..d36b9c2
+--- /dev/null
++++ b/src/utils/chunkLoadFailure.ts
+@@ -0,0 +1,21 @@
++// src/utils/chunkLoadFailure.ts
++// 「懒加载的那一块代码没拿到」长什么样。
++//
++// 它值得一个单独的判断，因为这种失败和普通异常不是一回事：chunk 的名字是内容哈希，包一更新旧的
++// 名字就不存在了，所以唯一的正确处理是重载页面去拿新的那份，而不是把它当成一个渲染 bug 展示给
++// 用户。措辞按引擎区分——Chromium 与 WebKit 各说各的，没有一个公共的说法。
++
++const CHUNK_FAILURE_PATTERNS: readonly RegExp[] = [
++    // Chromium / WebKit
++    /failed to fetch dynamically imported module/i,
++    // Firefox 与 Safari 的旧措辞
++    /error loading dynamically imported module/i,
++    /importing a module script failed/i,
++    // 有的引擎把 404 直接报成「模块脚本 MIME 不对」
++    /expected a javascript(?:orwasm)? module script/i,
++];
++
++export const isDynamicImportFailure = (message: string | null | undefined): boolean => {
++    if (!message) return false;
++    return CHUNK_FAILURE_PATTERNS.some(pattern => pattern.test(message));
++};
+diff --git a/src/vite-env.d.ts b/src/vite-env.d.ts
+index 18e45b2..ce6f4e2 100644
+--- a/src/vite-env.d.ts
++++ b/src/vite-env.d.ts
+@@ -1,4 +1,7 @@
+ /// <reference types="vite/client" />
++// `virtual:pwa-register` 的类型：service worker 的注册从自动注入改成 src/index.tsx 自己决定
++// （手机壳里不注册），所以这个模块名现在出现在源码里。
++/// <reference types="vite-plugin-pwa/client" />
+ 
+ import type { ModClearCacheResult, ModExportProgress, ModFfmpegStatus, ModLogEntry, ModRuntimeInfo, ModRuntimeSnapshot, ModStorageUsageResult } from './mods/types';
+ 
+diff --git a/test/unit/utils/chunkLoadFailure.test.ts b/test/unit/utils/chunkLoadFailure.test.ts
+new file mode 100644
+index 0000000..72c0b52
+--- /dev/null
++++ b/test/unit/utils/chunkLoadFailure.test.ts
+@@ -0,0 +1,33 @@
++import { describe, expect, it } from 'vitest';
++import { isDynamicImportFailure } from '@/utils/chunkLoadFailure';
++
++// test/unit/utils/chunkLoadFailure.test.ts
++// 这条判断决定「自动重载一次」还是「显示兜底界面」，判错的代价不对称：
++// 把普通异常当成 chunk 失败会导致重载成环，把 chunk 失败当普通异常则要用户自己点。
++
++describe('isDynamicImportFailure', () => {
++    it('认得出 Chromium / WebKit 的措辞', () => {
++        expect(isDynamicImportFailure('Failed to fetch dynamically imported module: https://x/assets/a.js')).toBe(true);
++        expect(isDynamicImportFailure('Failed to fetch dynamically imported module')).toBe(true);
++    });
++
++    it('认得出 FireFox / 旧 Safari 的措辞', () => {
++        expect(isDynamicImportFailure('error loading dynamically imported module')).toBe(true);
++        expect(isDynamicImportFailure('Importing a module script failed.')).toBe(true);
++    });
++
++    it('MIME 报错也算：那通常就是 404 换了个说法', () => {
++        expect(isDynamicImportFailure('Expected a JavaScript module script but the server responded with a MIME type of "text/html"')).toBe(true);
++    });
++
++    it('普通异常不算', () => {
++        expect(isDynamicImportFailure('TypeError: Cannot read properties of undefined')).toBe(false);
++        expect(isDynamicImportFailure('NetworkError when attempting to fetch resource.')).toBe(false);
++    });
++
++    it('空值不算，且不抛', () => {
++        expect(isDynamicImportFailure(null)).toBe(false);
++        expect(isDynamicImportFailure(undefined)).toBe(false);
++        expect(isDynamicImportFailure('')).toBe(false);
++    });
++});
+diff --git a/vite.config.ts b/vite.config.ts
+index d788a42..b2ab79c 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -270,6 +270,9 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
+       react(),
+       VitePWA({
+         registerType: 'autoUpdate',
++        // 注册由 src/index.tsx 自己决定：手机壳里**不注册**（见那里的注释），浏览器里照旧。
++        // 自动注入会在每个形态里都注册，而壳里那份 precache 只会端出一份过期的 index.html。
++        injectRegister: false,
+         includeAssets: ['icon.svg'],
+         devOptions: {
+           enabled: true

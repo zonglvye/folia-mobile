@@ -1,4 +1,7 @@
 /// <reference types="vite/client" />
+// `virtual:pwa-register` 的类型：service worker 的注册从自动注入改成 src/index.tsx 自己决定
+// （手机壳里不注册），所以这个模块名现在出现在源码里。
+/// <reference types="vite-plugin-pwa/client" />
 
 import type { ModClearCacheResult, ModExportProgress, ModFfmpegStatus, ModLogEntry, ModRuntimeInfo, ModRuntimeSnapshot, ModStorageUsageResult } from './mods/types';
 

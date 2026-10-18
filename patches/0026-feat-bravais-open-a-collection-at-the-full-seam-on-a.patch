@@ -1,0 +1,160 @@
+From 2f06552746836ba490dca08b16f36272df454ab3 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sun, 18 Oct 2026 16:42:10 +0800
+Subject: [PATCH 26/27] feat(bravais): open a collection at the full seam on a
+ phone, not the spine
+
+Entering an artist page on the phone showed a 64px strip first: the name squeezed
+into one giant character, the counts and the actions stacked inside it, and only
+after expanding did the poster with its tilted wall appear. That intermediate is
+worth removing - the poster IS the page.
+
+The cause is `defaultSeamLevel`: a viewport under 900px defaults to the spine, and
+the phone's landscape viewport is 816. Narrow rules were written for the home seam,
+where the spine is the entry point rather than a squashed information strip, so the
+rule now applies to collections only where it makes sense:
+
+- on a narrow viewport a collection's spine resolves as the full seam (poster
+  included), so the poster with its -10 degree wall is what you land on;
+- on a wide viewport nothing changes - the spine is still a level you can pick;
+- folding still works: `hidden` is untouched, and home keeps its narrow spine.
+
+Done in `resolveSeamTarget` rather than in an effect on the level store, because a
+late promotion would animate 64px -> 520px and flash exactly the strip being
+removed. `promoteCollectionSpine` is a pure step, and the rules are pinned by
+test (narrow collection, narrow home, wide collection, hidden, poster, filter,
+panel).
+---
+ .../suites/bravais/bravaisSeamTarget.ts       | 20 ++++-
+ .../library/bravais/bravaisSeamTarget.test.ts | 84 +++++++++++++++++++
+ 2 files changed, 103 insertions(+), 1 deletion(-)
+ create mode 100644 test/unit/library/bravais/bravaisSeamTarget.test.ts
+
+diff --git a/src/library/suites/bravais/bravaisSeamTarget.ts b/src/library/suites/bravais/bravaisSeamTarget.ts
+index 995d0b1..dd92d0e 100644
+--- a/src/library/suites/bravais/bravaisSeamTarget.ts
++++ b/src/library/suites/bravais/bravaisSeamTarget.ts
+@@ -8,6 +8,7 @@ import type { BravaisLayer, BravaisLayerSurface } from './bravaisLayer';
+ import {
+     resolveSeamOpenWidth,
+     resolveSeamVariant,
++    isNarrowViewport,
+     seamVariantWidth,
+     type BravaisSeamLevel,
+     type BravaisSeamVariant,
+@@ -63,7 +64,24 @@ export const resolveEffectiveSeamLevel = ({ level, formOpen, panelOpen, filterOp
+     formOpen || filterOpen || (panelOpen && level !== 'hidden') ? 'full' : level
+ );
+ 
+-export const resolveSeamTarget = (input: BravaisSeamTargetInput): { width: number; variant: BravaisSeamContentVariant } => {
++/**
++ * 窄视口上，集合层的「书脊」按完整缝处理。
++ *
++ * 为什么：`defaultSeamLevel` 在窄屏（< 900px）把等级定成书脊，手机横屏 816px 正好落在那一档。
++ * 于是点进歌手页先看到的是一格 64px 的竖条 —— 名字被挤成一个巨大的单字、统计与操作全摞在一条缝里，
++ * 要再展开一次才看到海报。而海报（视口 46%、夹 520–680）就是这一页要看的东西。
++ *
++ * 所以窄视口上集合层不再有「书脊」这一级：要么完整（含海报），要么折叠成侧边悬浮按钮（hidden）。
++ * 首页的窄缝不动 —— 那里的书脊本来就是入口，不是被压扁的信息条。
++ */
++export const promoteCollectionSpine = (input: BravaisSeamTargetInput): BravaisSeamTargetInput => (
++    input.surface !== 'home' && input.level === 'spine' && isNarrowViewport(input.viewportWidth)
++        ? { ...input, level: 'full' }
++        : input
++);
++
++export const resolveSeamTarget = (rawInput: BravaisSeamTargetInput): { width: number; variant: BravaisSeamContentVariant } => {
++    const input = promoteCollectionSpine(rawInput);
+     // 整条缝翻成表单只在集合层与歌手页（B8）上有；首页的表单在目录树面板底部（B9），不占整条缝。
+     // 面板三层都有：集合 / 歌手是列表面板，首页是目录树（只在有批量的那几行，hasPanel 由 surface 给）。
+     if (input.surface !== 'home' && input.formOpen) return { width: BRAVAIS_SEAM_FULL_WIDTH, variant: 'form' };
+diff --git a/test/unit/library/bravais/bravaisSeamTarget.test.ts b/test/unit/library/bravais/bravaisSeamTarget.test.ts
+new file mode 100644
+index 0000000..4cf10f9
+--- /dev/null
++++ b/test/unit/library/bravais/bravaisSeamTarget.test.ts
+@@ -0,0 +1,84 @@
++import { describe, expect, it } from 'vitest';
++import {
++    BRAVAIS_PANEL_MAX_WIDTH,
++    promoteCollectionSpine,
++    resolvePanelWidth,
++    resolvePosterWidth,
++    resolveSeamTarget,
++} from '@/library/suites/bravais/bravaisSeamTarget';
++import {
++    BRAVAIS_SEAM_SPINE_WIDTH,
++    BRAVAIS_SEAM_FULL_WIDTH,
++} from '@/library/suites/bravais/bravaisConstants';
++
++// test/unit/library/bravais/bravaisSeamTarget.test.ts
++// 缝该开多宽：开口等级之上还叠着表单、面板、过滤、海报，以及「窄视口上集合层不留书脊」这条规则。
++//
++// 那条规则是 2026-10 用户报的：手机横屏 816px 落在窄屏档里，点进歌手页先看到一格 64px 的竖条
++// （名字被挤成一个巨大的单字），要再展开一次才是海报。这里把它钉住：窄视口上集合层要么完整，要么折叠。
++
++const PHONE_LANDSCAPE = 816;
++const DESKTOP = 1440;
++
++describe('seam target', () => {
++    it('窄视口上集合层的书脊按完整缝处理', () => {
++        const target = resolveSeamTarget({ surface: 'collection', level: 'spine', viewportWidth: PHONE_LANDSCAPE });
++        expect(target.width).toBe(BRAVAIS_SEAM_FULL_WIDTH);
++        expect(target.variant).toBe('full');
++    });
++
++    it('首页的窄缝不受影响：那里的书脊本来就是入口', () => {
++        const target = resolveSeamTarget({ surface: 'home', level: 'spine', viewportWidth: PHONE_LANDSCAPE });
++        expect(target.width).toBe(BRAVAIS_SEAM_SPINE_WIDTH);
++    });
++
++    it('宽视口上集合层仍可以收成书脊', () => {
++        const target = resolveSeamTarget({ surface: 'collection', level: 'spine', viewportWidth: DESKTOP });
++        expect(target.width).toBe(BRAVAIS_SEAM_SPINE_WIDTH);
++        expect(target.variant).toBe('spine');
++    });
++
++    it('折叠（hidden）不被这条规则展开', () => {
++        const input = { surface: 'collection', level: 'hidden', viewportWidth: PHONE_LANDSCAPE } as const;
++        expect(promoteCollectionSpine({ ...input })).toMatchObject({ level: 'hidden' });
++        expect(resolveSeamTarget({ ...input }).width).toBe(0);
++    });
++
++    it('窄视口 + 完整等级 + 可画海报：直接是歌手海报的宽度（这就是「点进去看到的那一版」）', () => {
++        const target = resolveSeamTarget({
++            surface: 'artist',
++            level: 'spine',
++            viewportWidth: PHONE_LANDSCAPE,
++            poster: true,
++        });
++        expect(target.variant).toBe('poster');
++        expect(target.width).toBe(resolvePosterWidth(PHONE_LANDSCAPE));
++        // 46% 的视口夹在 520–680 之间；816 上落在下界，也就是视口的 64%。
++        expect(target.width).toBe(520);
++    });
++
++    it('过滤框开着时不画海报：临时展开回普通完整缝', () => {
++        const target = resolveSeamTarget({
++            surface: 'artist',
++            level: 'full',
++            viewportWidth: PHONE_LANDSCAPE,
++            poster: true,
++            filterOpen: true,
++        });
++        expect(target.variant).toBe('full');
++        expect(target.width).toBe(BRAVAIS_SEAM_FULL_WIDTH);
++    });
++
++    it('列表面板仍有自己的开口宽度', () => {
++        const target = resolveSeamTarget({
++            surface: 'collection',
++            level: 'spine',
++            viewportWidth: PHONE_LANDSCAPE,
++            panelOpen: true,
++            poster: true,
++        });
++        expect(target.variant).toBe('panel');
++        expect(target.width).toBe(resolvePanelWidth(PHONE_LANDSCAPE));
++        expect(target.width).toBeLessThanOrEqual(BRAVAIS_PANEL_MAX_WIDTH);
++    });
++});

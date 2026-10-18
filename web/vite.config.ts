@@ -270,6 +270,9 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
       react(),
       VitePWA({
         registerType: 'autoUpdate',
+        // 注册由 src/index.tsx 自己决定：手机壳里**不注册**（见那里的注释），浏览器里照旧。
+        // 自动注入会在每个形态里都注册，而壳里那份 precache 只会端出一份过期的 index.html。
+        injectRegister: false,
         includeAssets: ['icon.svg'],
         devOptions: {
           enabled: true

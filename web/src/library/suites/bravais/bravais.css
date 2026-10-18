@@ -395,7 +395,8 @@
  * 反而成了缝里最显眼的东西——它们没有任何说明，看起来就像两个多余的标点。
  * 这一档整体换一种排法：标题改成横排单行、放不下就省略号；引号收掉。与完整信息条的其它行同一条基线，
  * 标题区仍然占满剩余高度，所以下面的动作行位置不变。
- * 只作用于标题区域里的标题，书脊那颗按钮（.bravais-seam-vtitle.is-button）仍是竖排。 */
+ * 只作用于标题区域里的标题，书脊那颗按钮（.bravais-seam-vtitle.is-button）仍是竖排。
+ * 断点与 bravaisConstants.ts 的 BRAVAIS_SHORT_VIEWPORT_PX（列表面板在矮视口上的紧排版也用它）是同一档。 */
 @media (max-height: 480px) {
     .bravais-seam .bravais-seam-quote { display: none; }
     .bravais-seam .bravais-seam-title-area { justify-content: flex-start; }

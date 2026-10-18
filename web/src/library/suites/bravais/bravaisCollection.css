@@ -1,6 +1,7 @@
 /* src/library/suites/bravais/bravaisCollection.css — B7 集合页的样式：缝里的过滤输入位（每面墙都用它）、收藏星标、
    补页进度、日期步进、状态行（加载 / 错误 / 空 / 过滤无结果各有图标）、「⋯ 更多」、结果提示、表单态、列表面板与列表行、
-   聚焦卡的「⋯」、列表联动高亮（is-linked）与首屏加载的呼吸。单独成文件，不改 bravais.css 的已有块。
+   聚焦卡的「⋯」、列表联动高亮（is-linked）与首屏加载的呼吸，以及矮视口（手机横屏）上列表面板的紧排版。
+   单独成文件，不改 bravais.css 的已有块。
    视觉沿用 Lattice：主题变量、bravais-chrome-button 的悬停框、日光切换（.is-daylight）。 */
 
 /* ---------- 过滤输入位（当前页过滤，设计稿 §7.6）：缝自己的样式——缝的字体与墨色、一道下划线（聚焦时换强调色），
@@ -308,6 +309,16 @@
 /* 只有列表伸缩，其余各行保持自己的高度（不然标题会被挤扁）。 */
 .bravais-seam-panel > * { flex: none; }
 
+/* 面板头部：面包屑行、过滤位、标题、元数据、排序。宽屏上竖着排、间距 10px，与并入这一层之前完全一样。
+   矮视口上（文件末尾那条 @media）横排成两行——这是「列表能多露几首歌」的关键：这几行原本固定占掉缝高的
+   一半以上，而手机横屏上缝只有约 260px 高（377 减去底部播放条安全区）。 */
+.bravais-panel-head {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 10px;
+}
+
 .bravais-panel-title {
     margin: 0;
     overflow: hidden;
@@ -357,6 +368,68 @@
 .bravais-list-text strong { font-size: 13px; font-weight: 700; }
 .bravais-list-text small { color: var(--bravais-seam-ink-soft); font-size: 11px; }
 .bravais-list-time { color: var(--bravais-seam-ink-soft); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 矮视口（手机横屏）的列表面板 ---------- */
+
+/* 缝高 480px 以下，面板换一套排法（2026-10 用户实测：「列表太窄，只露两首歌」）。
+   量出来的账：视口 377px 减去底部播放条安全区约 116px，面板只有约 260px 高。原来头部四块竖着排（面包屑、
+   过滤位、标题、元数据）固定占掉约 150px，动作行再占 36px 与间距，列表只剩 30–80px —— 一到两行。
+   现在头部并成两行（‹ + 标题 + 元数据 / 过滤位）、行压成单行 30px、动作行收到 28px：列表拿到约 160px，五行。
+   这一档把面包屑的层路径收起：标题就在同一行上，「书库 / 歌手名 / 列表」是重复的信息，‹ 仍然退回上一层。
+   断点与 bravaisConstants.ts 的 BRAVAIS_SHORT_VIEWPORT_PX、以及 bravais.css 里竖排标题那条是同一档，改一处要同步。 */
+@media (max-height: 480px) {
+    .bravais-seam-panel { gap: 4px; padding: 6px 16px 0; }
+
+    .bravais-panel-head {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 8px;
+    }
+
+    .bravais-panel-head > .bravais-seam-crumbs { min-height: 0; gap: 4px; }
+    .bravais-panel-head .bravais-seam-crumb-trail { display: none; }
+    .bravais-panel-head .bravais-seam-back { width: 28px; height: 28px; }
+    .bravais-panel-head .bravais-seam-level { padding: 2px 8px; }
+
+    /* 过滤位排到头部最后一行（它本来就一直占据一个输入位）。不这么排的话，它按 DOM 顺序夹在面包屑与标题之间、
+       又占满一整行，会把标题与元数据顶到第三行 —— 头部三行是「只露两首歌」的一半原因。 */
+    .bravais-panel-head > .bravais-seam-filter-field { order: 1; height: 28px; flex: 1 0 100%; }
+    .bravais-panel-head .bravais-seam-filter-line { height: 26px; }
+
+    /* 标题吃剩下的宽度，元数据靠右、放不下先截断。只在这一档的横排头部里生效：目录树面板
+       （BravaisDirectoryPanel）没有这一层，它仍是竖排，flex 的基准方向不一样。 */
+    .bravais-panel-head .bravais-panel-title { min-width: 0; flex: 1 1 6em; font-size: 16px; line-height: 1.25; }
+    .bravais-panel-head .bravais-seam-meta {
+        flex: 0 1 auto;
+        overflow: hidden;
+        font-size: 11px;
+        line-height: 1.3;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .bravais-panel-head .bravais-panel-tools { flex: none; gap: 4px; }
+    .bravais-panel-head .bravais-panel-tools select { max-width: 8.5em; flex: none; padding: 3px 6px; font-size: 11px; }
+    .bravais-panel-head .bravais-panel-tools .bravais-seam-icon { width: 28px; height: 28px; border-radius: 9px; }
+
+    /* 行：这一档把两行文字并成一行（编号 · 曲名 · 副标题 · 时长），行高换到 BRAVAIS_LIST_ROW_HEIGHT_SHORT
+       （30px，react-window 的 props，CSS 够不着行高本身）。面板有 520px 宽，单行排得下，行数从三行变成五行。 */
+    .bravais-list-row { gap: 8px; padding: 0 8px; border-radius: 8px; }
+    .bravais-list-text { flex-direction: row; align-items: baseline; gap: 6px; }
+    /* 曲名先按内容占位，副标题拿剩下的宽度并在自己的盒子里省略。 */
+    .bravais-list-text strong { min-width: 0; flex: 0 1 auto; }
+    .bravais-list-text small { min-width: 0; flex: 1 1 auto; }
+
+    .bravais-seam-panel > .bravais-seam-actions { gap: 4px; }
+    .bravais-seam-panel > .bravais-seam-actions .bravais-chrome-button {
+        height: 28px;
+        min-height: 28px;
+        padding: 0 10px;
+        font-size: 11px;
+    }
+    .bravais-seam-panel > .bravais-seam-actions .bravais-chrome-button svg { width: 13px; height: 13px; }
+}
 
 /* ---------- 聚焦卡的「⋯」 ---------- */
 

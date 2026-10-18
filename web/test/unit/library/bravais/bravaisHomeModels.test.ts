@@ -368,7 +368,7 @@ describe('home seam target', () => {
         expect(resolveSeamTarget({ ...base, searchOpen: true })).toEqual({ width: 300, variant: 'search' });
         expect(resolveSeamTarget({ ...base, level: 'spine', searchOpen: true })).toEqual({ width: 300, variant: 'search' });
         expect(resolveSeamTarget({ ...base, level: 'hidden', searchOpen: true })).toEqual({ width: 0, variant: 'none' });
-        expect(resolveSeamTarget({ ...base, panelOpen: true, searchOpen: true })).toEqual({ width: 420, variant: 'panel' });
+        expect(resolveSeamTarget({ ...base, panelOpen: true, searchOpen: true })).toEqual({ width: 520, variant: 'panel' });
         expect(resolveSeamTarget({ ...base, surface: 'collection', searchOpen: true })).toEqual({ width: 300, variant: 'full' });
     });
 

@@ -8,6 +8,7 @@ import type { BravaisLayer, BravaisLayerSurface } from './bravaisLayer';
 import {
     resolveSeamOpenWidth,
     resolveSeamVariant,
+    isNarrowViewport,
     seamVariantWidth,
     type BravaisSeamLevel,
     type BravaisSeamVariant,
@@ -16,14 +17,20 @@ import {
 // src/library/suites/bravais/bravaisSeamTarget.ts
 // 缝此刻该开多宽、渲染哪一套内容（B7 在三级开口之上加的三种情形，纯规则）：
 // - 表单态（改名、删除确认、加入歌单选择）：缝原地翻成表单，宽度按完整信息条；
-// - 列表面板（导航状态）：缝加宽到 min(420, 视口 − 52)，标题横排压在顶部（设计稿 §5「面板」）；
+// - 列表面板（导航状态）：缝加宽到 min(520, 视口 − 52)，标题横排压在顶部（设计稿 §5「面板」）；
 // - 正在输入过滤词：书脊 / 折叠的缝临时展开为完整信息条（首页是窄缝），结束输入后回到原等级（设计稿 §7.6）。
 // 优先级：表单 > 面板（折叠时除外）> 过滤的临时展开 > 用户选的等级。用户的等级不被改写，只是暂时不生效。
 // B9 首页：目录树面板与列表面板同一种开口（panel）；全局搜索框开着时首页窄缝临时展开成完整宽度（search，
 // 折叠时除外——搜索态没有书脊这一级，只能折叠）。首页的表单态在面板里（底部翻牌），不占整条缝。
 
-/** 列表面板的开口：min(420, 视口 − 52)。 */
-export const BRAVAIS_PANEL_MAX_WIDTH = 420;
+/**
+ * 列表面板的开口：min(520, 视口 − 52)。
+ *
+ * 上限取 520，与海报的下界（BRAVAIS_SEAM_POSTER_MIN_WIDTH）相同。这是 2026-10 用户的实测反馈：手机横屏（816px）
+ * 上海报是 520、面板原来封顶 420，于是从歌手海报点「列表」时缝要缩一截，列表反而比海报窄。两边对齐之后，
+ * 手机上点开列表与点开海报是同一种开口；更宽的视口上面板不再比海报更宽，仍旧是一块纸片。
+ */
+export const BRAVAIS_PANEL_MAX_WIDTH = 520;
 export const BRAVAIS_PANEL_VIEWPORT_MARGIN = 52;
 /** 极窄的视口里也留一列能读的宽度。 */
 const BRAVAIS_PANEL_MIN_WIDTH = 160;
@@ -63,7 +70,24 @@ export const resolveEffectiveSeamLevel = ({ level, formOpen, panelOpen, filterOp
     formOpen || filterOpen || (panelOpen && level !== 'hidden') ? 'full' : level
 );
 
-export const resolveSeamTarget = (input: BravaisSeamTargetInput): { width: number; variant: BravaisSeamContentVariant } => {
+/**
+ * 窄视口上，集合层的「书脊」按完整缝处理。
+ *
+ * 为什么：`defaultSeamLevel` 在窄屏（< 900px）把等级定成书脊，手机横屏 816px 正好落在那一档。
+ * 于是点进歌手页先看到的是一格 64px 的竖条 —— 名字被挤成一个巨大的单字、统计与操作全摞在一条缝里，
+ * 要再展开一次才看到海报。而海报（视口 46%、夹 520–680）就是这一页要看的东西。
+ *
+ * 所以窄视口上集合层不再有「书脊」这一级：要么完整（含海报），要么折叠成侧边悬浮按钮（hidden）。
+ * 首页的窄缝不动 —— 那里的书脊本来就是入口，不是被压扁的信息条。
+ */
+export const promoteCollectionSpine = (input: BravaisSeamTargetInput): BravaisSeamTargetInput => (
+    input.surface !== 'home' && input.level === 'spine' && isNarrowViewport(input.viewportWidth)
+        ? { ...input, level: 'full' }
+        : input
+);
+
+export const resolveSeamTarget = (rawInput: BravaisSeamTargetInput): { width: number; variant: BravaisSeamContentVariant } => {
+    const input = promoteCollectionSpine(rawInput);
     // 整条缝翻成表单只在集合层与歌手页（B8）上有；首页的表单在目录树面板底部（B9），不占整条缝。
     // 面板三层都有：集合 / 歌手是列表面板，首页是目录树（只在有批量的那几行，hasPanel 由 surface 给）。
     if (input.surface !== 'home' && input.formOpen) return { width: BRAVAIS_SEAM_FULL_WIDTH, variant: 'form' };

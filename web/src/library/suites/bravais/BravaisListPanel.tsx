@@ -7,15 +7,22 @@ import { BravaisSeamStatusLine } from './BravaisSeamCollection';
 import BravaisSeamFilterField from './BravaisSeamFilterField';
 import { setBravaisLinkedKey, useBravaisUiStore } from './bravaisUiStore';
 import BravaisSeamCrumbs from './BravaisSeamCrumbs';
+import { BRAVAIS_SHORT_VIEWPORT_QUERY } from './bravaisConstants';
+import { useMediaQuery } from '../../../hooks/useMediaQuery';
 
 // src/library/suites/bravais/BravaisListPanel.tsx
-// 列表面板（设计稿 §5「面板」「歌曲列表」）：缝加宽到 min(420, 视口 − 52)，标题横排压在顶部，下面是工具行（本地文件夹的
+// 列表面板（设计稿 §5「面板」「歌曲列表」）：缝加宽到 min(520, 视口 − 52)，标题横排压在顶部，下面是工具行（本地文件夹的
 // 排序）、可滚动列表（react-window 虚拟化）和底部的播放 / 入队。列表顺序 = 层的条目顺序，过滤时只列匹配项。
 // 列表 ↔ 墙双向联动：悬停一行，墙上这一项的所有可见副本高亮（is-linked）；单击一行，相机飞到离缝最近的那一份并聚焦它
 // （歌曲直接展开聚焦卡）；双击播放；悬停墙上的磁贴，这一行高亮并滚到可见。面板是导航状态：返回（‹、Esc、浏览器后退）
 // 先关它；面包屑多一级「列表」。
+// 头部（面包屑、过滤位、标题、元数据、排序）包在 .bravais-panel-head 里：宽屏上竖着排，矮视口（手机横屏）上由
+// bravaisCollection.css 横排成两行 —— 这几行原本固定占掉缝高的大半，不并起来列表只能露两行。行高也跟着矮一档，
+// 所以这里按同一个断点选 BRAVAIS_LIST_ROW_HEIGHT_SHORT（react-window 的行高是 props，CSS 够不着）。
 
 export const BRAVAIS_LIST_ROW_HEIGHT = 44;
+/** 矮视口上的行高：标题与副标题并成一行排（与 bravaisCollection.css 同一档），30px 装得下。 */
+export const BRAVAIS_LIST_ROW_HEIGHT_SHORT = 30;
 
 export type BravaisPanelActions = {
     close: () => void;
@@ -93,44 +100,48 @@ const BravaisListPanel: React.FC<{ layer: BravaisLayer; depth: number; actions: 
         actions,
     }), [actions, highlightKey, items, layer.nowPlayingKey]);
     const sort = entries?.sort;
+    const rowHeight = useMediaQuery(BRAVAIS_SHORT_VIEWPORT_QUERY) ? BRAVAIS_LIST_ROW_HEIGHT_SHORT : BRAVAIS_LIST_ROW_HEIGHT;
 
     return (
         <div className="bravais-seam-panel" data-bravais-list={layer.key}>
-            <div className="bravais-seam-crumbs">
-                <button type="button" className="bravais-seam-back" data-bravais-seam-action="close-list" onClick={actions.close}
-                    aria-label={t('libraryBravais.seamBack')} title={t('libraryBravais.seamBack')}>
-                    <ChevronLeft aria-hidden />
-                </button>
-                <BravaisSeamCrumbs layer={layer} panelLabel={entries?.listCrumb ?? ''} onClosePanel={actions.close} />
-                <button type="button" className="bravais-seam-level" data-bravais-seam-action="hide" onClick={actions.fold}>
-                    {t('libraryBravais.seamFold')}
-                </button>
-            </div>
-            {layer.seam.filter && <BravaisSeamFilterField filter={layer.seam.filter} variant="panel" />}
-            <h2 className="bravais-panel-title" data-bravais-seam-title>{seam.title}</h2>
-            <div className="bravais-seam-meta">{seam.meta}</div>
-            {sort && (
-                <div className="bravais-panel-tools" data-bravais-list-sort>
-                    <select
-                        value={sort.field}
-                        aria-label={entries?.panelTitle}
-                        data-bravais-list-sort-field
-                        onChange={event => sort.setField(event.target.value)}
-                    >
-                        {sort.fields.map(field => <option key={field.value} value={field.value}>{field.label}</option>)}
-                    </select>
-                    <button type="button" className="bravais-seam-icon" data-bravais-list-sort-direction={sort.direction}
-                        onClick={sort.toggleDirection} aria-label={sort.directionLabel} title={sort.directionLabel}>
-                        {sort.direction === 'asc' ? <ArrowUpNarrowWide aria-hidden /> : <ArrowDownWideNarrow aria-hidden />}
+            {/* 头部：矮视口上横排成两行（bravaisCollection.css），所以这几块包在一起。 */}
+            <div className="bravais-panel-head">
+                <div className="bravais-seam-crumbs">
+                    <button type="button" className="bravais-seam-back" data-bravais-seam-action="close-list" onClick={actions.close}
+                        aria-label={t('libraryBravais.seamBack')} title={t('libraryBravais.seamBack')}>
+                        <ChevronLeft aria-hidden />
+                    </button>
+                    <BravaisSeamCrumbs layer={layer} panelLabel={entries?.listCrumb ?? ''} onClosePanel={actions.close} />
+                    <button type="button" className="bravais-seam-level" data-bravais-seam-action="hide" onClick={actions.fold}>
+                        {t('libraryBravais.seamFold')}
                     </button>
                 </div>
-            )}
+                {layer.seam.filter && <BravaisSeamFilterField filter={layer.seam.filter} variant="panel" />}
+                <h2 className="bravais-panel-title" data-bravais-seam-title>{seam.title}</h2>
+                <div className="bravais-seam-meta">{seam.meta}</div>
+                {sort && (
+                    <div className="bravais-panel-tools" data-bravais-list-sort>
+                        <select
+                            value={sort.field}
+                            aria-label={entries?.panelTitle}
+                            data-bravais-list-sort-field
+                            onChange={event => sort.setField(event.target.value)}
+                        >
+                            {sort.fields.map(field => <option key={field.value} value={field.value}>{field.label}</option>)}
+                        </select>
+                        <button type="button" className="bravais-seam-icon" data-bravais-list-sort-direction={sort.direction}
+                            onClick={sort.toggleDirection} aria-label={sort.directionLabel} title={sort.directionLabel}>
+                            {sort.direction === 'asc' ? <ArrowUpNarrowWide aria-hidden /> : <ArrowDownWideNarrow aria-hidden />}
+                        </button>
+                    </div>
+                )}
+            </div>
             <div className="bravais-panel-list" role="listbox" aria-label={entries?.panelTitle}>
                 {items.length > 0 ? (
                     <List
                         listRef={listRef}
                         rowCount={items.length}
-                        rowHeight={BRAVAIS_LIST_ROW_HEIGHT}
+                        rowHeight={rowHeight}
                         rowComponent={ListRow}
                         rowProps={rowProps}
                         overscanCount={6}

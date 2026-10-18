@@ -63,7 +63,11 @@ export const installIncidentRecorders = (): void => {
             return;
         }
         if (target instanceof HTMLLinkElement) {
-            recordIncident('error', `stylesheet failed to load: ${target.href}`);
+            // 不写死 "stylesheet"：动态 import 的 chunk 在 Chromium 上是经
+            // `<link rel="modulepreload">` 预载的，失败时 target 是 link 而不是 script。
+            // 实测那条黑屏事故就是这么被记成 "stylesheet failed to load" 的，反而遮住了真相。
+            const rel = target.rel ? `${target.rel} ` : '';
+            recordIncident('error', `${rel}failed to load: ${target.href}`);
             return;
         }
         if (errorEvent.message) {

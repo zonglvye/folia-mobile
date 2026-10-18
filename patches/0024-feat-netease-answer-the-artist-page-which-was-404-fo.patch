@@ -1,7 +1,7 @@
 From 758f6e0faa3b23b14bc7227ae2a3a8d3740808f4 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sun, 18 Oct 2026 14:47:24 +0800
-Subject: [PATCH 24/24] feat(netease): answer the artist page, which was 404
+Subject: [PATCH 24/27] feat(netease): answer the artist page, which was 404
  for its whole lifetime
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

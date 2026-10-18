@@ -258,17 +258,17 @@ describe('status projection', () => {
 });
 
 describe('seam target', () => {
-    it('opens a form at full width, a panel at min(420, viewport − 52), and holds full while filtering', () => {
+    it('opens a form at full width, a panel at min(520, viewport − 52), and holds full while filtering', () => {
         const base = { surface: 'collection' as const, level: 'spine' as const, viewportWidth: 1440 };
         expect(resolveSeamTarget({ ...base, formOpen: true, panelOpen: true })).toEqual({ width: 300, variant: 'form' });
-        expect(resolveSeamTarget({ ...base, panelOpen: true })).toEqual({ width: 420, variant: 'panel' });
+        expect(resolveSeamTarget({ ...base, panelOpen: true })).toEqual({ width: 520, variant: 'panel' });
         expect(resolveSeamTarget({ ...base, viewportWidth: 400, panelOpen: true })).toEqual({ width: 348, variant: 'panel' });
         expect(resolveSeamTarget({ ...base, level: 'hidden', panelOpen: true })).toEqual({ width: 0, variant: 'none' });
         expect(resolveSeamTarget({ ...base, filterOpen: true })).toEqual({ width: 300, variant: 'full' });
         expect(resolveSeamTarget({ ...base, level: 'hidden', filterOpen: true })).toEqual({ width: 300, variant: 'full' });
         expect(resolveSeamTarget(base)).toEqual({ width: 64, variant: 'spine' });
         // B9：首页的目录树面板与列表面板同一种开口。
-        expect(resolveSeamTarget({ ...base, surface: 'home', panelOpen: true, level: 'full' })).toEqual({ width: 420, variant: 'panel' });
+        expect(resolveSeamTarget({ ...base, surface: 'home', panelOpen: true, level: 'full' })).toEqual({ width: 520, variant: 'panel' });
         expect(resolvePanelWidth(120)).toBe(160);
     });
 });

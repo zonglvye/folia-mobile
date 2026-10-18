@@ -4,6 +4,7 @@ import './i18n/config';
 import './index.css';
 import App from './App';
 import AppSplashGate from './components/AppSplashGate';
+import AppErrorBoundary from './components/AppErrorBoundary';
 import RemoteControlApp from './components/remote/RemoteControlApp';
 import ObsBrowserSourceApp from './components/obs/ObsBrowserSourceApp';
 import ObsNowPlayingSourceApp from './components/obs/ObsNowPlayingSourceApp';
@@ -59,18 +60,27 @@ const isRemoteControl = isRemoteControlSurface;
 // also has the Electron bridge, but mod state pushes only reach the main
 // window, so a client activated there would never be torn down.
 const isMainApp = isMainAppSurface;
+// 兜底界面上的名字，用来区分是哪个根挂了。
+const surfaceLabel = isNowPlayingObsSource ? 'OBS 正在播放'
+  : isPlayerCapObsSource ? 'OBS 播放卡'
+    : isObsBrowserSource ? 'OBS 源'
+      : isRemoteControl ? '远程控制'
+        : '主界面';
 const renderApp = () => root.render(
     <React.StrictMode>
       <AppSplashGate>
-        {isNowPlayingObsSource
-          ? <ObsNowPlayingSourceApp />
-          : isPlayerCapObsSource
-            ? <ObsPlayerCapSourceApp />
-            : isObsBrowserSource
-              ? <ObsBrowserSourceApp />
-              : isRemoteControl
-                ? <RemoteControlApp />
-                : <App />}
+        {/* 根上必须有错误边界，否则一次懒加载失败就会卸载整棵树（实机上就这样黑过一次）。 */}
+        <AppErrorBoundary surface={surfaceLabel}>
+          {isNowPlayingObsSource
+            ? <ObsNowPlayingSourceApp />
+            : isPlayerCapObsSource
+              ? <ObsPlayerCapSourceApp />
+              : isObsBrowserSource
+                ? <ObsBrowserSourceApp />
+                : isRemoteControl
+                  ? <RemoteControlApp />
+                  : <App />}
+        </AppErrorBoundary>
       </AppSplashGate>
     </React.StrictMode>
   );

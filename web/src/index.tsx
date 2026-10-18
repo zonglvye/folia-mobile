@@ -28,4 +28,38 @@ if (isAndroidShell()) {
 }
 installGlobalVisualizerFrameRateLimiter();
 
+// ---- service worker 策略 -------------------------------------------------------------
+// 手机壳里**不注册** service worker，并且把以前注册过的那份清掉。
+//
+// 这不是省事：壳的离线本来就是结构性的（产物在 APK 里），SW 在这里没有一件事可做，却能出错。
+// 实机上抓到的那次黑屏就是它造成的：旧版本的 SW 把旧的 index.html 留在 precache 里，装上
+// 新版本之后那份旧 HTML 仍然引用旧哈希的 chunk（`BravaisCollection-Cys-1Rmu.js`），而那个
+// 文件在新 APK 里已经不存在了 —— 懒加载 404 → 未捕获异常 → React 卸载整棵树 → 黑屏。
+// 网页形态下同一份旧 HTML 没事（旧文件还在服务器上），所以这个坑只在壳里致命。
+const retireBundledServiceWorker = () => {
+    try {
+        if ('serviceWorker' in navigator) {
+            void navigator.serviceWorker.getRegistrations()
+                .then(registrations => Promise.all(registrations.map(registration => registration.unregister())))
+                .catch(() => { /* 拿不到注册列表就算了，不影响启动 */ });
+        }
+        if (typeof caches !== 'undefined') {
+            // 只删 workbox 自己的缓存：别的 Cache Storage 归属别的功能，不该跟着一起没。
+            void caches.keys()
+                .then(keys => Promise.all(keys.filter(key => key.startsWith('workbox-')).map(key => caches.delete(key))))
+                .catch(() => { /* 同上 */ });
+        }
+    } catch {
+        // 隐私模式等：没有 SW 就没有这个问题。
+    }
+};
+
+if (isAndroidShell()) {
+    retireBundledServiceWorker();
+} else if ('serviceWorker' in navigator) {
+    void import('virtual:pwa-register')
+        .then(({ registerSW }) => registerSW({ immediate: true }))
+        .catch(() => { /* 注册失败只是没有离线缓存，不该影响启动 */ });
+}
+
 void import('./bootstrap');

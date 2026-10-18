@@ -32,6 +32,14 @@ export const BRAVAIS_POSTER_TILT_OUT_S = 0.5;
 export const BRAVAIS_POSTER_TILT_EASE = [0.45, 0, 0.2, 1] as const;
 /** 视口窄于它时默认收成书脊（设计稿 §5 的 NARROW_VW）。 */
 export const BRAVAIS_NARROW_VIEWPORT_PX = 900;
+/**
+ * 矮视口的断点。手机横屏的视口高约 377px（Pura 90 Pro Max 实测），缝再减掉底部播放条安全区就只剩约 260px，
+ * 完整信息条与列表面板在这一档要换一套更紧的排法。与 bravais.css / bravaisCollection.css 里的
+ * `@media (max-height: 480px)` 是同一档，改这里要同步改那两处。
+ */
+export const BRAVAIS_SHORT_VIEWPORT_PX = 480;
+/** 上面那一档的查询串：脚本里要按它分支的部分（列表面板的行高）走这里，不另写一个数字。 */
+export const BRAVAIS_SHORT_VIEWPORT_QUERY = `(max-height: ${BRAVAIS_SHORT_VIEWPORT_PX}px)`;
 
 /** 视口外多渲染的世界距离（世界单位）；翻牌也只翻这个范围以内的磁贴。 */
 export const BRAVAIS_OVERSCAN = 420;

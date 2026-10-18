@@ -1,0 +1,491 @@
+From 47bc9ec6c902b220d997f4578d69eb0cd1fb238e Mon Sep 17 00:00:00 2001
+From: folia <folia@local>
+Date: Sun, 18 Oct 2026 16:55:47 +0800
+Subject: [PATCH 27/27] feat(bravais): widen the list panel to the poster width
+ and compact it on short viewports
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+手机横屏（816x377）上列表面板只露一到两首歌（用户实测反馈）。
+
+面板宽度：min(420, 视口-52) 改成 min(520, 视口-52)。520 是海报的下界，816px 视口上海报正好
+是 520 —— 从歌手海报点「列表」时缝不再缩一截。
+
+矮视口（max-height 480，与竖排标题那条同一档）换一套排法：
+- 头部（面包屑、过滤位、标题、元数据、排序）包进 .bravais-panel-head，由竖排改成两行：
+  ‹ + 标题 + 元数据 / 过滤位。过滤位排到最后一行（order:1），否则它占满一整行把标题顶到第三行；
+- 面包屑的层路径收起（标题就在同一行上），‹ 仍然退回上一层；
+- 行从两行文字（44px）改成单行（编号·曲名·副标题·时长，30px），面板 520 宽排得下；
+- 底部动作行 36px -> 28px。
+
+量出来的账：缝高 261px（377 减去约 116px 播放条安全区）里，头部 60 + 列表 155 + 动作 28，
+列表从约 2 行变成 5 行（155/30）。宽视口完全不变（仍 44px 行高、竖排头部、面包屑照旧）。
+
+新增 test/component/bravaisListPanel.spec.ts 在 816x377 与 1440x1100 两档下钉住宽度、行高、
+头部基线与可见行数；几何一律读 offset*/clientHeight，不读 getBoundingClientRect（缝的内容层带
+翻转动画的 3D 变换，渲染框会被缩掉约 2%）。
+---
+ .../suites/bravais/BravaisListPanel.tsx       |  69 ++++++----
+ src/library/suites/bravais/bravais.css        |   3 +-
+ .../suites/bravais/bravaisCollection.css      |  75 ++++++++++-
+ .../suites/bravais/bravaisConstants.ts        |   8 ++
+ .../suites/bravais/bravaisSeamTarget.ts       |  12 +-
+ test/component/bravaisListPanel.spec.ts       | 125 ++++++++++++++++++
+ .../bravais/bravaisCollectionModels.test.ts   |   6 +-
+ .../library/bravais/bravaisHomeModels.test.ts |   2 +-
+ .../library/bravais/bravaisSeamTarget.test.ts |   8 ++
+ 9 files changed, 270 insertions(+), 38 deletions(-)
+ create mode 100644 test/component/bravaisListPanel.spec.ts
+
+diff --git a/src/library/suites/bravais/BravaisListPanel.tsx b/src/library/suites/bravais/BravaisListPanel.tsx
+index d9ed917..4255294 100644
+--- a/src/library/suites/bravais/BravaisListPanel.tsx
++++ b/src/library/suites/bravais/BravaisListPanel.tsx
+@@ -7,15 +7,22 @@ import { BravaisSeamStatusLine } from './BravaisSeamCollection';
+ import BravaisSeamFilterField from './BravaisSeamFilterField';
+ import { setBravaisLinkedKey, useBravaisUiStore } from './bravaisUiStore';
+ import BravaisSeamCrumbs from './BravaisSeamCrumbs';
++import { BRAVAIS_SHORT_VIEWPORT_QUERY } from './bravaisConstants';
++import { useMediaQuery } from '../../../hooks/useMediaQuery';
+ 
+ // src/library/suites/bravais/BravaisListPanel.tsx
+-// 列表面板（设计稿 §5「面板」「歌曲列表」）：缝加宽到 min(420, 视口 − 52)，标题横排压在顶部，下面是工具行（本地文件夹的
++// 列表面板（设计稿 §5「面板」「歌曲列表」）：缝加宽到 min(520, 视口 − 52)，标题横排压在顶部，下面是工具行（本地文件夹的
+ // 排序）、可滚动列表（react-window 虚拟化）和底部的播放 / 入队。列表顺序 = 层的条目顺序，过滤时只列匹配项。
+ // 列表 ↔ 墙双向联动：悬停一行，墙上这一项的所有可见副本高亮（is-linked）；单击一行，相机飞到离缝最近的那一份并聚焦它
+ // （歌曲直接展开聚焦卡）；双击播放；悬停墙上的磁贴，这一行高亮并滚到可见。面板是导航状态：返回（‹、Esc、浏览器后退）
+ // 先关它；面包屑多一级「列表」。
++// 头部（面包屑、过滤位、标题、元数据、排序）包在 .bravais-panel-head 里：宽屏上竖着排，矮视口（手机横屏）上由
++// bravaisCollection.css 横排成两行 —— 这几行原本固定占掉缝高的大半，不并起来列表只能露两行。行高也跟着矮一档，
++// 所以这里按同一个断点选 BRAVAIS_LIST_ROW_HEIGHT_SHORT（react-window 的行高是 props，CSS 够不着）。
+ 
+ export const BRAVAIS_LIST_ROW_HEIGHT = 44;
++/** 矮视口上的行高：标题与副标题并成一行排（与 bravaisCollection.css 同一档），30px 装得下。 */
++export const BRAVAIS_LIST_ROW_HEIGHT_SHORT = 30;
+ 
+ export type BravaisPanelActions = {
+     close: () => void;
+@@ -93,44 +100,48 @@ const BravaisListPanel: React.FC<{ layer: BravaisLayer; depth: number; actions:
+         actions,
+     }), [actions, highlightKey, items, layer.nowPlayingKey]);
+     const sort = entries?.sort;
++    const rowHeight = useMediaQuery(BRAVAIS_SHORT_VIEWPORT_QUERY) ? BRAVAIS_LIST_ROW_HEIGHT_SHORT : BRAVAIS_LIST_ROW_HEIGHT;
+ 
+     return (
+         <div className="bravais-seam-panel" data-bravais-list={layer.key}>
+-            <div className="bravais-seam-crumbs">
+-                <button type="button" className="bravais-seam-back" data-bravais-seam-action="close-list" onClick={actions.close}
+-                    aria-label={t('libraryBravais.seamBack')} title={t('libraryBravais.seamBack')}>
+-                    <ChevronLeft aria-hidden />
+-                </button>
+-                <BravaisSeamCrumbs layer={layer} panelLabel={entries?.listCrumb ?? ''} onClosePanel={actions.close} />
+-                <button type="button" className="bravais-seam-level" data-bravais-seam-action="hide" onClick={actions.fold}>
+-                    {t('libraryBravais.seamFold')}
+-                </button>
+-            </div>
+-            {layer.seam.filter && <BravaisSeamFilterField filter={layer.seam.filter} variant="panel" />}
+-            <h2 className="bravais-panel-title" data-bravais-seam-title>{seam.title}</h2>
+-            <div className="bravais-seam-meta">{seam.meta}</div>
+-            {sort && (
+-                <div className="bravais-panel-tools" data-bravais-list-sort>
+-                    <select
+-                        value={sort.field}
+-                        aria-label={entries?.panelTitle}
+-                        data-bravais-list-sort-field
+-                        onChange={event => sort.setField(event.target.value)}
+-                    >
+-                        {sort.fields.map(field => <option key={field.value} value={field.value}>{field.label}</option>)}
+-                    </select>
+-                    <button type="button" className="bravais-seam-icon" data-bravais-list-sort-direction={sort.direction}
+-                        onClick={sort.toggleDirection} aria-label={sort.directionLabel} title={sort.directionLabel}>
+-                        {sort.direction === 'asc' ? <ArrowUpNarrowWide aria-hidden /> : <ArrowDownWideNarrow aria-hidden />}
++            {/* 头部：矮视口上横排成两行（bravaisCollection.css），所以这几块包在一起。 */}
++            <div className="bravais-panel-head">
++                <div className="bravais-seam-crumbs">
++                    <button type="button" className="bravais-seam-back" data-bravais-seam-action="close-list" onClick={actions.close}
++                        aria-label={t('libraryBravais.seamBack')} title={t('libraryBravais.seamBack')}>
++                        <ChevronLeft aria-hidden />
++                    </button>
++                    <BravaisSeamCrumbs layer={layer} panelLabel={entries?.listCrumb ?? ''} onClosePanel={actions.close} />
++                    <button type="button" className="bravais-seam-level" data-bravais-seam-action="hide" onClick={actions.fold}>
++                        {t('libraryBravais.seamFold')}
+                     </button>
+                 </div>
+-            )}
++                {layer.seam.filter && <BravaisSeamFilterField filter={layer.seam.filter} variant="panel" />}
++                <h2 className="bravais-panel-title" data-bravais-seam-title>{seam.title}</h2>
++                <div className="bravais-seam-meta">{seam.meta}</div>
++                {sort && (
++                    <div className="bravais-panel-tools" data-bravais-list-sort>
++                        <select
++                            value={sort.field}
++                            aria-label={entries?.panelTitle}
++                            data-bravais-list-sort-field
++                            onChange={event => sort.setField(event.target.value)}
++                        >
++                            {sort.fields.map(field => <option key={field.value} value={field.value}>{field.label}</option>)}
++                        </select>
++                        <button type="button" className="bravais-seam-icon" data-bravais-list-sort-direction={sort.direction}
++                            onClick={sort.toggleDirection} aria-label={sort.directionLabel} title={sort.directionLabel}>
++                            {sort.direction === 'asc' ? <ArrowUpNarrowWide aria-hidden /> : <ArrowDownWideNarrow aria-hidden />}
++                        </button>
++                    </div>
++                )}
++            </div>
+             <div className="bravais-panel-list" role="listbox" aria-label={entries?.panelTitle}>
+                 {items.length > 0 ? (
+                     <List
+                         listRef={listRef}
+                         rowCount={items.length}
+-                        rowHeight={BRAVAIS_LIST_ROW_HEIGHT}
++                        rowHeight={rowHeight}
+                         rowComponent={ListRow}
+                         rowProps={rowProps}
+                         overscanCount={6}
+diff --git a/src/library/suites/bravais/bravais.css b/src/library/suites/bravais/bravais.css
+index ae5ac66..8d935e0 100644
+--- a/src/library/suites/bravais/bravais.css
++++ b/src/library/suites/bravais/bravais.css
+@@ -395,7 +395,8 @@
+  * 反而成了缝里最显眼的东西——它们没有任何说明，看起来就像两个多余的标点。
+  * 这一档整体换一种排法：标题改成横排单行、放不下就省略号；引号收掉。与完整信息条的其它行同一条基线，
+  * 标题区仍然占满剩余高度，所以下面的动作行位置不变。
+- * 只作用于标题区域里的标题，书脊那颗按钮（.bravais-seam-vtitle.is-button）仍是竖排。 */
++ * 只作用于标题区域里的标题，书脊那颗按钮（.bravais-seam-vtitle.is-button）仍是竖排。
++ * 断点与 bravaisConstants.ts 的 BRAVAIS_SHORT_VIEWPORT_PX（列表面板在矮视口上的紧排版也用它）是同一档。 */
+ @media (max-height: 480px) {
+     .bravais-seam .bravais-seam-quote { display: none; }
+     .bravais-seam .bravais-seam-title-area { justify-content: flex-start; }
+diff --git a/src/library/suites/bravais/bravaisCollection.css b/src/library/suites/bravais/bravaisCollection.css
+index 6d3c781..a89f78b 100644
+--- a/src/library/suites/bravais/bravaisCollection.css
++++ b/src/library/suites/bravais/bravaisCollection.css
+@@ -1,6 +1,7 @@
+ /* src/library/suites/bravais/bravaisCollection.css — B7 集合页的样式：缝里的过滤输入位（每面墙都用它）、收藏星标、
+    补页进度、日期步进、状态行（加载 / 错误 / 空 / 过滤无结果各有图标）、「⋯ 更多」、结果提示、表单态、列表面板与列表行、
+-   聚焦卡的「⋯」、列表联动高亮（is-linked）与首屏加载的呼吸。单独成文件，不改 bravais.css 的已有块。
++   聚焦卡的「⋯」、列表联动高亮（is-linked）与首屏加载的呼吸，以及矮视口（手机横屏）上列表面板的紧排版。
++   单独成文件，不改 bravais.css 的已有块。
+    视觉沿用 Lattice：主题变量、bravais-chrome-button 的悬停框、日光切换（.is-daylight）。 */
+ 
+ /* ---------- 过滤输入位（当前页过滤，设计稿 §7.6）：缝自己的样式——缝的字体与墨色、一道下划线（聚焦时换强调色），
+@@ -308,6 +309,16 @@
+ /* 只有列表伸缩，其余各行保持自己的高度（不然标题会被挤扁）。 */
+ .bravais-seam-panel > * { flex: none; }
+ 
++/* 面板头部：面包屑行、过滤位、标题、元数据、排序。宽屏上竖着排、间距 10px，与并入这一层之前完全一样。
++   矮视口上（文件末尾那条 @media）横排成两行——这是「列表能多露几首歌」的关键：这几行原本固定占掉缝高的
++   一半以上，而手机横屏上缝只有约 260px 高（377 减去底部播放条安全区）。 */
++.bravais-panel-head {
++    display: flex;
++    flex: none;
++    flex-direction: column;
++    gap: 10px;
++}
++
+ .bravais-panel-title {
+     margin: 0;
+     overflow: hidden;
+@@ -358,6 +369,68 @@
+ .bravais-list-text small { color: var(--bravais-seam-ink-soft); font-size: 11px; }
+ .bravais-list-time { color: var(--bravais-seam-ink-soft); font-size: 11px; font-variant-numeric: tabular-nums; }
+ 
++/* ---------- 矮视口（手机横屏）的列表面板 ---------- */
++
++/* 缝高 480px 以下，面板换一套排法（2026-10 用户实测：「列表太窄，只露两首歌」）。
++   量出来的账：视口 377px 减去底部播放条安全区约 116px，面板只有约 260px 高。原来头部四块竖着排（面包屑、
++   过滤位、标题、元数据）固定占掉约 150px，动作行再占 36px 与间距，列表只剩 30–80px —— 一到两行。
++   现在头部并成两行（‹ + 标题 + 元数据 / 过滤位）、行压成单行 30px、动作行收到 28px：列表拿到约 160px，五行。
++   这一档把面包屑的层路径收起：标题就在同一行上，「书库 / 歌手名 / 列表」是重复的信息，‹ 仍然退回上一层。
++   断点与 bravaisConstants.ts 的 BRAVAIS_SHORT_VIEWPORT_PX、以及 bravais.css 里竖排标题那条是同一档，改一处要同步。 */
++@media (max-height: 480px) {
++    .bravais-seam-panel { gap: 4px; padding: 6px 16px 0; }
++
++    .bravais-panel-head {
++        flex-direction: row;
++        flex-wrap: wrap;
++        align-items: center;
++        gap: 4px 8px;
++    }
++
++    .bravais-panel-head > .bravais-seam-crumbs { min-height: 0; gap: 4px; }
++    .bravais-panel-head .bravais-seam-crumb-trail { display: none; }
++    .bravais-panel-head .bravais-seam-back { width: 28px; height: 28px; }
++    .bravais-panel-head .bravais-seam-level { padding: 2px 8px; }
++
++    /* 过滤位排到头部最后一行（它本来就一直占据一个输入位）。不这么排的话，它按 DOM 顺序夹在面包屑与标题之间、
++       又占满一整行，会把标题与元数据顶到第三行 —— 头部三行是「只露两首歌」的一半原因。 */
++    .bravais-panel-head > .bravais-seam-filter-field { order: 1; height: 28px; flex: 1 0 100%; }
++    .bravais-panel-head .bravais-seam-filter-line { height: 26px; }
++
++    /* 标题吃剩下的宽度，元数据靠右、放不下先截断。只在这一档的横排头部里生效：目录树面板
++       （BravaisDirectoryPanel）没有这一层，它仍是竖排，flex 的基准方向不一样。 */
++    .bravais-panel-head .bravais-panel-title { min-width: 0; flex: 1 1 6em; font-size: 16px; line-height: 1.25; }
++    .bravais-panel-head .bravais-seam-meta {
++        flex: 0 1 auto;
++        overflow: hidden;
++        font-size: 11px;
++        line-height: 1.3;
++        text-overflow: ellipsis;
++        white-space: nowrap;
++    }
++
++    .bravais-panel-head .bravais-panel-tools { flex: none; gap: 4px; }
++    .bravais-panel-head .bravais-panel-tools select { max-width: 8.5em; flex: none; padding: 3px 6px; font-size: 11px; }
++    .bravais-panel-head .bravais-panel-tools .bravais-seam-icon { width: 28px; height: 28px; border-radius: 9px; }
++
++    /* 行：这一档把两行文字并成一行（编号 · 曲名 · 副标题 · 时长），行高换到 BRAVAIS_LIST_ROW_HEIGHT_SHORT
++       （30px，react-window 的 props，CSS 够不着行高本身）。面板有 520px 宽，单行排得下，行数从三行变成五行。 */
++    .bravais-list-row { gap: 8px; padding: 0 8px; border-radius: 8px; }
++    .bravais-list-text { flex-direction: row; align-items: baseline; gap: 6px; }
++    /* 曲名先按内容占位，副标题拿剩下的宽度并在自己的盒子里省略。 */
++    .bravais-list-text strong { min-width: 0; flex: 0 1 auto; }
++    .bravais-list-text small { min-width: 0; flex: 1 1 auto; }
++
++    .bravais-seam-panel > .bravais-seam-actions { gap: 4px; }
++    .bravais-seam-panel > .bravais-seam-actions .bravais-chrome-button {
++        height: 28px;
++        min-height: 28px;
++        padding: 0 10px;
++        font-size: 11px;
++    }
++    .bravais-seam-panel > .bravais-seam-actions .bravais-chrome-button svg { width: 13px; height: 13px; }
++}
++
+ /* ---------- 聚焦卡的「⋯」 ---------- */
+ 
+ .bravais-focus-more {
+diff --git a/src/library/suites/bravais/bravaisConstants.ts b/src/library/suites/bravais/bravaisConstants.ts
+index 265e10a..b4d44a7 100644
+--- a/src/library/suites/bravais/bravaisConstants.ts
++++ b/src/library/suites/bravais/bravaisConstants.ts
+@@ -32,6 +32,14 @@ export const BRAVAIS_POSTER_TILT_OUT_S = 0.5;
+ export const BRAVAIS_POSTER_TILT_EASE = [0.45, 0, 0.2, 1] as const;
+ /** 视口窄于它时默认收成书脊（设计稿 §5 的 NARROW_VW）。 */
+ export const BRAVAIS_NARROW_VIEWPORT_PX = 900;
++/**
++ * 矮视口的断点。手机横屏的视口高约 377px（Pura 90 Pro Max 实测），缝再减掉底部播放条安全区就只剩约 260px，
++ * 完整信息条与列表面板在这一档要换一套更紧的排法。与 bravais.css / bravaisCollection.css 里的
++ * `@media (max-height: 480px)` 是同一档，改这里要同步改那两处。
++ */
++export const BRAVAIS_SHORT_VIEWPORT_PX = 480;
++/** 上面那一档的查询串：脚本里要按它分支的部分（列表面板的行高）走这里，不另写一个数字。 */
++export const BRAVAIS_SHORT_VIEWPORT_QUERY = `(max-height: ${BRAVAIS_SHORT_VIEWPORT_PX}px)`;
+ 
+ /** 视口外多渲染的世界距离（世界单位）；翻牌也只翻这个范围以内的磁贴。 */
+ export const BRAVAIS_OVERSCAN = 420;
+diff --git a/src/library/suites/bravais/bravaisSeamTarget.ts b/src/library/suites/bravais/bravaisSeamTarget.ts
+index dd92d0e..bcf1ccd 100644
+--- a/src/library/suites/bravais/bravaisSeamTarget.ts
++++ b/src/library/suites/bravais/bravaisSeamTarget.ts
+@@ -17,14 +17,20 @@ import {
+ // src/library/suites/bravais/bravaisSeamTarget.ts
+ // 缝此刻该开多宽、渲染哪一套内容（B7 在三级开口之上加的三种情形，纯规则）：
+ // - 表单态（改名、删除确认、加入歌单选择）：缝原地翻成表单，宽度按完整信息条；
+-// - 列表面板（导航状态）：缝加宽到 min(420, 视口 − 52)，标题横排压在顶部（设计稿 §5「面板」）；
++// - 列表面板（导航状态）：缝加宽到 min(520, 视口 − 52)，标题横排压在顶部（设计稿 §5「面板」）；
+ // - 正在输入过滤词：书脊 / 折叠的缝临时展开为完整信息条（首页是窄缝），结束输入后回到原等级（设计稿 §7.6）。
+ // 优先级：表单 > 面板（折叠时除外）> 过滤的临时展开 > 用户选的等级。用户的等级不被改写，只是暂时不生效。
+ // B9 首页：目录树面板与列表面板同一种开口（panel）；全局搜索框开着时首页窄缝临时展开成完整宽度（search，
+ // 折叠时除外——搜索态没有书脊这一级，只能折叠）。首页的表单态在面板里（底部翻牌），不占整条缝。
+ 
+-/** 列表面板的开口：min(420, 视口 − 52)。 */
+-export const BRAVAIS_PANEL_MAX_WIDTH = 420;
++/**
++ * 列表面板的开口：min(520, 视口 − 52)。
++ *
++ * 上限取 520，与海报的下界（BRAVAIS_SEAM_POSTER_MIN_WIDTH）相同。这是 2026-10 用户的实测反馈：手机横屏（816px）
++ * 上海报是 520、面板原来封顶 420，于是从歌手海报点「列表」时缝要缩一截，列表反而比海报窄。两边对齐之后，
++ * 手机上点开列表与点开海报是同一种开口；更宽的视口上面板不再比海报更宽，仍旧是一块纸片。
++ */
++export const BRAVAIS_PANEL_MAX_WIDTH = 520;
+ export const BRAVAIS_PANEL_VIEWPORT_MARGIN = 52;
+ /** 极窄的视口里也留一列能读的宽度。 */
+ const BRAVAIS_PANEL_MIN_WIDTH = 160;
+diff --git a/test/component/bravaisListPanel.spec.ts b/test/component/bravaisListPanel.spec.ts
+new file mode 100644
+index 0000000..0b96559
+--- /dev/null
++++ b/test/component/bravaisListPanel.spec.ts
+@@ -0,0 +1,125 @@
++import type { Page } from '@playwright/test';
++import { expect, test } from './fixtures';
++import { buildServiceStubModule, LOCAL_MUSIC_SERVICE_ROUTE } from '../../dev/probes/homeBehavior/serviceStubModule';
++import '../../dev/probes/homeBehavior/probeApi';
++
++// test/component/bravaisListPanel.spec.ts
++// 列表面板的开口与密度（2026-10 用户实测：「列表太窄，只露两首歌」）：
++// - 缝开 min(520, 视口 − 52)。手机横屏 816px 上正好等于歌手海报的宽度（海报下界也是 520），
++//   从海报点「列表」不会再缩一截；
++// - 矮视口（max-height 480）上头部并成两行——‹ + 标题 + 元数据一行、过滤位一行，面包屑的层路径收起——
++//   行压成单行 30px，动作行收到 28px。容量按「列表视口高度 / 行高」算：底部播放条安全区（约 116px）也在内。
++//   实测 816×377 上从 3 行变成 5 行。
++// 宽视口不动：竖排头部、44px 行高、面包屑的层路径照旧。
++// 探针里先放一首在播的歌（setNowPlaying）：没有歌时缝只需让 20px，量出来的密度会比真机乐观。
++// 几何一律读 offsetTop / offsetWidth / clientHeight，不读 getBoundingClientRect：缝的内容层带着翻转动画的
++// 3D 变换，渲染框会被缩掉约 2%，量的就不是布局了。
++
++const PHONE = { width: 816, height: 377 } as const;
++const DESKTOP = { width: 1440, height: 1100 } as const;
++
++const stage = (page: Page) => page.locator('[data-library-stage="bravais"]');
++const settled = (page: Page) => expect(stage(page)).not.toHaveAttribute('data-bravais-settling', /.*/, { timeout: 10_000 });
++
++/** 一张此刻完整在视口里、没被缝盖住的首页卡片（窄而矮的视口上不能沿用「屏幕中部」那套判断）。 */
++const visibleCardSlot = (page: Page) => page.evaluate(() => {
++    const seam = document.querySelector('[data-bravais-seam]')?.getBoundingClientRect();
++    const fits = (rect: DOMRect) => rect.width > 40 && rect.height > 40
++        && rect.left >= 0 && rect.top >= 0
++        && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight
++        && (!seam || seam.width < 1 || rect.right < seam.left - 4 || rect.left > seam.right + 4);
++    const tile = [...document.querySelectorAll<HTMLElement>('.bravais-tile[data-library-card]')]
++        .find(element => fits(element.getBoundingClientRect()));
++    return tile?.dataset.bravaisSlot ?? null;
++});
++
++/** 面板的几何：开口宽度、行高、列表视口高度，以及头部那几块是不是同一条基线。 */
++const panelMetrics = (page: Page) => page.evaluate(() => {
++    const panel = document.querySelector<HTMLElement>('[data-bravais-list]');
++    const list = panel?.querySelector<HTMLElement>('.bravais-panel-list') ?? null;
++    const rows = list ? [...list.querySelectorAll<HTMLElement>('[data-bravais-list-row]')] : [];
++    const trail = panel?.querySelector<HTMLElement>('.bravais-seam-crumb-trail') ?? null;
++    const centerY = (selector: string) => {
++        const node = panel?.querySelector<HTMLElement>(selector);
++        return node ? node.offsetTop + node.offsetHeight / 2 : null;
++    };
++    return {
++        width: panel?.offsetWidth ?? 0,
++        listHeight: list?.clientHeight ?? 0,
++        // react-window 把行高写在行的内联样式上（CSS 压不过它）。
++        rowHeight: rows[0] ? parseFloat(rows[0].style.height) : 0,
++        renderedRows: rows.length,
++        crumbTrail: trail ? getComputedStyle(trail).display : 'absent',
++        headCenters: [
++            centerY('.bravais-seam-crumbs'),
++            centerY('[data-bravais-seam-title]'),
++            centerY('.bravais-seam-meta'),
++        ],
++    };
++});
++
++/** 打开一层的列表面板：视口先定下来（缩放与 media query 都按它算），再点开一张首页卡片、点「列表」。 */
++const openListPanel = async (
++    mount: (id: string) => Promise<unknown>,
++    page: Page,
++    viewport: { width: number; height: number },
++) => {
++    await page.setViewportSize(viewport);
++    await page.route(LOCAL_MUSIC_SERVICE_ROUTE, route => route.fulfill({ contentType: 'text/javascript', body: buildServiceStubModule() }));
++    await mount('homeBehavior');
++    await expect.poll(() => page.evaluate(() => window.__homeProbe?.ready() ?? false), { timeout: 30_000 }).toBe(true);
++    await page.evaluate(() => window.__homeProbe!.setSuite('bravais'));
++    await expect(stage(page)).toHaveAttribute('data-bravais-layer', 'home:playlist', { timeout: 15_000 });
++    await expect(page.locator('[data-library-card]').first()).toBeAttached();
++    await settled(page);
++    await page.evaluate(() => window.__homeProbe!.setNowPlaying('online:probe:loaded'));
++
++    const slot = await visibleCardSlot(page);
++    expect(slot).not.toBeNull();
++    await page.locator(`[data-bravais-slot="${slot}"]`).locator('article').click();
++    await expect(page.locator('.bravais-tile[data-library-card]')).toHaveCount(0, { timeout: 10_000 });
++    await settled(page);
++
++    await page.locator('[data-bravais-seam-action="list"]').click();
++    await expect(page.locator('[data-bravais-list]')).toBeVisible();
++    // 缝里的内容整条翻过来之后才量（翻转期间旧内容挂着 leaving）。
++    await expect(page.locator('[data-bravais-seam][data-bravais-seam-leaving]')).toHaveCount(0);
++    await settled(page);
++}
++
++test.describe('[bravais-only] list panel width and density', () => {
++    test('phone landscape: the panel is as wide as the poster and the compact header leaves room for five rows', async ({ mount, page }) => {
++        await openListPanel(mount, page, PHONE);
++        const metrics = await panelMetrics(page);
++
++        // 开口与海报同宽（海报下界 520），不再比海报窄。
++        expect(metrics.width).toBe(520);
++        // 矮视口那一档的行高（单行排版）。
++        expect(metrics.rowHeight).toBe(30);
++        // 头部并成两行：面包屑（含 ‹）、标题、元数据的竖直中心对得上（过滤位在它们下面一行）。
++        const centers = metrics.headCenters.filter((value): value is number => value !== null);
++        expect(centers).toHaveLength(3);
++        expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(1);
++        // 面包屑的层路径在这一档收起（标题就在同一行上）。
++        expect(metrics.crumbTrail).toBe('none');
++        // 密度：列表视口高度除以行高。底部播放条安全区已经算在内；改之前这里是 1–2 行。
++        expect(metrics.renderedRows).toBeGreaterThan(0);
++        expect(metrics.listHeight / metrics.rowHeight).toBeGreaterThanOrEqual(4);
++        // 上界只是防呆：真把行高和头部都改坏了才会撞上。
++        expect(metrics.listHeight / metrics.rowHeight).toBeLessThan(8);
++    });
++
++    test('desktop keeps the stacked header, the crumb trail and the 44px rows', async ({ mount, page }) => {
++        await openListPanel(mount, page, DESKTOP);
++        const metrics = await panelMetrics(page);
++
++        expect(metrics.width).toBe(520);
++        expect(metrics.rowHeight).toBe(44);
++        expect(metrics.crumbTrail).not.toBe('none');
++        // 竖排头部：标题与元数据在面包屑行下面，隔着一整行。
++        const [crumbs, title] = metrics.headCenters;
++        expect(crumbs).not.toBeNull();
++        expect(title).not.toBeNull();
++        expect(title! - crumbs!).toBeGreaterThan(20);
++    });
++});
+diff --git a/test/unit/library/bravais/bravaisCollectionModels.test.ts b/test/unit/library/bravais/bravaisCollectionModels.test.ts
+index d2f9301..88b9a80 100644
+--- a/test/unit/library/bravais/bravaisCollectionModels.test.ts
++++ b/test/unit/library/bravais/bravaisCollectionModels.test.ts
+@@ -258,17 +258,17 @@ describe('status projection', () => {
+ });
+ 
+ describe('seam target', () => {
+-    it('opens a form at full width, a panel at min(420, viewport − 52), and holds full while filtering', () => {
++    it('opens a form at full width, a panel at min(520, viewport − 52), and holds full while filtering', () => {
+         const base = { surface: 'collection' as const, level: 'spine' as const, viewportWidth: 1440 };
+         expect(resolveSeamTarget({ ...base, formOpen: true, panelOpen: true })).toEqual({ width: 300, variant: 'form' });
+-        expect(resolveSeamTarget({ ...base, panelOpen: true })).toEqual({ width: 420, variant: 'panel' });
++        expect(resolveSeamTarget({ ...base, panelOpen: true })).toEqual({ width: 520, variant: 'panel' });
+         expect(resolveSeamTarget({ ...base, viewportWidth: 400, panelOpen: true })).toEqual({ width: 348, variant: 'panel' });
+         expect(resolveSeamTarget({ ...base, level: 'hidden', panelOpen: true })).toEqual({ width: 0, variant: 'none' });
+         expect(resolveSeamTarget({ ...base, filterOpen: true })).toEqual({ width: 300, variant: 'full' });
+         expect(resolveSeamTarget({ ...base, level: 'hidden', filterOpen: true })).toEqual({ width: 300, variant: 'full' });
+         expect(resolveSeamTarget(base)).toEqual({ width: 64, variant: 'spine' });
+         // B9：首页的目录树面板与列表面板同一种开口。
+-        expect(resolveSeamTarget({ ...base, surface: 'home', panelOpen: true, level: 'full' })).toEqual({ width: 420, variant: 'panel' });
++        expect(resolveSeamTarget({ ...base, surface: 'home', panelOpen: true, level: 'full' })).toEqual({ width: 520, variant: 'panel' });
+         expect(resolvePanelWidth(120)).toBe(160);
+     });
+ });
+diff --git a/test/unit/library/bravais/bravaisHomeModels.test.ts b/test/unit/library/bravais/bravaisHomeModels.test.ts
+index 477ef19..25dee96 100644
+--- a/test/unit/library/bravais/bravaisHomeModels.test.ts
++++ b/test/unit/library/bravais/bravaisHomeModels.test.ts
+@@ -368,7 +368,7 @@ describe('home seam target', () => {
+         expect(resolveSeamTarget({ ...base, searchOpen: true })).toEqual({ width: 300, variant: 'search' });
+         expect(resolveSeamTarget({ ...base, level: 'spine', searchOpen: true })).toEqual({ width: 300, variant: 'search' });
+         expect(resolveSeamTarget({ ...base, level: 'hidden', searchOpen: true })).toEqual({ width: 0, variant: 'none' });
+-        expect(resolveSeamTarget({ ...base, panelOpen: true, searchOpen: true })).toEqual({ width: 420, variant: 'panel' });
++        expect(resolveSeamTarget({ ...base, panelOpen: true, searchOpen: true })).toEqual({ width: 520, variant: 'panel' });
+         expect(resolveSeamTarget({ ...base, surface: 'collection', searchOpen: true })).toEqual({ width: 300, variant: 'full' });
+     });
+ 
+diff --git a/test/unit/library/bravais/bravaisSeamTarget.test.ts b/test/unit/library/bravais/bravaisSeamTarget.test.ts
+index 4cf10f9..2ab5959 100644
+--- a/test/unit/library/bravais/bravaisSeamTarget.test.ts
++++ b/test/unit/library/bravais/bravaisSeamTarget.test.ts
+@@ -81,4 +81,12 @@ describe('seam target', () => {
+         expect(target.width).toBe(resolvePanelWidth(PHONE_LANDSCAPE));
+         expect(target.width).toBeLessThanOrEqual(BRAVAIS_PANEL_MAX_WIDTH);
+     });
++
++    it('手机横屏上面板与海报一样宽：从海报点「列表」不会再窄一截', () => {
++        // 用户实测（2026-10）：面板原来封顶 420、海报 520，点开列表缝要缩 100px，列表比海报还窄。
++        const panel = resolveSeamTarget({ surface: 'artist', level: 'full', viewportWidth: PHONE_LANDSCAPE, panelOpen: true });
++        const poster = resolveSeamTarget({ surface: 'artist', level: 'full', viewportWidth: PHONE_LANDSCAPE, poster: true });
++        expect(panel.width).toBe(poster.width);
++        expect(panel.width).toBe(520);
++    });
+ });
