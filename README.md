@@ -11,7 +11,12 @@
 
 ## 下载
 
-目前**没有发布可下载的包**：仓库里只有源码，APK 与 HAP 都要按下面「构建」一节自己出。两个壳都不依赖服务器，但都需要先构建 web 产物。
+**Android APK（0.6.13）** → **[folia-mobile-0.6.13.apk](https://github.com/zonglvye/folia-mobile/releases/download/v0.6.13/folia-mobile-0.6.13.apk)**
+11.2 MB · Android 8.0+（`minSdk 26`）· `versionCode 29` · 证书 `CN=Folia Mobile`
+
+SHA-256 `963A31049B127F393F0E5F3F64C10154B7A4794314531419D83B855AB3481C84`（下完可以自己核一遍）。这一版加了什么、还缺什么，写在 [Release 说明](https://github.com/zonglvye/folia-mobile/releases/tag/v0.6.13)里。
+
+**鸿蒙 HAP**：**没有提供**。DevEco 的自动签名是调试证书，绑账号与设备列表，别人装了起不来；要装请按下面「构建 → 3. HAP」自己出包，并在 DevEco 里配自己的签名。
 
 > ⚠️ **验证状态（请如实看待）**
 >
