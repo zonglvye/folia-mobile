@@ -1,0 +1,44 @@
+{
+  "app": {
+    // 签名材料不进仓库：在 DevEco Studio 的 File → Project Structure → Signing Configs 里
+    // 配一次自己的调试/发布证书，DevEco 会把 signingConfigs 写回这个文件（那一份也不该提交）。
+    "products": [
+      {
+        "name": "default",
+        // API 26 这一代要的是纯版本号 "26.0.0"：写成 "26.0.0(26)" 会被 hvigor 判成
+        // "api version parameter is illegal"。换了 SDK 就跟着改。
+        "compatibleSdkVersion": "26.0.0",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        },
+        "targetSdkVersion": "26.0.0"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

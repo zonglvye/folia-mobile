@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "0.1.0",
+  "description": "Folia entry module: ArkWeb host + shell bridges.",
+  "main": "",
+  "author": "",
+  "license": "AGPL-3.0",
+  "dependencies": {}
+}

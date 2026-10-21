@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Folia 的鸿蒙外壳：ArkWeb 承载 web 构建，原生侧负责资源、代理与播放会话。"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "音乐观赏播放器"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Folia"
+    }
+  ]
+}

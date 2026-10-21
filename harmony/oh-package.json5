@@ -1,0 +1,13 @@
+{
+  // modelVersion 必须与 hvigor/hvigor-config.json5 里的一致。
+  // devDependencies 故意留空：@ohos/hypium 要经 ohpm 从华为源装，而这里没有 ArkTS 单测；
+  // shell 的纯函数用 tools/check-ets-helpers.ps1 在 Node 里验（见 README）。
+  "modelVersion": "5.0.0",
+  "name": "folia",
+  "version": "0.1.0",
+  "description": "Folia for HarmonyOS: the web build hosted in ArkWeb.",
+  "main": "",
+  "author": "",
+  "license": "AGPL-3.0",
+  "dependencies": {}
+}

@@ -1,0 +1,21 @@
+# harmony/ 的构建产物与本地配置
+
+# hvigor / DevEco
+/.hvigor/
+/build/
+/entry/build/
+/oh_modules/
+/entry/oh_modules/
+/oh-package-lock.json5
+local.properties
+# build-hap.ps1 原地编译时把 hvigor 的输出写在这里
+/build.log
+# DevEco 打开工程时生成的工作区设置
+/.idea/
+
+# web 构建产物：由 tools/sync-web-assets.ps1 从 web/dist 拷入（它会先删掉整个目录再重建），不进版本库
+/entry/src/main/resources/rawfile/www/
+
+# 这台机器上 web/dist 在哪：内容是一行 UTF-8 路径，含中文，没法写进 ASCII 的 .ps1，所以单独存。
+# 换机器要重新写，属于本地配置，不进版本库。
+/tools/web-dist-path.txt

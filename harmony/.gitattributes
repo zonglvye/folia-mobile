@@ -1,0 +1,4 @@
+# 统一用 LF：这些文件是 write/edit 工具按 LF 写出来的，让 git 别再提示「将被换成 CRLF」。
+* text=auto eol=lf
+*.png binary
+*.jpg binary

@@ -1,0 +1,24 @@
+{
+  // modelVersion 是「工程模型」的版本，与 hvigor 工具版本无关；DevEco 26 生成的工程仍然是 5.0.0。
+  // dependencies 留空：hvigor 会从 IDE 自带的 tools/hvigor 取插件，
+  // 一旦在这里写上版本号，hvigor 就会去 npm registry 装 @ohos/hvigor-ohos-plugin，而那里没有这个包。
+  "modelVersion": "5.0.0",
+  "dependencies": {
+  },
+  "execution": {
+    "analyze": "normal",
+    "daemon": true,
+    "incremental": true,
+    "parallel": true,
+    "typeCheck": false
+  },
+  "logging": {
+    "level": "info"
+  },
+  "debugging": {
+    "stacktrace": false
+  },
+  "nodeOptions": {
+    "maxOldSpaceSize": 8192
+  }
+}
