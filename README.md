@@ -3,6 +3,7 @@
 把 [Folia](https://github.com/chthollyphile/folia-major) 带到手机上的非官方移植。
 
 - **Android**：一个自带 Web 产物的壳（WebView），所以离线是结构性的而不是"尽力而为"。
+- **HarmonyOS**：同一份 Web 产物，装进 ArkTS + ArkUI + ArkWeb 的壳（[`harmony/`](harmony/)）。虚拟 https 源与代理契约和安卓壳逐条对齐，构建方式见 [`harmony/README.md`](harmony/README.md)。
 - **iOS**：目前**没有**可用版本。可行形态只有两种，都还没做：纯 PWA（Safari 不支持 Screen Orientation API 的横屏锁定，且在线音源需要自部署实例），或一个 WKWebView 壳（能做到锁横屏和自带代理，但要 Mac + Apple 开发者账号）。iOS 这条路在真正开工前不承诺任何东西——为什么现在冻结、什么条件下会重新打开，写在 [`docs/ios-port.md`](docs/ios-port.md)。
 - 定位：**锁横屏的音乐观赏播放器**。
 
@@ -10,7 +11,7 @@
 
 ## 下载
 
-到 [Releases](../../releases) 下载 APK。
+目前**没有发布可下载的包**：仓库里只有源码，APK 与 HAP 都要按下面「构建」一节自己出。两个壳都不依赖服务器，但都需要先构建 web 产物。
 
 > ⚠️ **验证状态（请如实看待）**
 >
@@ -27,16 +28,18 @@
 > - **v0.6.5 的两项改动已在真机上确认**。**蓝牙耳机**连上后点播放能出声了——根因是 `AudioContext.resume()` 在这条路由上永不决议，而 `PLAYING` 只写在它和 `play()` 之后，于是 `play()` 从未被调用、进度条不动；现在 `resume()` 有 1.2s 期限，超时照常往下走。**墙面滑动**从 `longtasks 23 · max 210 ms`、`jank 10.6 %`、`p50 22.4 ms` 降到 `1 · 94 ms`、`0.5 %`、`11.1 ms`：重算裁剪新增的那一圈磁贴改成每帧挂 10 张，摊到几帧里（那一圈本来就在视野外，看不见）。剩下那一条 94ms 仍是 `wall cull`，是刚进墙或大幅跳转时的一次重算，不是滑动。
 > - v0.3.0 以来**封面仍未接通**：设备音乐库里的歌显示占位图。
 > - **本仓库没有可用的 adb 通道**：目标机型跑 HarmonyOS，它的 USB 调试功能是 HDC（厂商接口 `ff/50`），不是 adb 认的 `ff/42`，无线调试也没有配对入口。`dumpsys gfxinfo` 在这台设备上取不到，性能数据只能靠 v0.4.0 新增的应用内帧率 HUD 读。
+> - **两个壳是两份独立实现**（Java 对 ArkTS），在同一台真机（HarmonyOS 7.0.0.109，型号 SCA-AL00）上分别取证：鸿蒙侧的酷狗手机号登录、我的歌单、我喜欢、歌词与播放都已走通。本文其余「真机确认」条目默认指安卓壳。
 >
 > 装上后如果有问题，欢迎开 issue；能连 adb 的设备（非 HarmonyOS）可以附上 `adb logcat -s FoliaShell` 的输出。
 
-系统要求：Android 8.0+（minSdk 26）。
+系统要求：**Android 8.0+**（minSdk 26）；**HarmonyOS**（以 SDK API 26 / `compatibleSdkVersion 26.0.0` 编译，实测机型为 HarmonyOS 7.0.0，更低的系统版本没有验过）。
 
 ## 现在能用什么、不能用什么
 
 **已完成**
 
 - 壳：用 `WebViewAssetLoader` 把 APK 内的 Web 产物挂在虚拟 https 源上（`appassets.androidplatform.net`）——页面因此仍是 secure context，IndexedDB / OPFS / Cache Storage 全部可用，这也是离线能成立的原因。
+- 鸿蒙壳：同一套契约用 ArkWeb 的 `onInterceptRequest` 重做了一遍（`harmony/entry/src/main/ets/shell/`），页面看到的源、`/api/lyric-proxy` 与 `/api/netease-proxy` 与安卓壳一致，所以 `web/` 一行都不用改。
 - 沉浸式全屏、锁横屏，以及**竖屏兜底**（系统方向锁可以压过应用的横屏请求，所以竖屏时给一张可读的提示层）。
 - 文件选择（含多选，WebView 的 `ClipData` 陷阱已处理）。
 - 前台媒体服务 + MediaSession + 通知卡片（**原生侧刻意不申请音频焦点**，见下）。
@@ -158,6 +161,25 @@ v0.3.1 起，「设置 → 集成 → 网易云 API 地址」可以直接填，*
 - **登录态是客户端持有的**：会话 Cookie 每次请求作为 `cookie` 查询参数带过去（`src/services/netease.ts`），服务端不存会话。**因此无服务器部署（Vercel / Cloudflare）是可行的**，不需要一台常驻机器。
 - 地址填错时输入框会变红并保留上一次可用的值，不会被写坏；旁边的「测试」按钮会发一个真实的搜索请求，能直接区分「地址写错」「实例没起来」「CORS 没放行」。
 
+## 鸿蒙壳
+
+同一份 `web/`，换了一层壳：ArkTS + ArkUI + ArkWeb（[`harmony/`](harmony/)）。页面仍然发在虚拟 https 源 `https://appassets.androidplatform.net` 上，由 ArkWeb 的 `onInterceptRequest` 从 `rawfile/www` 里应答，所以 IndexedDB / OPFS / Cache Storage 的行为和安卓壳一致——离线同样是结构性的，而不是"尽力而为"。
+
+这一层只做壳该做的事：
+
+| 模块 | 作用 |
+|---|---|
+| `shell/AssetServer.ets` | 静态资源服务：虚拟源、正确的 MIME、缺省回 `index.html` |
+| `shell/HttpProxy.ets` | `/api/lyric-proxy` 与 `/api/netease-proxy`：域名白名单、请求头白名单、GET/POST、音频 `Range` 透传 |
+| `shell/WebNeteaseBridge.ets` | 网易中转页：同源 fetch，登录态因此保得住 |
+| `shell/MediaCache.ets` | 在线音频先整首取进内存，页面按 1MiB 分块取回 |
+| `shell/PlaybackSession.ets` | AVSession：锁屏与通知栏控制 |
+| `shell/NetworkMonitor.ets` | 断网时快速失败，不干等超时 |
+
+锁横屏写在 `module.json5` 的 `orientation: "landscape"`（安卓壳对应 `MainActivity` 里的 `setRequestedOrientation`）；权限只申请三条：`INTERNET`、`GET_NETWORK_INFO`、`KEEP_BACKGROUND_RUNNING`。
+
+代理的域名白名单就是壳的网络权限边界（`*.kugou.com`、`*.qq.com`、`y.gtimg.cn` 与网易媒体域名），和安卓壳同一份规矩，改之前先想清楚。
+
 ## 构建
 
 前置：**Node 24**、**JDK 17**、**Android SDK 35**（含 build-tools 35.0.0 与 platform-tools）。
@@ -182,7 +204,19 @@ echo "sdk.dir=/absolute/path/to/android-sdk" > local.properties
 
 壳会自动把 `web/dist` 镜像进 `app/src/main/assets/www/`（见 `android/tools/sync-web-assets.ps1`）；若用手工流程，记得先同步再打包。
 
-### 发布签名
+### 3. HAP（鸿蒙）
+
+前置：**DevEco Studio**（含 SDK API 26）与它自带的 hvigor，不需要全局安装。
+
+```powershell
+cd harmony
+powershell -ExecutionPolicy Bypass -File .\tools\sync-web-assets.ps1   # 把 ..\web\dist 同步进 rawfile\www
+powershell -ExecutionPolicy Bypass -File .\tools\build-hap.ps1         # 打印 HAP 路径与 SHA-256
+```
+
+签名要在 DevEco Studio 里配（File → Project Structure → Signing Configs）；没有签名时产物是未签名的，只能说明编译通过，装不上。另外 `build-hap.ps1` 在 ArkTS 有错时**仍可能以 0 退出并留下上一次的 HAP**，所以看它打印的 SHA-256，别只看退出码。细节见 [`harmony/README.md`](harmony/README.md)。
+
+### 发布签名（Android）
 
 `app/build.gradle` 会在 `android/keystore.properties` 存在时使用正式签名，不存在时**不会**退回调试密钥——发布一个可分发的包应当是一次有意识的动作。
 
@@ -224,6 +258,11 @@ patches/0021-test-ponder-cover-the-touch-button-s-drag-in-a-real-.patch
 patches/0022-feat-debug-record-what-happens-when-the-screen-goes-.patch
 patches/0023-fix-ponder-make-the-dragged-button-follow-the-finger.patch
 patches/0024-feat-netease-answer-the-artist-page-which-was-404-fo.patch
+patches/0025-fix-debug-stop-the-stale-service-worker-from-blankin.patch
+patches/0026-feat-bravais-open-a-collection-at-the-full-seam-on-a.patch
+patches/0027-feat-bravais-widen-the-list-panel-to-the-poster-widt.patch
+patches/0028-feat-playback-give-the-audio-start-a-deadline-and-re.patch
+patches/0029-perf-bravais-mount-the-ring-a-pan-brings-in-over-sev.patch
 ```
 
 - **0001 无句柄本地导入**：新增 OPFS 音频字节仓、`importLocalFiles(File[])` 与文件选择器入口、让 `FileEntryForImport.handle` 可选、三个播放访问器加字节仓回退、无句柄根目录不可重扫、以及让本地页签在只有文件导入可用时也可进入。
@@ -248,7 +287,9 @@ patches/0024-feat-netease-answer-the-artist-page-which-was-404-fo.patch
 - **0019 `jank` 用本次会话自己的帧时间做判据**：硬编码的 33.4ms（「漏两个 60Hz vsync」）在 90Hz 面板上会把「每三个 vsync 一帧」的齐整 33.3–33.5ms 判成 19% 卡顿。改为 `超过 max(33.4ms, 本窗口中位数 × 1.5)`，旧常数留作下界。同一补丁里，逐字发光在 `instant` / `fast` 展开模式下不再拆成每字一个 motion 节点（那两个变体在进入扫光分支前就返回，拆开只是让换行时多挂载一批节点）。
 - **0020 思索按钮可拖动**：触屏上那颗浮动入口从 `right-5 top-5` 改成可拖动的视口坐标（`ponderTouchButtonPosition` 负责钳位与序列化），拖动过程只写 DOM style 与 ref、不经过 React state，松手才写 store；96px 的召唤热区跟着按钮走；拖动不会触发打开思索，按住期间 4 秒的自动收起计时器不会把按钮从手指下面抽走。
 
-`web/` 的内容等于「上游 v0.7.20 + 这二十四个补丁」，可据此审计。
+`web/` 的内容等于「上游 v0.7.20 + 这二十九个补丁」，可据此审计。0025–0029 就是上文 v0.6.4 / v0.6.5 的那几条（退役 Service Worker 止黑屏、窄缝上的集合层、列表面板宽度、播放启动期限、墙面分帧挂磁贴），不再重复叙述。
+
+更晚的改动——酷狗手机号登录、我的歌单、我喜欢——还**没有**整理成补丁，那部分以 `web/` 的提交历史为准。
 
 - **0024 歌手页**：补上 `/artist/detail`（→ `/api/artist/head/info/get`，eapi）、`/artist/album`（→ `/api/artist/albums/{id}`，weapi，id 在路径里所以路由表的 `uri` 改为可接受函数）、`/artist/top/song`（→ `/api/artist/top/song`，weapi）三条路由。缺它们时从搜索结果点进歌手页只会拿到 `{code:404}`，页面渲染成零张专辑。上游路径照参考实现翻译，并用 `test/manual/netease_artist_probe.ts` 直连真接口验证过形态。
 
