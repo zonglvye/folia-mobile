@@ -30,7 +30,8 @@ import { loadOnlineLyricsState, resolveOnlineLyrics } from '../../../utils/onlin
 import type { AudioQualityPreference, MediaId } from '../../../types/onlineMusic';
 import type { PlaybackFailure, RestorePlaybackSourceOutcome } from '../../../types/playbackFailure';
 import { omni } from '../../../services/onlineMusic/omni';
-import { getCachedSongCoverUrl, getSongCacheWithLegacyMigration } from '../../../services/onlineMusic/resourceCache';
+import { getCachedSongCoverUrl, getSongCacheWithLegacyMigration, COVER_LOOKUP_DEADLINE_MS } from '../../../services/onlineMusic/resourceCache';
+import { settleWithin } from '../../../utils/settleWithin';
 import { getSongCoverUrl } from '../../../services/onlineMusic/songMetadata';
 import { useOnlineProviderAccountStore } from '../../../stores/useOnlineProviderAccountStore';
 import { setStatusMessage as setStatusMsg, useStatusMessageStore } from '../../../stores/useStatusMessageStore';
@@ -112,11 +113,23 @@ export const restorePlaybackSourceForSong = async (
         preserveCurrentOnMiss: false,
     });
 
-    setCachedCoverUrl(await getCachedSongCoverUrl(song));
-
     // Every await below can outlive the restore: the listener may pick another song meanwhile, and
     // a late write would put this song's status, source or lyrics over theirs.
     const isCurrent = () => isSamePlaybackSong(usePlaybackStore.getState().currentSong, song);
+
+    // 封面**不挡音源**。这一跳原来是「await 在整条恢复流程最前面」，而它底下是几次 IDB 读、
+    // 旧地址还可能顺手回写一次 blob：任何一次不回来，后面的音源解析就一步都走不到 ——
+    // 界面上是「歌在、封面卡在、按播放没反应」，而且不算失败，所以一条报错都没有。
+    // 真机取证（2026-10，`play:timeout · running · rs 0/0`）：按下播放 4 秒后元素仍然是空的，
+    // 而冷启动正是这条路（setCurrentSong → 恢复音源）。与 playSong 落地那处同一条纪律：
+    // 音源先走，封面后补，最多等 COVER_LOOKUP_DEADLINE_MS。
+    void settleWithin(getCachedSongCoverUrl(song), COVER_LOOKUP_DEADLINE_MS).then(cover => {
+        if (cover.status === 'rejected') {
+            console.warn('[restorePlaybackSourceForSong] Failed to read the cached cover', cover.error);
+            return;
+        }
+        if (cover.status === 'ok' && cover.value && isCurrent()) setCachedCoverUrl(cover.value);
+    });
 
     if (isNavidromePlaybackSong(song)) {
         const navidromeSongToRestore = (song as unknown as SongResult & { navidromeData?: NavidromeSong }).navidromeData;

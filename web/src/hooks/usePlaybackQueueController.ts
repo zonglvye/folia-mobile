@@ -5,7 +5,7 @@ import { applyOnlineAudioSourceMetadata, loadOnlineSongAudioSource, loadOnlineSo
 import { getSongReplacement, isSongUnavailable } from '../services/onlineMusic/songAvailability';
 import { getSongResourceCacheKey } from '../services/onlineMusic/resourceKeys';
 import { omni } from '../services/onlineMusic/omni';
-import { getCachedSongCoverUrl, hasCachedSongAudio } from '../services/onlineMusic/resourceCache';
+import { getCachedSongCoverUrl, hasCachedSongAudio, COVER_LOOKUP_DEADLINE_MS } from '../services/onlineMusic/resourceCache';
 import { getPrefetchedData, invalidateAndRefetch, prefetchNearbySongs, refreshPrefetchAfterQueueEdit } from '../services/prefetchService';
 import { getLocalSong } from '../services/db';
 import { retireBlobUrl } from '../services/playbackBlobUrls';
@@ -48,6 +48,7 @@ import { hasBeforePlayHook, notifyPlaybackFailed, runBeforePlayHook } from '../s
 import { classifyPlaybackError, isTransientPlaybackFailure } from '../services/playbackRecovery/onlinePlaybackFailure';
 import { PLAYBACK_RETRYING_MESSAGE_KEY, isAutoSkipFailure } from '../services/playbackRecovery/playbackFailurePolicy';
 import { presentPlaybackFailure, type PlaybackFailurePresenterDeps } from '../components/app/playback/presentPlaybackFailure';
+import { settleWithin } from '../utils/settleWithin';
 
 // src/hooks/usePlaybackQueueController.ts
 
@@ -729,7 +730,11 @@ export function usePlaybackQueueController({
         // Handed over rather than revoked here: during a blend the song this replaces is still
         // sounding on the other deck, and taking its URL away leaves that deck unable to seek. See
         // `retireBlobUrl` - the failure is silent and permanent, with no error event to notice it by.
-        retireBlobUrl(blobUrlRef.current);
+        //
+        // next 必须是「接下来要交给 deck 的那一条」：新 URL 在下面的 setAudioSrc 之前还不在任何 deck 上，
+        // 传旧 URL 会让扫除把它当作没人用的旧地址撤销。真机上的样子是元素立刻 err 4
+        // （MEDIA_ELEMENT_ERROR: Format error）、进度停在 0，而壳那边日志显示整首已经取回。
+        retireBlobUrl(audioResult.blobUrl ?? blobUrlRef.current);
         blobUrlRef.current = null;
 
         if (queue.length > 0 || playQueue.length === 0) {
@@ -743,20 +748,11 @@ export function usePlaybackQueueController({
         }
         setPlayerState(PlayerState.IDLE);
 
-        const cachedCoverUrl = await getCachedSongCoverUrl(song);
-        // 本次请求已经落地（当前歌曲、队列都已写入、audioSrc 已置空）：只有别的播放也落地了才放弃，
-        // 并回收这个还没交给任何 deck 的 blob。更新的请求只是开始、尚未落地不算取代，仍要接上音源，
-        // 否则那次请求失败时，当前歌会停在没有音源的半落地状态。
-        if (currentSongRef.current !== songKey || playbackGenerationRef.current !== landedGeneration) {
-            if (audioResult.blobUrl) URL.revokeObjectURL(audioResult.blobUrl);
-            return;
-        }
-        if (cachedCoverUrl) {
-            setCachedCoverUrl(cachedCoverUrl);
-        } else if (prefetched?.coverUrl) {
-            setCachedCoverUrl(prefetched.coverUrl);
-        }
-
+        // 音源紧跟着落地，**不等封面缓存**。真机取证（2026-10，`play:timeout · running · rs 0/0`）：
+        // 按下播放 4 秒之后元素里仍然一个字节都没有 —— 歌曲、标题、封面卡都显示着，音源却始终没写进来。
+        // 原来的顺序是「setAudioSrc(null) → await 封面缓存 → setAudioSrc(音源)」，而
+        // getCachedSongCoverUrl 是几次 IDB 读加一次可能的回写：任何一次不回来，声音就跟着一起扣死，
+        // 而且不报错（它没失败，只是没答）。封面是装饰，没有它照样能放，所以把音源提到前面。
         if (audioResult.blobUrl) {
             blobUrlRef.current = audioResult.blobUrl;
             currentOnlineAudioUrlFetchedAtRef.current = null;
@@ -769,6 +765,23 @@ export function usePlaybackQueueController({
             currentOnlineAudioUrlFetchedAtRef.current = null;
         }
         setAudioSrc(audioResult.audioSrc);
+
+        // 封面最多等这么久：超时或失败就当这首歌没有缓存封面，退回预取的那张或默认图。
+        const cachedCoverUrl = await settleWithin(getCachedSongCoverUrl(song), COVER_LOOKUP_DEADLINE_MS);
+        // 本次请求已经落地（当前歌曲、队列、音源都已写入）：只有别的播放也落地了才放弃。
+        // 这里**不再**回收 blob —— 音源已经交给 deck 了，回收等于把正在用的那条 URL 抽走；
+        // 之后有别的歌落地时会走 retireBlobUrl 把它交接出去（见上方 retireBlobUrl 处的注释）。
+        if (currentSongRef.current !== songKey || playbackGenerationRef.current !== landedGeneration) {
+            return;
+        }
+        if (cachedCoverUrl.status === 'rejected') {
+            console.warn('[App] Failed to read the cached cover', cachedCoverUrl.error);
+        }
+        if (cachedCoverUrl.status === 'ok' && cachedCoverUrl.value) {
+            setCachedCoverUrl(cachedCoverUrl.value);
+        } else if (prefetched?.coverUrl) {
+            setCachedCoverUrl(prefetched.coverUrl);
+        }
 
         try {
             await loadOnlineSongLyrics(song, prefetched, userId, {

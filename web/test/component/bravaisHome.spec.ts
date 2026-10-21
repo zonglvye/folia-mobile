@@ -337,12 +337,17 @@ test.describe('[bravais-only] home', () => {
         await expect(filterInput(page)).toHaveValue('beta');
     });
 
-    test('the local seam menu imports a folder; the Navidrome seam refreshes the overview', async ({ page }) => {
+    test('the local seam menu runs the import entry; the Navidrome seam refreshes the overview', async ({ page }) => {
         await showLocal(page);
         await page.evaluate(() => window.__homeProbe!.clearLog());
         await seam(page).locator('[data-bravais-seam-action="more"]').click();
-        await seam(page).locator('[data-bravais-seam-action="home-import-folder"]').click();
-        await expect.poll(async () => (await calls(page, 'service')).map(call => call.key)).toEqual(['importFolder']);
+        // 导入入口的 id 随环境变（Electron 是 …-folder，浏览器是 …-files），跑的是哪个就核对哪个服务函数。
+        const importEntry = seam(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="home-import-folder"], [data-bravais-seam-menu] [data-bravais-seam-action="home-import-files"]').first();
+        const importService = await importEntry.getAttribute('data-bravais-seam-action') === 'home-import-files'
+            ? 'importLocalFilesViaInput'
+            : 'importFolder';
+        await importEntry.click();
+        await expect.poll(async () => (await calls(page, 'service')).map(call => call.key)).toEqual([importService]);
 
         await seam(page).locator('[data-bravais-tab="navidrome"]').click();
         await expect(stage(page)).toHaveAttribute('data-bravais-layer', 'home:navidrome');
@@ -911,7 +916,9 @@ test.describe('[bravais-only] the narrow home seam layout', () => {
         await seam(page).locator('.bravais-seam-tools [data-bravais-seam-action="more"]').click();
         const items = await menuItems(page);
         expect(items.indexOf('directory')).toBeGreaterThanOrEqual(0);
-        expect(items.indexOf('home-import-folder')).toBeGreaterThan(items.indexOf('directory'));
+        // 导入入口的 id 随环境变（Electron 是 …-folder，浏览器与 Android WebView 是 …-files），两者都算本页签的入口。
+        const importIndex = items.findIndex(id => id === 'home-import-folder' || id === 'home-import-files');
+        expect(importIndex).toBeGreaterThan(items.indexOf('directory'));
         expect(items.slice(items.indexOf('rule'))).toEqual(['rule', 'player']);
         await expect(seam(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="directory"]')).toHaveAttribute('role', 'menuitemcheckbox');
     });
@@ -926,10 +933,16 @@ test.describe('[bravais-only] the narrow home seam layout', () => {
         await seam(page).locator('.bravais-seam-tools [data-bravais-seam-action="more"]').click();
         await expect(seam(page)).toHaveAttribute('data-bravais-seam', 'home');
         await expect.poll(async () => Math.round((await seam(page).boundingBox())?.width ?? 0)).toBe(120);
-        await expect(seam(page).locator('[data-bravais-seam-menu]')).toBeVisible();
-        expect(await menuItems(page)).toEqual(['filter', 'manage-hidden']);
+        // 这个宽度已经是窄视口（窗口 900 减去滚动条）：菜单按 BravaisSeamMenuSheet 走底部面板，挂在 stage 根节点上
+        // 而不在缝里，所以从页面级找它。宽视口那一档仍在缝里，见 bravaisSeamMenuSheet.spec.ts。
+        const sheetMenu = page.locator('[data-bravais-seam-menu]');
+        await expect(sheetMenu).toBeVisible();
+        await expect(sheetMenu).toHaveAttribute('data-bravais-seam-menu-sheet', 'true');
+        expect(await sheetMenu.locator('> *').evaluateAll(elements => elements.map(
+            element => (element as HTMLElement).dataset.bravaisSeamAction ?? (element.getAttribute('role') === 'separator' ? 'rule' : '?'),
+        ))).toEqual(['filter', 'manage-hidden']);
         await page.keyboard.press('Escape');
-        await expect(seam(page).locator('[data-bravais-seam-menu]')).toHaveCount(0);
+        await expect(sheetMenu).toHaveCount(0);
         await expect(seam(page)).toHaveAttribute('data-bravais-seam', 'home');
     });
 

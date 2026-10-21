@@ -31,6 +31,14 @@ const NETEASE_USER_CACHE_KEYS = {
     cloudPlaylist: getProviderCacheKey('netease', 'user_cloud_playlist'),
 };
 
+/**
+ * 「未登录」的回答之后隔多久再问一次。
+ *
+ * 一次回答不足以证明凭据失效：换平台、中继页正忙、上游偶发 5xx 都可能回一个没有 profile 的成功应答。
+ * 真掉线是稳定的，隔一拍再问还是未登录才清 cookie —— 否则一次抖动就把用户踢下线。
+ */
+const NETEASE_LOGIN_RECHECK_DELAY_MS = 600;
+
 const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -124,7 +132,25 @@ export function useNeteaseLibrary({
             error: undefined,
         });
         try {
-            const profile = await omni.getLoginStatus('netease');
+            let profile = await omni.getLoginStatus('netease');
+            if (!profile) {
+                // 第一次说未登录时先别信：换平台、中继页重载、上游抖动都可能给出一个没有 profile 的成功应答。
+                // 清 cookie 是不可逆的（下次要重新扫码），所以这里再问一次；重问本身失败也不清，只标刷新失败。
+                await new Promise(resolve => { setTimeout(resolve, NETEASE_LOGIN_RECHECK_DELAY_MS); });
+                try {
+                    profile = await omni.getLoginStatus('netease');
+                } catch (error) {
+                    const cached = useOnlineProviderAccountStore.getState().accounts.netease;
+                    console.warn('[NeteaseLibrary] login re-check failed; keeping the remembered account', error);
+                    updateProviderAccount('netease', {
+                        status: cached?.user ? 'authenticated' : 'error',
+                        hydration: 'ready',
+                        freshness: 'error',
+                        error: error instanceof Error ? error.message : 'netease_login_check_failed',
+                    });
+                    return false;
+                }
+            }
             if (profile) {
                 setUser(profile);
 
@@ -172,6 +198,7 @@ export function useNeteaseLibrary({
             }
 
             lastRefreshAuthExpiredRef.current = true;
+            console.warn('[NeteaseLibrary] login confirmed missing after re-check; clearing the stored session');
             await clearAuthState();
         } catch (error) {
             console.log('Not logged in, session expired, or offline');

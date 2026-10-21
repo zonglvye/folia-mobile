@@ -1,6 +1,18 @@
 
 
 export default {
+  "kugouLogin": {
+    "title": "Sign in to KuGou",
+    "hint": "Enter your phone number and the code we send. The session is remembered with the account, so switching platforms does not sign you out.",
+    "mobile": "Phone number",
+    "code": "Verification code",
+    "send": "Send code",
+    "resend": "Resend in {{seconds}}s",
+    "submit": "Sign in",
+    "sending": "Sending…",
+    "loggingIn": "Signing in…",
+    "failed": "Sign-in failed: {{message}}"
+  },
   "libraryBravais": {
     "suiteName": "Bravais wall",
     "homeTitle": "Library",
@@ -378,6 +390,7 @@ export default {
     "songTemporarilyUnavailableMaybeMembership": "Can't play this song right now. A membership may be required for the full track.",
     "songTemporarilyUnavailableMaybeRegion": "Can't play this song right now. It may be restricted in your region.",
     "songNetworkFailed": "Couldn't connect to load this song. Check your network and try again.",
+    "songWaitingForNetwork": "You're offline. Playback will resume when the network is back.",
     "songRequestTimedOut": "Loading this song timed out. Please try again.",
     "songRetrying": "Connection failed. Retrying…",
     "songServiceUnavailable": "The music service is unavailable right now. Please try again later.",
@@ -829,6 +842,7 @@ export default {
       "settings-toggle-auto-play-on-launch": { "title": "Auto-play on launch", "description": "Toggle whether opening the app resumes the last session by itself" },
       "settings-toggle-transcode-fallback": { "title": "Transcode unsupported audio", "description": "Toggle Electron recovery for local and Navidrome audio Chromium cannot decode" },
       "settings-toggle-playback-fade": { "title": "Fade on pause and resume", "description": "Toggle the short fade when pausing and resuming playback" },
+      "settings-toggle-direct-output": { "title": "Direct audio output", "description": "Bypass Web Audio so the audio element feeds the system directly (no visualiser, equaliser or fades). Needs an app restart." },
       "settings-toggle-auto-skip-unplayable": { "title": "Skip unplayable songs", "description": "Toggle counting down to a skip when a song is restricted or fails for an unknown reason" },
       "settings-toggle-bottom-subtitle-overlay": { "title": "Toggle bottom subtitle overlay", "description": "Show or hide the whole bottom subtitle overlay" },
       "settings-cycle-subtitle-content-mode": { "title": "Cycle subtitle content mode", "description": "Cycle subtitle content between translation, romanization, and romanization plus translation" },
@@ -2835,6 +2849,9 @@ export default {
     "neteaseScrobble": "Report plays (NetEase only)",
     "neteaseScrobbleDesc": "Reports a play to your NetEase account after you have really listened to at least 30 seconds of an online NetEase track. Local files, cloud-disk uploads and other providers are never reported. This feature carries some risk - use it with care.",
     "neteaseScrobbleSignInHint": "Sign in to NetEase Cloud Music to use this.",
+    "directOutput": "Direct output",
+    "directOutputDesc": "Send the sound straight out, without Web Audio. For devices where Web Audio produces no sound (HarmonyOS NEXT's Android compatibility layer does this). Costs the visualiser, the equaliser and the fades.",
+    "directOutputRestartHint": "Enabled: quit the app completely and open it again for this to take effect.",
     "queueDefaultBehavior": "Default position when adding to queue",
     "queueDefaultBehaviorDesc": "Default behavior when adding a song to the queue.",
     "queueAppendLabel": "Append to end",

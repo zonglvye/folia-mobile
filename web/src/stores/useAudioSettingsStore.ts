@@ -36,6 +36,15 @@ export const NETEASE_SCROBBLE_KEY = 'folia_netease_scrobble';
 export const PLAYBACK_FADE_KEY = 'folia_playback_fade_enabled';
 
 /**
+ * 直出模式：不建 Web Audio 图，让 `<audio>` 直接把声音送到系统。
+ *
+ * 代价是没有可视化、没有均衡与音效、没有淡入淡出；换来的是绕开「音频渲染线程不拉元素」那一档
+ * （鸿蒙 NEXT 的安卓兼容环境里，Web Audio 拿不到音频线程，context 会报 running 而元素时钟冻死）。
+ * 默认关。**改了要重启应用才生效**：元素一旦被 createMediaElementSource 接管就回不到直出。
+ */
+export const DIRECT_OUTPUT_KEY = 'folia_direct_output_enabled';
+
+/**
  * Whether a song that cannot be played for an account restriction or an unknown reason counts down to
  * a skip, like a taken-down one (services/playbackRecovery/playbackFailurePolicy). Off unless asked for.
  */
@@ -150,6 +159,8 @@ export type AudioSettingsState = {
     neteaseScrobbleEnabled: boolean;
     /** Short fade when pausing and resuming instead of cutting the sound. On by default. */
     playbackFadeEnabled: boolean;
+    /** 直出模式：不建 Web Audio 图（没有可视化/均衡/淡入淡出），重启后生效。 */
+    directOutputEnabled: boolean;
     /** Count down to a skip when a song is restricted or fails for an unknown reason. Off by default. */
     autoSkipUnplayable: boolean;
     audioOutputDeviceId: string;
@@ -166,6 +177,7 @@ export type AudioSettingsState = {
     handleToggleTranscodeFallback: (enable: boolean) => void;
     handleToggleNeteaseScrobble: (enable: boolean) => void;
     handleTogglePlaybackFade: (enable: boolean) => void;
+    handleToggleDirectOutput: (enable: boolean) => void;
     handleToggleAutoSkipUnplayable: (enable: boolean) => void;
     handleSetAudioOutputDeviceId: (deviceId: string) => void;
     handleSetAudioEqualizerSettings: (settings: AudioEqualizerSettings) => void;
@@ -194,6 +206,8 @@ export const useAudioSettingsStore = create<AudioSettingsState>((set, get) => ({
     // Off unless asked for: it writes to the listener's music account, so it is never a default.
     neteaseScrobbleEnabled: getStoredBoolean(NETEASE_SCROBBLE_KEY, false),
     playbackFadeEnabled: getStoredBoolean(PLAYBACK_FADE_KEY, true),
+    // Off unless asked for：这是给「Web Audio 在这台机器上不出声」准备的旁路，正常机器不该默认少掉可视化。
+    directOutputEnabled: getStoredBoolean(DIRECT_OUTPUT_KEY, false),
     // Off unless asked for: skipping a song the listener picked is not something to do by default.
     autoSkipUnplayable: getStoredBoolean(AUTO_SKIP_UNPLAYABLE_KEY, false),
     audioOutputDeviceId: readStoredAudioOutputDeviceId(),
@@ -248,6 +262,10 @@ export const useAudioSettingsStore = create<AudioSettingsState>((set, get) => ({
     handleTogglePlaybackFade: (enable) => {
         setStoredBoolean(PLAYBACK_FADE_KEY, enable);
         set({ playbackFadeEnabled: enable });
+    },
+    handleToggleDirectOutput: (enable) => {
+        setStoredBoolean(DIRECT_OUTPUT_KEY, enable);
+        set({ directOutputEnabled: enable });
     },
     handleToggleAutoSkipUnplayable: (enable) => {
         setStoredBoolean(AUTO_SKIP_UNPLAYABLE_KEY, enable);
@@ -349,6 +367,7 @@ export const selectAudioSettingsSnapshot = (state: AudioSettingsState) => ({
     enableTranscodeFallback: state.enableTranscodeFallback,
     neteaseScrobbleEnabled: state.neteaseScrobbleEnabled,
     playbackFadeEnabled: state.playbackFadeEnabled,
+    directOutputEnabled: state.directOutputEnabled,
     autoSkipUnplayable: state.autoSkipUnplayable,
     audioOutputDeviceId: state.audioOutputDeviceId,
     audioEqualizerSettings: state.audioEqualizerSettings,
@@ -364,6 +383,7 @@ export const selectAudioSettingsSnapshot = (state: AudioSettingsState) => ({
     handleToggleTranscodeFallback: state.handleToggleTranscodeFallback,
     handleToggleNeteaseScrobble: state.handleToggleNeteaseScrobble,
     handleTogglePlaybackFade: state.handleTogglePlaybackFade,
+    handleToggleDirectOutput: state.handleToggleDirectOutput,
     handleToggleAutoSkipUnplayable: state.handleToggleAutoSkipUnplayable,
     handleSetAudioOutputDeviceId: state.handleSetAudioOutputDeviceId,
     handleSetAudioEqualizerSettings: state.handleSetAudioEqualizerSettings,

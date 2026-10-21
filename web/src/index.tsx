@@ -4,6 +4,7 @@ import { isAndroidShell } from './utils/platform';
 import { installConsoleLogCapture } from './utils/consoleLogBuffer';
 import { installDebugModule } from './services/debug/debugModule';
 import { installMemorySampleFeed } from './services/debug/memorySamples';
+import { installShellFetchProxy } from './services/shellFetchProxy';
 // import { installCoverSizeAudit } from './services/debug/coverSizeSamples';
 // @ts-ignore
 globalThis.Buffer = Buffer;
@@ -27,6 +28,11 @@ if (isAndroidShell()) {
     ensureVisualizerFrameRateDefault(60);
 }
 installGlobalVisualizerFrameRateLimiter();
+
+// 鸿蒙壳把同源代理做成了异步桥方法（ArkWeb 的拦截回调是同步的，拿不到上游数据）。
+// 有桥就把 fetch 接过去；浏览器 / 桌面 / 安卓壳没有这个方法，这一步什么也不做。
+// 必须在 bootstrap 之前装：provider 的第一次请求就在启动阶段。
+installShellFetchProxy();
 
 // ---- service worker 策略 -------------------------------------------------------------
 // 手机壳里**不注册** service worker，并且把以前注册过的那份清掉。

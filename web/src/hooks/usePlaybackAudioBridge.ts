@@ -8,6 +8,7 @@ import { calculateReplayGain } from '../utils/replayGain';
 import { applyAudioEqualizerSettings } from '../services/audioEqualizerGraph';
 import { type AudioEffectChain } from '../services/audioEffects/effectChain';
 import { buildPlaybackGraph } from '../services/playbackGraph';
+import { keepAudioContextAwake } from '../services/playback/audioContextRecovery';
 import { cachePlayedTrackAssets } from '../services/playedTrackCache';
 import { registerPlaybackFadeGraph } from '../services/playbackFade';
 import { rampGain, type AutomixDeckChain } from '../services/automix/crossfadeGraph';
@@ -68,6 +69,8 @@ export function usePlaybackAudioBridge({
     const currentSong = usePlaybackStore(state => state.currentSong);
     const replayGainMode = usePlaybackStore(state => state.replayGainMode);
     const enableMediaCache = useAudioSettingsStore(state => state.enableMediaCache);
+    // 直出模式：不建 Web Audio 图。见 setupAudioAnalyzer 里的说明。
+    const directOutputEnabled = useAudioSettingsStore(state => state.directOutputEnabled);
     const isPanelOpen = useAppViewStore(state => state.isPanelOpen);
     const panelTab = useAppViewStore(state => state.panelTab);
 
@@ -136,10 +139,26 @@ export function usePlaybackAudioBridge({
         // The context is the sentinel, not the source node: a deck that failed to connect must
         // not let this run twice, because createMediaElementSource throws on a second call.
         if (!audioRef.current || audioContextRef.current) return;
+        // 直出模式：一张图都不建，让 <audio> 自己把声音送到系统。
+        // 这是给「Web Audio 在这台机器上不出声」准备的旁路（鸿蒙 NEXT 的安卓兼容环境里，
+        // context 会报 running 而元素时钟冻死，见 audioContextRecovery 的文件头）。
+        // 一旦建了图，元素就被 createMediaElementSource 接管，回不到直出 —— 所以这个开关只在
+        // 首次播放之前有效，改了要重启应用。音量在 App.tsx 的 syncOutputGain 里另有直出分支。
+        if (directOutputEnabled) {
+            console.warn('[AudioContext] direct output mode: Web Audio graph disabled (no visualiser / equaliser / fade)');
+            return;
+        }
         try {
             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+            // 不传任何参数：0.6.8 那版曾给安卓显式开 48k（当时错误地怪蓝牙），而真机后来抓到的
+            // 「假 running」（`rs 4/1 · p 0 · +0.00s`）里，它是唯一被自己引进这条路径的变量，已撤回。
+            // 取样率交给平台按当前输出设备自己谈。
             const ctx = new AudioContextClass();
             audioContextRef.current = ctx;
+            // 被系统收走（蓝牙路由切换 / 来电 / 别的应用抢焦点）之后，安卓上这个 context 会停在
+            // 'interrupted'：节点图不推进，挂进来的 <audio> 也被拖着，表现为「按了播放没反应、进度条不动」。
+            // 手势唤醒与状态重试都在这里装（见 audioContextRecovery 的文件头）。
+            keepAudioContextAwake(ctx);
 
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 2048;
@@ -166,7 +185,7 @@ export function usePlaybackAudioBridge({
         } catch (error) {
             console.error('Audio Context Setup Failed:', error);
         }
-    }, [analyserRef, applyReplayGain, audioContextRef, audioEqualizerSettings, audioRef, connectDecks, gainNodeRef, getTargetPlaybackVolume, syncOutputGain]);
+    }, [analyserRef, applyReplayGain, audioContextRef, audioEqualizerSettings, audioRef, connectDecks, directOutputEnabled, gainNodeRef, getTargetPlaybackVolume, syncOutputGain]);
 
     /**
      * Writes a fully-played track's audio and cover into the media cache.

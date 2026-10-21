@@ -16,6 +16,7 @@ import { usePlayerChromeSettingsStore } from '../stores/usePlayerChromeSettingsS
 import { PLAYER_BOTTOM_BAR_BASE_OFFSET_PX, clampPlayerBottomBarOffset, resolvePlayerBottomBarMaxOffset } from '../utils/playerBottomBarLayout';
 import type { PlayerControlSlotActionId, PlayerControlSlotContext } from './floating-player/playerControlSlotActions';
 import { usePlayerOverlayObstacle } from '../hooks/usePlayerOverlayLayout';
+import { useSupportsFinePointer } from '../hooks/useSupportsFinePointer';
 
 export interface TrackNavigation {
     /** 当前曲目的稳定身份，用于识别「确实换歌了」；相邻两首同名时标题字符串不变，不能拿标题判断 */
@@ -151,8 +152,54 @@ const FloatingPlayerControls: React.FC<FloatingPlayerControlsProps> = ({
     ));
 
     const canAutoExpand = canTogglePlay && duration > 0;
+    /*
+     * 触摸设备没有 hover，`isHovered` 永远为真不了，于是「播放中 → 折叠」这条规则在手机上
+     * 会变成永久折叠：胶囊里只剩一条 6px 的进度，暂停和切歌按钮根本没被渲染（实测折叠态下
+     * CollapsedView 只有 ProgressBar）。所以没有可悬停指针时，播放页改为点胶囊切换展开/收起，
+     * 默认展开——手机上要的就是按钮随手可及。
+     */
+    const canHover = useSupportsFinePointer();
+    const [touchExpanded, setTouchExpanded] = useState(true);
+    const touchExpandable = !canHover && currentView === 'player';
     // 定位模式强制展开：用户要看到的是最终形态的胶囊，而不是一条细进度条。
-    const showExpanded = isPositioning || isHovered || (canAutoExpand && playerState !== PlayerState.PLAYING && currentView !== 'home');
+    //
+    // `isHovered` 只在真的有可悬停指针时才算数：手机壳会把每次点击合成成一次 mouseenter
+    // （真机日志：点击后 15ms `isHovered` 变 true 并一直挂着），于是「点一下收起」会被立刻顶回展开，
+    // 表现成点了没反应。不能悬停的设备走下面的 touchExpanded 分支。
+    const showExpanded = isPositioning
+        || (canHover && isHovered)
+        // 触摸 + 播放页时展开与否完全由 touchExpanded 说了算：这里不再叠加「暂停就强制展开」，
+        // 否则收起后一暂停又自己弹开，而且此时点背景是收不掉的（状态改了但没有视觉效果）。
+        || (canAutoExpand && playerState !== PlayerState.PLAYING && currentView !== 'home' && !touchExpandable)
+        || (touchExpandable && touchExpanded);
+
+    /*
+     * 想只看歌词时，点背景（歌词/可视化区域）也应该收起控制条，不必先去找到那条胶囊。
+     * 只在「播放页 + 触摸 + 当前展开」时挂：落点在控制条内部、或任何面板/菜单/弹窗里时不动，
+     * 免得和正在操作的 UI 打架。用捕获阶段的 pointerdown，比 click 早，收起手感干脆。
+     */
+    useEffect(() => {
+        if (!touchExpandable || !touchExpanded || isPositioning) {
+            return;
+        }
+
+        const collapseOnBackgroundTap = (event: PointerEvent) => {
+            const target = event.target;
+            if (!(target instanceof Element)) {
+                return;
+            }
+            if (target.closest('[data-ponder="player-bar"]')) {
+                return;
+            }
+            if (target.closest('[role="dialog"], [role="menu"], .bravais-seam-sheet-host, .bravais-seam-menu')) {
+                return;
+            }
+            setTouchExpanded(false);
+        };
+
+        document.addEventListener('pointerdown', collapseOnBackgroundTap, true);
+        return () => document.removeEventListener('pointerdown', collapseOnBackgroundTap, true);
+    }, [isPositioning, touchExpandable, touchExpanded]);
 
     // 上限依赖视口高度，窗口变矮时要跟着收，否则虚线框会画到屏幕外。
     useEffect(() => {
@@ -244,11 +291,14 @@ const FloatingPlayerControls: React.FC<FloatingPlayerControlsProps> = ({
     //
     // 读的是已保存值而不是拖动中的 MotionValue：这个数要参与 padding/margin 的布局计算，
     // 跟着每帧变就得每帧 setState。拖动过程中 hover 展开本来也不起作用，落定后自然就对了。
+    //
+    // 不能悬停的设备上一律为 0：这块补丁存在的唯一理由是「指针从胶囊下方靠近时也能触发悬停展开」，
+    // 没有 hover 就只剩副作用 —— 一条看不见的 82px 高的横带把整个屏幕底部（374 高里的 22%）的点击
+    // 全吃掉。实测它盖住了歌手页的「列表」「更多」，按钮明明在视口里却点不动。
     const savedBottomBarOffset = usePlayerChromeSettingsStore(state => state.playerBottomBarOffset);
-    const hoverHitboxBufferPx = Math.max(
-        0,
-        Math.round(HOVER_HITBOX_BOTTOM_BUFFER_PX - (savedBottomBarOffset - PLAYER_BOTTOM_BAR_BASE_OFFSET_PX)),
-    );
+    const hoverHitboxBufferPx = canHover
+        ? Math.max(0, Math.round(HOVER_HITBOX_BOTTOM_BUFFER_PX - (savedBottomBarOffset - PLAYER_BOTTOM_BAR_BASE_OFFSET_PX)))
+        : 0;
 
     // 槽位上下文：调用方给的那份，加上胶囊自己掌握的循环模式、歌词时间轴和相邻曲目可用性。
     const resolvedSlotContext = useMemo<PlayerControlSlotContext>(() => ({
@@ -308,6 +358,12 @@ const FloatingPlayerControls: React.FC<FloatingPlayerControlsProps> = ({
 
     const handleClick = () => {
         if (isPositioning) {
+            return;
+        }
+        // 播放页 + 没有 hover：点胶囊就是展开/收起控制条。这里本来点是「导航到播放页」，
+        // 而人已经在播放页上了，等于空动作 —— 正好腾给展开。
+        if (touchExpandable) {
+            setTouchExpanded(value => !value);
             return;
         }
         if (currentView !== 'lattice') {

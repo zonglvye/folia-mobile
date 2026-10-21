@@ -31,8 +31,6 @@ const MAX_SAMPLE_MS = 250;
 /** ~10 s at 60 Hz, ~5 s at 120 Hz. Longer than a scroll gesture, short enough to stay current. */
 const FRAME_CAPACITY = 900;
 
-const FRAME_HUD_STORAGE_KEY = 'folia-frame-hud-visible';
-
 export interface FrameStats {
     frames: number;
     /** Total measured time covered by the samples, ms. */
@@ -416,22 +414,13 @@ export const readFrameStats = (): FrameStats => {
 
 // ---- visibility ------------------------------------------------------------
 
+// 2026-10：应用里不再挂帧率 HUD（左上角长按那个开关通道已去掉），采样因此默认关闭，也不再从存储恢复——
+// 曾经打开过它的设备不该在没有界面的情况下继续跑一个逐帧 rAF 和两个 observer。显式 setFrameHudVisible(true)
+// 仍然是唯一的打开入口（以后要从设置里接回来也走它）。开关打开时才有采样，这条约束没变。
 let visible = false;
 const listeners = new Set<() => void>();
 
 const notify = () => listeners.forEach(listener => listener());
-
-const readStoredVisibility = (): boolean => {
-    if (typeof window === 'undefined') return false;
-    try {
-        return window.localStorage.getItem(FRAME_HUD_STORAGE_KEY) === '1';
-    } catch {
-        return false;
-    }
-};
-
-visible = readStoredVisibility();
-if (visible) startSampling();
 
 export const isFrameHudVisible = () => visible;
 
@@ -440,15 +429,10 @@ export const subscribeToFrameHud = (listener: () => void) => {
     return () => { listeners.delete(listener); };
 };
 
-/** Persisted so the HUD survives the reload a phone brings back with the app. */
+/** 采样开关。当前应用里没有消费者（见上面的说明），保留给以后的设置入口或控制台排查。 */
 export const setFrameHudVisible = (next: boolean) => {
     if (visible === next) return;
     visible = next;
-    try {
-        window.localStorage.setItem(FRAME_HUD_STORAGE_KEY, next ? '1' : '0');
-    } catch {
-        // Session-only: the switch still works, it just will not come back after a reload.
-    }
     if (next) {
         resetFrameSamples();
         startSampling();

@@ -19,7 +19,14 @@ const NO_RETRY: readonly number[] = [];
 export interface PlaybackFailurePolicyOptions {
     /** 「无法播放时自动跳过」：受限类与原因不明的失败也倒计时跳歌。默认关。 */
     autoSkipUnplayable?: boolean;
+    /** 当前明确离线：网络类失败换用「网络恢复后自动继续」的文案。 */
+    offline?: boolean;
 }
+
+/** 断网重连负责的原因：网络/超时，恢复后重试确实可能成功。 */
+export const isReconnectableFailure = (failure: PlaybackFailure): boolean => (
+    failure.reason === 'network' || failure.reason === 'timeout'
+);
 
 /** 「无法播放时自动跳过」打开时倒计时用的文案；不说原因，只说放不了、几秒后跳过。 */
 export const UNPLAYABLE_SKIP_PROMPT_KEY = 'status.songUnplayableSkipPrompt' as const;
@@ -140,6 +147,12 @@ export const resolvePlaybackFailurePolicy = (
         policy = { ...policy, actions: ['skip'] };
     }
 
+    // 明确离线：告诉用户网络恢复后会自动继续（见 playbackRecovery/networkReconnect），
+    // 而不是让他去检查网络再手动点一次。
+    if (options.offline && failure.reason === 'network') {
+        policy = { ...policy, messageKey: 'status.songWaitingForNetwork' };
+    }
+
     if (options.autoSkipUnplayable && policy.autoSkip === 'none' && isUnplayableAutoSkipCandidate(failure)) {
         policy = { ...policy, autoSkip: 'countdown', countdownKey: UNPLAYABLE_SKIP_PROMPT_KEY };
     }
@@ -175,6 +188,7 @@ const MESSAGE_KEY_REGISTRY: Record<PlaybackFailureMessageKey, true> = {
     'status.songRegionRestricted': true,
     'status.songUnavailable': true,
     'status.songNetworkFailed': true,
+    'status.songWaitingForNetwork': true,
     'status.songRequestTimedOut': true,
     'status.songServiceUnavailable': true,
     'status.songServiceNotConfigured': true,

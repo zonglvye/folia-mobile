@@ -202,7 +202,11 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                     onInput={handleInput}
                     onChange={() => { }} // React requires this
                     onClick={(e) => e.stopPropagation()}
-                    className={`absolute inset-0 w-full h-full opacity-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                    // 命中区要跟可见轨道分开算。轨道只有 h-1.5（6px），手机上实测出来的命中框就是
+                    // 134×6 —— 一根手指基本点不中，稍微偏一点就落到胶囊本身上（在播放页那是空动作），
+                    // 于是整条进度条读起来就是「点不开」。这里把 input 这个透明层加高到 30px
+                    // （轨道 6 + 上下各 12，仍落在胶囊内部），视觉上依旧是那条细轨道。
+                    className={`absolute left-0 right-0 -top-3 h-[30px] w-full opacity-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                 />
                 <FoliumProgressLayers ctx={foliumCtx} />
             </div>

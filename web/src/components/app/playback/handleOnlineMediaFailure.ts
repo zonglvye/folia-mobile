@@ -6,6 +6,7 @@ import type {
     PlaybackFailureSkipOptions,
 } from '../../../types/playbackFailure';
 import { distrustCachedSongAudio } from '../../../services/playbackRecovery/mediaCacheGuard';
+import { isNetworkOffline } from '../../../services/playbackRecovery/networkReconnect';
 import { classifyMediaPlaybackFailure } from '../../../services/playbackRecovery/onlinePlaybackFailure';
 import { getOnlineProviderIdForSong, getPlaybackSongKey } from '../../../utils/appPlaybackGuards';
 
@@ -61,8 +62,16 @@ export const handleOnlineMediaFailure = async ({
             });
     };
 
+    // 明确离线时不要去刷音源：壳里的中继请求会等到 20s 超时再退回系统栈、再来 30s，最后仍然失败，
+    // 用户只会看到更久的卡顿。直接按网络失败展示，并把这次重试交给断网重连（网络恢复后自动重跑）。
+    if (isNetworkOffline()) {
+        skipAfterPlaybackFailure(mediaFailure, { failedSongKey, failedGeneration, retry });
+        return;
+    }
+
     const result = await recoverOnlinePlaybackSource({ failedSrc, resumeAt, autoplay, bypassMediaCache: isBlob });
     if (result.status === 'recovered' || result.status === 'stale') return;
+
 
     // not-attempted：同一个媒体文件刷新过仍然出错，或不适用刷新，只能按媒体错误码给出原因。
     const failure = result.status === 'failed' ? result.failure : mediaFailure;

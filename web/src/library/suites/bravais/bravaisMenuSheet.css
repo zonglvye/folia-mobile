@@ -1,0 +1,66 @@
+/* src/library/suites/bravais/bravaisMenuSheet.css
+ *
+ * 缝里的「⋯」菜单在**矮视口**（手机横屏 823×374）的底部面板样式。
+ *
+ * 这几条原本只写在 bravaisCollection.css 里，而那个文件只被 BravaisSeamCollection 引入 ——
+ * 首页的「⋯」菜单根本没有这套规则：面板带着 `is-sheet` 类、也被 portal 到了
+ * `.bravais-seam-sheet-host`，但没有 CSS 定位，量出来 rect.top = -240，整块跑到屏幕上方之外。
+ * 用户看到的就是「点 ⋯ 什么都没出现」。
+ *
+ * 所以把它挪到菜单组件自己身上（BravaisSeamMenuSheet 直接 import），哪个界面打开都能用。
+ * bravaisCollection.css 里的同名规则保留原样：内容一致，重复不会打架。
+ */
+
+.bravais-seam-sheet-host {
+    position: fixed;
+    inset: 0;
+    z-index: 130;
+    pointer-events: none;
+}
+
+/* 选择器带上 `.is-home`（三条类）是必须的：`.bravais-seam-menu.is-home` 里写的是「贴着按钮往上弹」
+ * （`bottom: calc(100% + 8px)`），和这里同为两条类的特异性，谁在后面谁赢。首页的菜单同时带着
+ * 两个类，打包后 is-home 排在后面，于是底部面板被顶到宿主层上方 100%（374px），量出来 rect.top = -240。
+ * 三条类稳压它，跟文件顺序无关。 */
+.bravais-seam-menu.is-sheet,
+.bravais-seam-menu.is-home.is-sheet {
+    position: absolute;
+    left: 0;
+    right: 0;
+    /* 先给不带 env() 的一档：env() 若被解析掉，整条声明作废，后面的 calc 里只剩 auto 就等于没定位。 */
+    bottom: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    top: auto;
+    z-index: 1;
+    width: min(440px, calc(100vw - 24px));
+    max-height: 62vh;
+    margin-inline: auto;
+    padding: 8px;
+    gap: 0;
+    overflow-y: auto;
+    border-radius: 16px;
+    /* 面板自己带不透明底与阴影：手机上离内容更近，半透明会让下面的封面透上来。 */
+    background: color-mix(in srgb, var(--bg-color, #070707) 96%, var(--text-primary, #f7f4ee));
+    box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 14%, transparent), 0 -8px 32px rgb(0 0 0 / 44%);
+    pointer-events: auto;
+}
+
+/* 行高收紧：手机横屏视口只有 374px 高，六项菜单要一次放得下。 */
+.bravais-seam-menu.is-sheet button,
+.bravais-seam-menu.is-home.is-sheet button {
+    padding: 7px 10px;
+}
+
+.bravais-seam-menu.is-sheet > .bravais-seam-menu-rule,
+.bravais-seam-menu.is-home.is-sheet > .bravais-seam-menu-rule {
+    margin: 4px 6px;
+}
+
+/* 遮罩：把墙压暗，点它收起。跟面板在同一个宿主层里，不可能再出现「遮罩在、面板不在」。 */
+.bravais-seam-menu-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background: rgb(0 0 0 / 42%);
+    pointer-events: auto;
+}

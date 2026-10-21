@@ -972,3 +972,85 @@ describe('providerAccountController · failures are logged in full for every pro
         expect(text).toContain('"failureReason":"local-backoff"');
     });
 });
+
+describe('providerAccountController · phone login', () => {
+    // 手机号验证码登录（酷狗在没有后端实例时）：不进扫码会话，只有一个表单。
+    beforeEach(() => {
+        auth.canLoginWithCode = vi.fn((providerId: OnlineProviderId) => providerId === 'gamma');
+        auth.sendLoginCode = vi.fn(async (providerId: OnlineProviderId, mobile: string) => {
+            ops.push(['send-code', providerId, mobile]);
+            if (mobile === '10000000000') throw new Error('手机格式不正确');
+        });
+        auth.loginWithCode = vi.fn(async (providerId: OnlineProviderId, mobile: string, code: string) => {
+            ops.push(['login-code', providerId, mobile, code]);
+            return { id: 'kg-1', nickname: '酷狗用户' };
+        });
+    });
+
+    it('opens the phone sheet instead of a QR session', async () => {
+        const controller = createController();
+
+        await expect(controller.startLogin('gamma')).resolves.toMatchObject({ status: 'started', step: 'phone' });
+
+        expect(controller.getSnapshot().login).toBeNull();
+        expect(controller.getSnapshot().phoneLogin).toEqual({
+            providerId: 'gamma',
+            pending: null,
+            error: null,
+            codeSentAt: null,
+        });
+        expect(auth.createQrLogin).not.toHaveBeenCalled();
+    });
+
+    it('records the send time on success and the upstream text on failure', async () => {
+        const controller = createController();
+        await controller.startLogin('gamma');
+
+        await expect(controller.sendPhoneCode('13800138000')).resolves.toEqual({ status: 'ok' });
+        expect(controller.getSnapshot().phoneLogin?.codeSentAt).toBe(manual.clock.now());
+
+        await expect(controller.sendPhoneCode('10000000000')).resolves.toEqual({
+            status: 'failed',
+            message: '手机格式不正确',
+        });
+        expect(controller.getSnapshot().phoneLogin).toMatchObject({ pending: null, error: '手机格式不正确' });
+    });
+
+    it('refreshes the account and asks to activate after a successful login', async () => {
+        const controller = createController();
+        await controller.startLogin('gamma');
+
+        await expect(controller.confirmPhoneLogin('13800138000', '123456')).resolves.toEqual({ status: 'ok' });
+        await manual.flush();
+
+        expect(refresh).toHaveBeenCalledWith('gamma');
+        expect(controller.getSnapshot().phoneLogin).toBeNull();
+        // gamma 不是当前平台（alpha）：登录成功后走 activate-after-login 确认。
+        expect(controller.getSnapshot().pendingSwitch?.to).toBe('gamma');
+    });
+
+    it('keeps the sheet open when the code is rejected', async () => {
+        const controller = createController();
+        await controller.startLogin('gamma');
+        (auth.loginWithCode as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('验证码过期'));
+
+        await expect(controller.confirmPhoneLogin('13800138000', '000000')).resolves.toEqual({
+            status: 'failed',
+            message: '验证码过期',
+        });
+
+        expect(controller.getSnapshot().phoneLogin).toMatchObject({ pending: null, error: '验证码过期' });
+        expect(controller.getSnapshot().pendingSwitch).toBeNull();
+        expect(refresh).not.toHaveBeenCalled();
+    });
+
+    it('closes the sheet without calling the backend', async () => {
+        const controller = createController();
+        await controller.startLogin('gamma');
+
+        expect(controller.closePhoneLogin()).toEqual({ status: 'closed', sessionId: expect.any(Number) });
+        expect(controller.getSnapshot().phoneLogin).toBeNull();
+        expect(auth.sendLoginCode).not.toHaveBeenCalled();
+        expect(auth.loginWithCode).not.toHaveBeenCalled();
+    });
+});

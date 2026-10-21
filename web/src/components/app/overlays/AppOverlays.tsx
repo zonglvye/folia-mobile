@@ -4,7 +4,6 @@ import SearchWorkspace from '../search/SearchWorkspace';
 import DevDebugOverlay from '../../DevDebugOverlay';
 import MemoryMonitorWindow from '../../debug/MemoryMonitorWindow';
 import NowPlayingToast from './NowPlayingToast';
-import FrameStatsHud from '../../FrameStatsHud';
 import type { AppOverlaysModel } from './buildAppOverlaysModel';
 import { countRender } from '../../../dev/renderCount';
 import { useLatticeControlsStore } from '../../../stores/useLatticeControlsStore';
@@ -38,10 +37,6 @@ const AppOverlays: React.FC<AppOverlaysProps> = ({ model }) => {
                 && <FloatingPlayerControls {...floatingControls} />}
 
             {nowPlayingToast && <NowPlayingToast {...nowPlayingToast} />}
-
-            {/* Mounted unconditionally: its corner-hold listener is the only way to turn it on
-                where there is no keyboard, so it has to be listening before it is visible. */}
-            <FrameStatsHud />
         </>
     );
 };

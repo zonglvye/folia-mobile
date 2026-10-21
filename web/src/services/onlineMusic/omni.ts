@@ -224,6 +224,24 @@ export const omni = {
         await provider.auth.logout();
     },
 
+    /** 这个 provider 现在能不能用手机号验证码登录（酷狗在没有后端实例时）。 */
+    canLoginWithCode(providerId: OmniProviderId): boolean {
+        const auth = getOnlineMusicProvider(providerId)?.auth;
+        return typeof auth?.sendLoginCode === 'function' && typeof auth?.loginWithCode === 'function';
+    },
+
+    async sendLoginCode(providerId: OmniProviderId, mobile: string): Promise<void> {
+        const auth = requireOnlineMusicProvider(providerId).auth;
+        if (!auth?.sendLoginCode) return unsupported(providerId, 'phone-login');
+        await auth.sendLoginCode(mobile);
+    },
+
+    async loginWithCode(providerId: OmniProviderId, mobile: string, code: string): Promise<OmniUser> {
+        const auth = requireOnlineMusicProvider(providerId).auth;
+        if (!auth?.loginWithCode) return unsupported(providerId, 'phone-login');
+        return auth.loginWithCode(mobile, code);
+    },
+
     // 没有这个能力就回空数组，UI 据此走单步流程；netease / kugou 完全不受影响。
     getQrLoginMethods(providerId: OmniProviderId): QrLoginMethod[] {
         return requireOnlineMusicProvider(providerId).auth?.getQrLoginMethods?.() ?? [];
@@ -738,7 +756,11 @@ export const omni = {
         const source = getPlaybackSourceRef(song);
         if (source.kind !== 'online') return false;
         const catalog = getOnlineMusicProvider(source.providerId)?.catalog;
-        return Boolean(catalog?.resolveSongCatalogRefs || catalog?.canResolveSongCatalogRefs?.(song));
+        if (!catalog) return false;
+        // 显式的 canResolve 优先：它回答的是「这一首能不能解析」，比「这个 provider 有没有解析器」更准确。
+        // 匿名酷狗靠它把必然失败的专辑 hydration 关掉（那一路只有实例接口）。
+        if (catalog.canResolveSongCatalogRefs) return catalog.canResolveSongCatalogRefs(song);
+        return Boolean(catalog.resolveSongCatalogRefs);
     },
 
     async resolveCatalogRefs(song: UnifiedSong): Promise<UnifiedSong> {

@@ -1,6 +1,7 @@
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from 'react';
 import { applyOnlineAudioSourceMetadata, loadOnlineSongAudioSource } from '../../../services/onlinePlayback';
 import { classifyPlaybackError } from '../../../services/playbackRecovery/onlinePlaybackFailure';
+import { consumeNetworkRestored } from '../../../services/playbackRecovery/networkReconnect';
 import type { SongResult } from '../../../types';
 import type { AudioQualityPreference } from '../../../types/onlineMusic';
 import type { OnlineRecoveryOptions, OnlineRecoveryResult } from '../../../types/playbackFailure';
@@ -115,7 +116,10 @@ export const createOnlineRecoveryController = ({
 
         const normalizedFailedSrc = getOnlineRecoveryKey(failedSrc || audioElement.currentSrc || audioSrc || null);
         // A manual retry (force) is the listener asking again, so it may refresh the same file once more.
-        if (!force && normalizedFailedSrc && lastAudioRecoverySourceRef.current === normalizedFailedSrc) {
+        // 网络恢复后也让一次：断网期间那次刷新不能把恢复后的第一次刷新挡在外面。
+        const networkRestored = consumeNetworkRestored();
+        if (!force && networkRestored !== true
+            && normalizedFailedSrc && lastAudioRecoverySourceRef.current === normalizedFailedSrc) {
             return { status: 'not-attempted' };
         }
 

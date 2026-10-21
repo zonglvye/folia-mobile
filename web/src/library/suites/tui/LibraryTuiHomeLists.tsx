@@ -47,8 +47,11 @@ type LibraryTuiListCommonProps = {
     onPromptChange: (prompt: LibraryTuiPromptRequest | null) => void;
 };
 
+// 导入入口有两个 id：有目录选择器的环境（Electron）是 import-folder，没有的（浏览器、Android Chrome / WebView）
+// 是 import-files，两者声明的是同一个能力。只映射前者会把后者的入口整个过滤掉。
 const LOCAL_ACTION_IDS: Record<string, LibraryHomeActionId> = {
     'import-folder': 'home-import-folder',
+    'import-files': 'home-import-folder',
     'refresh-folders': 'home-refresh-folders',
     'import-playlist': 'home-import-playlist',
 };
@@ -192,11 +195,12 @@ export const LibraryTuiLocalList: React.FC<LibraryTuiListCommonProps & {
     });
     const activeSection = local.activeSection;
 
-    // 三个导入动作都不需要网格的界面：导入文件夹与刷新直接交给首页动作控制器，歌单文件用一个隐藏的文件选择框。
+    // 三个导入动作都不需要网格的界面：导入文件夹 / 导入文件与刷新直接交给首页动作控制器，歌单文件用一个隐藏的选择框。
     const localActions = resolveLocalHomeActions(actionState)
         .filter(action => common.declaredActions.actions.includes(LOCAL_ACTION_IDS[action.id]));
     const runAction = (id: string) => {
         if (id === 'import-folder') void homeActions.importFolder();
+        else if (id === 'import-files') void homeActions.importFiles();
         else if (id === 'refresh-folders') void homeActions.refreshFolders();
         else if (id === 'import-playlist') playlistFileInputRef.current?.click();
     };

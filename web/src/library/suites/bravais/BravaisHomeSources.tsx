@@ -49,8 +49,12 @@ type BravaisHomeSourceCommonProps = {
     onOpenGridView: (collection: LibraryCollectionDescriptor) => void;
 };
 
+// 导入入口有两个 id：有目录选择器的环境（Electron）是 import-folder，没有的（浏览器、Android Chrome / WebView）
+// 是 import-files，两者声明的是同一个能力。只映射前者会把后者的入口整个过滤掉——手机上的本地页签就是这么丢过
+// 导入入口的（模型只按 canImportFiles 换 id，见 core/model/localHomeModel 的 resolveLocalHomeActions）。
 const LOCAL_ACTION_IDS: Record<string, LibraryHomeActionId> = {
     'import-folder': 'home-import-folder',
+    'import-files': 'home-import-folder',
     'refresh-folders': 'home-refresh-folders',
     'import-playlist': 'home-import-playlist',
 };
@@ -138,6 +142,7 @@ export const BravaisHomeLocal: React.FC<BravaisHomeSourceCommonProps & {
         .filter(action => common.declaredActions.actions.includes(LOCAL_ACTION_IDS[action.id]));
     const runAction = (id: string) => {
         if (id === 'import-folder') void homeActions.importFolder();
+        else if (id === 'import-files') void homeActions.importFiles();
         else if (id === 'refresh-folders') void homeActions.refreshFolders();
         else if (id === 'import-playlist') playlistFileInputRef.current?.click();
     };
@@ -175,7 +180,7 @@ export const BravaisHomeLocal: React.FC<BravaisHomeSourceCommonProps & {
             : undefined,
     });
 
-    // 缝：四行是二级切换（整面翻牌，不换层）；「⋯」里是导入文件夹、刷新、导入歌单文件。
+    // 缝：四行是二级切换（整面翻牌，不换层）；「⋯」里是导入（文件夹或文件）、刷新、导入歌单文件。
     const sections = useMemo(() => local.sections.map(section => ({
         key: section.key,
         label: section.label,

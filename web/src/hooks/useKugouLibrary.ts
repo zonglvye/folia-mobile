@@ -5,6 +5,7 @@ import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccoun
 import type { MediaId, ProviderCollection, ProviderUser } from '../types/onlineMusic';
 import { ANONYMOUS_PUBLIC_MODE } from '../types/onlineMusic';
 import { handleLoginStatusFailure } from '../services/onlineMusic/loginStatusFailure';
+import { hasKugouWebSession, kugouWebSessionAgeMs, readKugouWebSession } from '../services/onlineMusic/kugouWebAuth';
 import {
     clearProviderAccountSnapshot,
     loadProviderAccountSnapshot,
@@ -63,6 +64,9 @@ export const resolveRefreshedLikedState = (
     return isSameUser ? previous.state : { likedSongIds: [], likedSongFileIds: {} };
 };
 
+/** 刚登录的会话在这么久之内，即使资料查不到也保留（详见 checkLoginStatus 里的说明）。 */
+const FRESH_SESSION_GRACE_MS = 5 * 60_000;
+
 export const useKugouLibrary = () => {
     const updateAccount = useOnlineProviderAccountStore(state => state.updateAccount);
     const clearAccount = useOnlineProviderAccountStore(state => state.clearAccount);
@@ -90,8 +94,34 @@ export const useKugouLibrary = () => {
     const checkLoginStatus = useCallback(async (): Promise<ProviderUser | null> => {
         const cachedAccount = useOnlineProviderAccountStore.getState().accounts.kugou;
         try {
-            const user = await omni.getLoginStatus('kugou');
+            let user = await omni.getLoginStatus('kugou');
+            // 刚登录拿到 token 时，资料接口可能还没认这个 token（真机实测：登录成功后第一次查资料回 20018，
+            // 几十毫秒后再查就正常）。一次「未登录」不足以判死刑：隔 800ms 再问一次，两次都没有才清会话。
+            if (!user && hasKugouWebSession()) {
+                await new Promise(resolve => { setTimeout(resolve, 800); });
+                user = await omni.getLoginStatus('kugou').catch(error => {
+                    console.warn('[KugouLibrary] login-status retry failed', error);
+                    return null;
+                });
+                if (!user) console.warn('[KugouLibrary] login-status confirmed missing after retry');
+            }
             if (!user) {
+                // 刚登录的会话不因为「一次查不到资料」就丢掉：token 是酷狗刚发的，资料接口偶发不认它，
+                // 丢掉等于让用户重新收一次验证码。保留会话、先用 id 占位，下一次刷新会补上昵称头像。
+                const session = readKugouWebSession();
+                const age = kugouWebSessionAgeMs();
+                if (session && age !== null && age < FRESH_SESSION_GRACE_MS) {
+                    const placeholder: ProviderUser = { id: session.userid, nickname: '酷狗', avatarUrl: '' };
+                    console.warn(`[KugouLibrary] login-status:profile-unavailable-but-fresh ${JSON.stringify({ age })}`);
+                    updateAccount('kugou', {
+                        status: 'authenticated',
+                        user: placeholder,
+                        hydration: 'ready',
+                        freshness: 'error',
+                        error: 'kugou_profile_unavailable',
+                    });
+                    return placeholder;
+                }
                 await clearAuthState(cachedAccount?.user ? 'auth-required' : undefined);
                 console.info('[KugouLibrary] login-status:anonymous', {
                     previousAccountExpired: Boolean(cachedAccount?.user),
@@ -120,9 +150,9 @@ export const useKugouLibrary = () => {
     const refresh = useCallback(async () => {
         const availability = omni.getProviderAvailability('kugou');
         console.info('[KugouLibrary] refresh:start', { configured: availability.configured, mode: availability.mode });
-        // 匿名公开模式（网页版只走酷狗公开接口）没有账户后端：没有可刷新的账号，也没有能求解的登录态，
-        // 所以直接保持匿名，不去读登录状态、也不清任何会话，检索与播放仍由 provider 的公网路径承担。
-        if (availability.mode === ANONYMOUS_PUBLIC_MODE) {
+        // 匿名公开模式（网页版只走酷狗公开接口）没有账户后端，但可以有页面直连的手机号登录：
+        // 没会话时保持匿名（不读登录状态、也不清任何东西）；有会话就照常走下面的登录状态刷新。
+        if (availability.mode === ANONYMOUS_PUBLIC_MODE && !hasKugouWebSession()) {
             updateAccount('kugou', {
                 status: 'anonymous',
                 user: null,
@@ -180,10 +210,10 @@ export const useKugouLibrary = () => {
                     }
                     likedSongsResolved = true;
                 } catch (error) {
-                    console.warn('[KugouLibrary] liked-songs:error', {
+                    console.warn(`[KugouLibrary] liked-songs:error ${JSON.stringify({
                         name: error instanceof Error ? error.name : 'Error',
                         message: error instanceof Error ? error.message : String(error),
-                    });
+                    })}`);
                 }
             }
             if (omni.getProviderCapabilities('kugou').userLibrary) {
@@ -192,11 +222,11 @@ export const useKugouLibrary = () => {
                 while (hasMore && offset < 1000) {
                     const page = await omni.getProviderUserPlaylists('kugou', user.id, { limit: PAGE_SIZE, offset });
                     collections.push(...page.items);
-                    console.info('[KugouLibrary] playlists:page', {
+                    console.info(`[KugouLibrary] playlists:page ${JSON.stringify({
                         offset,
                         itemCount: page.items.length,
                         hasMore: page.hasMore,
-                    });
+                    })}`);
                     hasMore = page.hasMore && page.nextOffset > offset;
                     offset = page.nextOffset;
                 }
@@ -249,12 +279,12 @@ export const useKugouLibrary = () => {
                 freshness: 'fresh',
                 lastUpdatedAt: snapshot.savedAt,
             });
-            console.info('[KugouLibrary] refresh:complete', {
+            console.info(`[KugouLibrary] refresh:complete ${JSON.stringify({
                 collectionCount: collections.length,
                 likedSongCount: nextLikedSongIds.length,
                 likedSongFileIdCount: Object.keys(nextLikedSongFileIds).length,
                 likedSongsResolved,
-            });
+            })}`);
         } catch (error) {
             const message = error instanceof Error ? error.message : 'kugou_library_failed';
             updateAccount('kugou', {

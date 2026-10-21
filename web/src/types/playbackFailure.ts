@@ -44,7 +44,7 @@ export type PlaybackFailureMessageKey =
     | 'status.songLoginRequired' | 'status.loginExpired'
     | 'status.songMembershipRequired' | 'status.songPurchaseRequired' | 'status.songEntitlementRequired'
     | 'status.songPreviewOnly' | 'status.songRegionRestricted' | 'status.songUnavailable'
-    | 'status.songNetworkFailed' | 'status.songRequestTimedOut'
+    | 'status.songNetworkFailed' | 'status.songRequestTimedOut' | 'status.songWaitingForNetwork'
     | 'status.songServiceUnavailable' | 'status.songServiceNotConfigured'
     | 'status.songRateLimited' | 'status.songRateLimitedNoWait'
     | 'status.songTemporarilyUnavailable' | 'status.songTemporarilyUnavailableSignInHint'

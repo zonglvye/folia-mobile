@@ -1,4 +1,4 @@
-import type { SongResult, UnifiedSong } from '../../types';
+import type { ReplayGainInfo, SongResult, UnifiedSong } from '../../types';
 import { OnlineProviderError } from '../../types/onlineMusic';
 import type {
     AudioQualityPreference,
@@ -341,11 +341,18 @@ export const neteaseProvider: OnlineMusicProvider = {
             const rawUrl = raw?.url;
             if (!rawUrl) return null;
             const trackGain = toFiniteNumber(raw?.gain);
+            // 峰值也要带上：没有它，calculateReplayGain 里那段「正增益时按峰值限幅」永远不生效，
+            // 日志里会一路显示 peak=n/a。网易给的 peak 是线性峰值（1 / 0.9875 这种）。
+            const trackPeak = toFiniteNumber(raw?.peak);
+            const replayGain: ReplayGainInfo = {
+                ...(trackGain === undefined ? {} : { trackGain }),
+                ...(trackPeak === undefined || trackPeak <= 0 ? {} : { trackPeak }),
+            };
             return {
                 url: String(rawUrl).replace(/^http:/, 'https:'),
                 fetchedAt: Date.now(),
                 quality,
-                ...(trackGain === undefined ? {} : { replayGain: { trackGain } }),
+                ...(trackGain === undefined && trackPeak === undefined ? {} : { replayGain }),
             };
         },
         getAvailability(song): ProviderSongAvailability {

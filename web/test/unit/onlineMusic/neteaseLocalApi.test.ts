@@ -152,6 +152,49 @@ describe('artist page routes', () => {
         expect(calls.some(call => (call.get('url') ?? '').includes('artist/top/song'))).toBe(true);
         expect(response.privileges).toEqual([{ id: 11, pl: 320000 }]);
     });
+
+    it('artist/songs reaches the paged artist song endpoint', async () => {
+        const page = { code: 200, songs: [{ id: 21 }], privileges: [] };
+        const calls = stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(page)]);
+
+        const response = await requestLocalNetease('/artist/songs?id=6452&limit=20&offset=40&order=time');
+
+        expect(calls.some(call => (call.get('url') ?? '').includes('v1/artist/songs'))).toBe(true);
+        expect(response.songs).toEqual([{ id: 21 }]);
+    });
+});
+
+describe('album page routes', () => {
+    // 专辑页的曲目全部来自 `/album`：缺这条时 requestLocalNetease 直接返回 404，
+    // 连一次上游请求都不会发，表现就是「专辑页加载不出歌曲」，且日志里看不到任何网络动作。
+    // 参考实现：module/album.js。
+
+    it('album puts the album id in the upstream path', async () => {
+        const calls = stubProxy([ANONYMOUS_RESPONSE, '{"code":200,"album":{"id":16945},"songs":[]}']);
+
+        await requestLocalNetease('/album?id=16945');
+
+        const upstream = calls.map(call => call.get('url') ?? '');
+        expect(upstream.some(url => url.includes('/v1/album/16945'))).toBe(true);
+        expect(upstream.some(url => url.includes('/album?id='))).toBe(false);
+    });
+
+    it('album passes songs and album through untouched', async () => {
+        const page = { code: 200, album: { id: 16945, name: '风行' }, songs: [{ id: 1 }, { id: 2 }] };
+        stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(page)]);
+
+        await expect(requestLocalNetease('/album?id=16945')).resolves.toEqual(page);
+    });
+
+    it('album/detail/dynamic reaches the dynamic endpoint', async () => {
+        const dynamic = { code: 200, isSub: false, commentCount: 3 };
+        const calls = stubProxy([ANONYMOUS_RESPONSE, JSON.stringify(dynamic)]);
+
+        const response = await requestLocalNetease('/album/detail/dynamic?id=16945');
+
+        expect(calls.some(call => (call.get('url') ?? '').includes('album/detail/dynamic'))).toBe(true);
+        expect(response.commentCount).toBe(3);
+    });
 });
 
 describe('guest session bootstrap', () => {
@@ -179,7 +222,9 @@ describe('guest session bootstrap', () => {
 
 describe('unsupported routes', () => {
     it('answers with the instance shape that the missing-route classification already understands', async () => {
-        const response = await requestLocalNetease('/album?id=1');
+        // 这条原本拿 `/album?id=1` 举例 —— 那时专辑页确实没实现，点进专辑是空的。
+        // 现在 `/album` 已经是真路由（`/api/v1/album/{id}`），例子换成仍未实现的 `/personalized`。
+        const response = await requestLocalNetease('/personalized?limit=10');
 
         expect(response).toEqual({ code: 404, msg: 'Not Found', data: null });
         expect(isNeteaseRouteMissingResponse(response)).toBe(true);

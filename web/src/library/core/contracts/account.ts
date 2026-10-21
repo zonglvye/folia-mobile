@@ -4,6 +4,7 @@ import type {
     OnlineProviderId,
     ProviderAccountSummary,
     ProviderCapabilities,
+    ProviderUser,
     QrLoginFailureKind,
     QrLoginMethod,
     QrLoginState,
@@ -159,12 +160,34 @@ export type LibraryLoginCompletion = {
     outcome: LibraryLoginOutcome;
 };
 
+/**
+ * 手机号验证码登录的会话（酷狗在没有后端实例时走这条路）。
+ *
+ * 不走扫码会话：没有二维码、没有轮询，只有一个表单。`codeSentAt` 用来做重发倒计时，
+ * `pending` 让表单在请求在途时禁用按钮。
+ */
+export type LibraryPhoneLoginState = {
+    providerId: OnlineProviderId;
+    pending: 'code' | 'login' | null;
+    /** 最近一次失败的原因（已翻译前的原文，UI 直接显示）。 */
+    error: string | null;
+    /** 发码成功的时间戳；null 表示还没发过。 */
+    codeSentAt: number | null;
+};
+
+/** 手机号登录动作的结果；stale 表示表单已经被关掉或换了一轮。 */
+export type LibraryPhoneLoginActionResult =
+    | { status: 'ok' }
+    | { status: 'failed'; message: string }
+    | { status: 'stale' };
+
 export type LibraryAccountSnapshot = {
     /** provider 注册表 × 账户 store（omni.getProviderSummaries），mod 源增删时会变。 */
     providers: ProviderAccountSummary[];
     /** 已回落过的当前平台：存的平台不在列表里时是 netease（core/model/accountRules 的 resolveActiveProviderId）。 */
     activeProviderId: OnlineProviderId;
     login: LibraryLoginSessionSnapshot | null;
+    phoneLogin: LibraryPhoneLoginState | null;
     pendingSwitch: LibraryProviderSwitchRequest | null;
     logout: LibraryAccountLogoutState;
     lastLoginCompletion: LibraryLoginCompletion | null;
@@ -199,7 +222,7 @@ export type LibrarySwitchCancelResult =
  * 之后的扫码进度（含要码失败 start-error）都在快照里。superseded：登录方式还没解析完就有更新的 startLogin。
  */
 export type LibraryStartLoginResult =
-    | { status: 'started'; providerId: OnlineProviderId; sessionId: number; step: 'choosing-method' | 'qr' }
+    | { status: 'started'; providerId: OnlineProviderId; sessionId: number; step: 'choosing-method' | 'qr' | 'phone' }
     | { status: 'superseded'; providerId: OnlineProviderId }
     | { status: 'unavailable'; providerId: OnlineProviderId; reason: LibraryProviderUnavailableReason };
 
@@ -268,6 +291,12 @@ export interface LibraryAccountController {
     cancelSwitch(requestId: number): LibrarySwitchCancelResult;
     /** 解析登录方式（带竞态代次）；单方式直接要码，多方式停在 choosing-method。旧会话先 keyed 取消。 */
     startLogin(providerId: OnlineProviderId): Promise<LibraryStartLoginResult>;
+    /** 手机号验证码登录：发码（结果写回 phoneLogin.error / codeSentAt）。 */
+    sendPhoneCode(mobile: string): Promise<LibraryPhoneLoginActionResult>;
+    /** 手机号验证码登录：提交；成功后刷新账户并像扫码确认一样收尾。 */
+    confirmPhoneLogin(mobile: string, code: string): Promise<LibraryPhoneLoginActionResult>;
+    /** 关掉手机号登录表单（不发任何请求）。 */
+    closePhoneLogin(): LibraryLoginCloseResult;
     selectLoginMethod(methodId: string): Promise<LibraryLoginRequestResult>;
     /** 保留已选的登录方式重新要码。 */
     retryLogin(): Promise<LibraryLoginRequestResult>;
@@ -304,6 +333,12 @@ export type LibraryAccountAuthPort = {
     /** 主动自检；没有可检查的对象时 resolve null，自检本身出错时 reject。 */
     runQrLoginSelfCheck(providerId: OnlineProviderId): Promise<LoginSelfCheckResult | null>;
     getProviderCapabilities(providerId: OnlineProviderId): Pick<ProviderCapabilities, 'auth'>;
+    /** 这个平台此刻能不能用手机号验证码登录（酷狗在无后端实例时）。不实现就当不能。 */
+    canLoginWithCode?(providerId: OnlineProviderId): boolean;
+    /** 发验证码；没有手机号登录的 provider 不实现。 */
+    sendLoginCode?(providerId: OnlineProviderId, mobile: string): Promise<void>;
+    /** 提交验证码登录，成功后返回登录到的用户。 */
+    loginWithCode?(providerId: OnlineProviderId, mobile: string, code: string): Promise<ProviderUser>;
 };
 
 /**

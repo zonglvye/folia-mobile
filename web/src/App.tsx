@@ -50,6 +50,7 @@ import { useLyricWordSegmentation } from './hooks/useLyricWordSegmentation';
 import { useIcuFoliaSegmentation } from './hooks/useIcuFoliaSegmentation';
 import { createOnlineRecoveryController } from './components/app/playback/createOnlineRecoveryController';
 import { handleOnlineMediaFailure } from './components/app/playback/handleOnlineMediaFailure';
+import { installNetworkReconnect } from './services/playbackRecovery/networkReconnect';
 import { persistPlaybackCache } from './components/app/playback/persistPlaybackCache';
 import { useAppOverlaysModel } from './components/app/overlays/useAppOverlaysModel';
 import { resolveNextUpTrack } from './components/app/overlays/now-playing-toast/resolveNextUpTrack';
@@ -79,6 +80,8 @@ import { useLibraryAccountController } from './library/app/useLibraryAccountCont
 import { createLibraryAccountSwitchCleanupPort } from './library/app/createLibraryAccountPort';
 import { useAppWallToolsHost } from './components/app/wall-tools/useAppWallToolsHost';
 import { useLibraryAccountProviders } from './library/core/bindings/useLibraryAccount';
+import { useLibraryAccountSelector } from './library/core/bindings/useLibraryAccount';
+import PhoneLoginSheet from './components/app/account/PhoneLoginSheet';
 import { resolveActiveProviderSummary } from './library/core/model/accountRules';
 import { useAppPreferences } from './hooks/useAppPreferences';
 import { useElectronPlaybackBridge } from './hooks/useElectronPlaybackBridge';
@@ -90,6 +93,7 @@ import { useDeviceAudioLibrary } from './hooks/useDeviceAudioLibrary';
 import { useElectronVideoExportController } from './hooks/useElectronVideoExportController';
 import { useElectronWindowPlaybackHandoff } from './hooks/useElectronWindowPlaybackHandoff';
 import { useMediaSessionBridge } from './hooks/useMediaSessionBridge';
+import { useShellNowPlayingBridge } from './hooks/useShellNowPlayingBridge';
 import { usePlayerChromeAutoHide } from './hooks/usePlayerChromeAutoHide';
 import { usePlaybackAudioBridge } from './hooks/usePlaybackAudioBridge';
 import { useTranscodeFallback } from './hooks/useTranscodeFallback';
@@ -328,6 +332,11 @@ export default function App() {
     // Player State
     useEffect(() => {
         (window as any).__folia_current_time = currentTime;
+    }, []);
+
+    // 断网重连：`online` 事件一到就重试因网络失败停下来的那次播放（见 playbackRecovery/networkReconnect）。
+    useEffect(() => {
+        installNetworkReconnect();
     }, []);
 
     // Progress Bar State
@@ -773,6 +782,8 @@ export default function App() {
         switchCleanup: providerSwitchCleanup,
     });
     const { providers: onlineProviders, activeProviderId } = useLibraryAccountProviders(accountController);
+    // 手机号验证码登录（酷狗在没有后端实例时）：快照里有表单就渲染，动作直接交给 controller。
+    const phoneLogin = useLibraryAccountSelector(accountController, snapshot => snapshot.phoneLogin);
     const activeProvider = useMemo(
         () => resolveActiveProviderSummary(onlineProviders, activeProviderId),
         [activeProviderId, onlineProviders],
@@ -1450,6 +1461,24 @@ export default function App() {
         // for the whole blend and the panel stops updating instead.
         getDisplayAudioElement: automix.getDisplayElement,
         audioSrc: automix.tailSrc ?? audioSrc,
+        currentSong: displaySong,
+        cachedCoverUrl: displayCoverUrl ?? cachedCoverUrl,
+        playerState: displayPlayerState,
+        isNowPlayingStageActive,
+        unknownArtistLabel: t('ui.unknownArtist'),
+        mediaSessionPlayRef,
+        mediaSessionPauseRef,
+        mediaSessionPrevRef,
+        mediaSessionNextRef,
+        isNowPlayingControlDisabledRef,
+    });
+
+    // The packaged shell's own now-playing surface. Fed by the same display selectors as the Media
+    // Session above, so the lock screen and the app never name different songs, and the transport
+    // commands it sends back are the same refs - one definition of "next" for every surface.
+    useShellNowPlayingBridge({
+        audioRef,
+        getDisplayAudioElement: automix.getDisplayElement,
         currentSong: displaySong,
         cachedCoverUrl: displayCoverUrl ?? cachedCoverUrl,
         playerState: displayPlayerState,
@@ -2896,6 +2925,15 @@ export default function App() {
             />
 
             <AppDialogs model={appDialogsModel} />
+            {phoneLogin && (
+                <PhoneLoginSheet
+                    providerLabel={omni.getProviderLabel(phoneLogin.providerId)}
+                    state={phoneLogin}
+                    onSendCode={mobile => accountController.sendPhoneCode(mobile)}
+                    onSubmit={(mobile, code) => accountController.confirmPhoneLogin(mobile, code)}
+                    onClose={() => { void accountController.closePhoneLogin(); }}
+                />
+            )}
             <ReleaseNotesDialog
                 isOpen={startupExperience.isReleaseNotesOpen}
                 isDaylight={isDaylight}

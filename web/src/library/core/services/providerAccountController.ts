@@ -13,6 +13,8 @@ import type {
     LibraryLoginRequestResult,
     LibraryLoginSessionSnapshot,
     LibraryLogoutResult,
+    LibraryPhoneLoginActionResult,
+    LibraryPhoneLoginState,
     LibraryProviderSwitchReason,
     LibraryProviderSwitchRequest,
     LibrarySelectProviderResult,
@@ -146,6 +148,8 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
     let switchSeq = 0;
     let logout: LibraryAccountLogoutState = IDLE_LOGOUT;
     let lastLoginCompletion: LibraryLoginCompletion | null = null;
+    // 手机号验证码登录（酷狗在没有后端实例时）：与扫码会话互斥，只有一个表单。
+    let phoneLogin: LibraryPhoneLoginState | null = null;
     let snapshot: LibraryAccountSnapshot;
     // 内部一次改多处时只在最外层结束后重建一次快照，避免中间态（例如会话 start 同步发出的通知）漏到界面。
     let batchDepth = 0;
@@ -160,6 +164,11 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
 
     const activeProviderId = (): OnlineProviderId => resolveActiveProviderId(providers, accounts.getStoredActiveProviderId());
     const findProvider = (providerId: OnlineProviderId) => providers.find(provider => provider.providerId === providerId);
+
+    /** 这个平台此刻能不能用手机号验证码登录（酷狗在没有后端实例时，端口才声明这两个方法）。 */
+    const supportsPhoneLogin = (providerId: OnlineProviderId): boolean => (
+        typeof auth.canLoginWithCode === 'function' && auth.canLoginWithCode(providerId)
+    );
 
     // 会话属于当前登录时取它的原始状态；还没要码（或会话快照还没换到这一轮）时视为 loading。
     const deriveLogin = (previous: LibraryLoginSessionSnapshot | null): LibraryLoginSessionSnapshot | null => {
@@ -201,6 +210,7 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
             providers,
             activeProviderId: activeProviderId(),
             login: deriveLogin(previous?.login ?? null),
+            phoneLogin,
             pendingSwitch: pending?.request ?? null,
             logout,
             lastLoginCompletion,
@@ -210,6 +220,7 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
             && previous.providers === next.providers
             && previous.activeProviderId === next.activeProviderId
             && previous.login === next.login
+            && previous.phoneLogin === next.phoneLogin
             && previous.pendingSwitch === next.pendingSwitch
             && previous.logout === next.logout
             && previous.lastLoginCompletion === next.lastLoginCompletion
@@ -347,18 +358,28 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
         const selection = resolveProviderSelection(findProvider(providerId));
         if (selection.kind === 'unavailable') return { status: 'unavailable', providerId, reason: selection.reason };
         const attempt = ++loginSeq;
+        // 手机号验证码登录（酷狗在没有后端实例时）：没有二维码可要，直接开表单，不建扫码会话。
+        const phone = supportsPhoneLogin(providerId);
         batch(() => {
             // 单一在途登录：先停旧会话（keyed 取消），旧会话不会再在后台替旧平台确认（A0 记下的潜在 bug）。
             session.stop();
-            login = {
-                id: attempt,
-                providerId,
-                methods: NO_METHODS,
-                selectedMethodId: null,
-                stage: 'resolving-methods',
-                sessionId: null,
-            };
+            login = phone
+                ? null
+                : {
+                    id: attempt,
+                    providerId,
+                    methods: NO_METHODS,
+                    selectedMethodId: null,
+                    stage: 'resolving-methods',
+                    sessionId: null,
+                };
+            phoneLogin = phone
+                ? { providerId, pending: null, error: null, codeSentAt: null }
+                : null;
         });
+        if (phone) {
+            return { status: 'started', providerId, sessionId: attempt, step: 'phone' };
+        }
         let methods: readonly QrLoginMethod[];
         try {
             methods = await auth.resolveQrLoginMethods(providerId);
@@ -377,6 +398,101 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
         }
         beginSession(attempt, resolved, null);
         return { status: 'started', providerId, sessionId: attempt, step: 'qr' };
+    };
+
+    // ─── 手机号验证码登录（酷狗在没有后端实例时） ───────────────────────
+
+    const closePhoneLogin = (): LibraryLoginCloseResult => {
+        if (!phoneLogin) return { status: 'no-session' };
+        const sessionId = loginSeq;
+        batch(() => {
+            loginSeq += 1;
+            phoneLogin = null;
+        });
+        return { status: 'closed', sessionId };
+    };
+
+    const sendPhoneCode = async (mobile: string): Promise<LibraryPhoneLoginActionResult> => {
+        const current = phoneLogin;
+        if (!current) return { status: 'stale' };
+        if (!auth.sendLoginCode) return { status: 'failed', message: 'phone login is not supported' };
+        batch(() => {
+            phoneLogin = { ...current, pending: 'code', error: null };
+        });
+        try {
+            await auth.sendLoginCode(current.providerId, mobile);
+        } catch (error) {
+            const message = describeError(error);
+            if (phoneLogin && phoneLogin.providerId === current.providerId) {
+                batch(() => {
+                    phoneLogin = { ...current, pending: null, error: message };
+                });
+            }
+            return { status: 'failed', message };
+        }
+        if (!phoneLogin || phoneLogin.providerId !== current.providerId) return { status: 'stale' };
+        batch(() => {
+            phoneLogin = { ...current, pending: null, error: null, codeSentAt: deps.clock.now() };
+        });
+        return { status: 'ok' };
+    };
+
+    const confirmPhoneLogin = async (mobile: string, code: string): Promise<LibraryPhoneLoginActionResult> => {
+        const current = phoneLogin;
+        if (!current) return { status: 'stale' };
+        if (!auth.loginWithCode) return { status: 'failed', message: 'phone login is not supported' };
+        batch(() => {
+            phoneLogin = { ...current, pending: 'login', error: null };
+        });
+        try {
+            await auth.loginWithCode(current.providerId, mobile, code);
+        } catch (error) {
+            const message = describeError(error);
+            if (phoneLogin && phoneLogin.providerId === current.providerId) {
+                batch(() => {
+                    phoneLogin = { ...current, pending: null, error: message };
+                });
+            }
+            return { status: 'failed', message };
+        }
+
+        // 登录成功：收起表单，刷新账户，然后走与扫码确认相同的收尾（不是当前平台就发起激活切换）。
+        const completionId = ++loginSeq;
+        batch(() => {
+            phoneLogin = null;
+        });
+        const refreshed = await providerAccounts.refresh(current.providerId)
+            .then(() => true)
+            .catch(error => {
+                log('warn', 'phone-login:refresh-error', describeLoginError(error));
+                return false;
+            });
+        if (!refreshed) {
+            batch(() => {
+                lastLoginCompletion = { sessionId: completionId, providerId: current.providerId, outcome: 'refresh-failed' };
+            });
+            return { status: 'ok' };
+        }
+        const needsActivation = current.providerId !== activeProviderId();
+        if (!needsActivation) {
+            batch(() => {
+                lastLoginCompletion = { sessionId: completionId, providerId: current.providerId, outcome: 'completed' };
+            });
+            return { status: 'ok' };
+        }
+        // 发起激活确认但不在这里等用户答复：确认框是 UI 的事，登录动作不能挂着它。
+        // 结局照样写进 lastLoginCompletion，与扫码登录的收尾一致。
+        void openSwitchRequest(current.providerId, 'activate-after-login').then(result => {
+            if (disposed) return;
+            batch(() => {
+                lastLoginCompletion = {
+                    sessionId: completionId,
+                    providerId: current.providerId,
+                    outcome: result.status === 'switched' ? 'completed' : 'activation-declined',
+                };
+            });
+        });
+        return { status: 'ok' };
     };
 
     const currentBackend = (current: LoginState) => resolveLoginBackendState(current.providerId, neteaseBackend.getHealth());
@@ -529,6 +645,9 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
         confirmSwitch,
         cancelSwitch,
         startLogin,
+        sendPhoneCode,
+        confirmPhoneLogin,
+        closePhoneLogin,
         selectLoginMethod,
         retryLogin,
         closeLogin,

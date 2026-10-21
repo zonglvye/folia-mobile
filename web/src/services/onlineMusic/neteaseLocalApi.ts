@@ -4,6 +4,7 @@ import { readProviderSessionValue, removeProviderSessionValue, writeProviderSess
 import { adoptNeteaseDeviceId, createNeteaseDeviceId, resolveNeteaseDeviceProfile } from './neteaseDeviceProfile';
 import { buildNeteaseQrLoginUrl, renderNeteaseQrDataUrl } from './neteaseQrImage';
 import {
+    callNeteaseApi,
     callNeteaseEapi,
     callNeteaseWeapi,
     type NeteaseCookieJar,
@@ -37,8 +38,8 @@ const ANONYMOUS_COOKIE_KEY = 'anonymous_cookie';
 const ANONYMOUS_ID_XOR_KEY = '3go8&$8*3*3h0k(2)2';
 
 type NeteaseRoute = {
-    /** 上游加密方式。 */
-    mode: 'eapi' | 'weapi';
+    /** 上游加密方式。`api` 是明文表单 + 桌面客户端 UA（参考实现的默认档）。 */
+    mode: 'eapi' | 'weapi' | 'api';
     /**
      * 上游路径，含 `/api/` 前缀——它是 eapi 签名材料的一部分。
      *
@@ -227,24 +228,39 @@ const ROUTES: Record<string, NeteaseRoute> = {
     '/song/url/v1': {
         mode: 'eapi',
         uri: '/api/song/enhance/player/url/v1',
-        payload: query => ({
-            ids: `[${query.get('id')}]`,
-            level: query.get('level') || 'exhigh',
-            encodeType: 'flac',
-        }),
+        payload: (query) => {
+            // 音质封顶 exhigh（320k mp3），并且**不要** flac：壳里这首歌要整首经同源代理搬一遍
+            // （见 services/shellOnlineAudio.ts），实测一首无损被搬了 50538 KiB、切歌要等近十秒。
+            // exhigh 的一条大约 6.5 MB，一块 1 MiB 十几到几十毫秒，切歌才等得住。
+            const requested = query.get('level') || 'exhigh';
+            const level = requested === 'lossless' || requested === 'hires' ? 'exhigh' : requested;
+            return {
+                ids: `[${query.get('id')}]`,
+                level,
+                // 上游这个接口**必须**带 encodeType（不带就 400 参数错误）；显式要 mp3，
+                // 免得以后有人把 level 放开到无损时又悄悄变成几十 MB 的 flac。
+                encodeType: 'mp3',
+            };
+        },
         shape: data => rewriteSongUrlProtocols(data),
     },
     // 实例在这里把上游 body 包一层：`{data: {code, unikey}, code: 200}`。provider 读的是 `data.unikey`。
+    //
+    // 扫码这一对走 `api` 档（明文表单 + 网易桌面客户端 UA）：`type: 3` 在网易侧等于“网页端二维码”，
+    // 而真机实测 —— eapi（iPhone 指纹）会让 App 拒绝确认、轮询永远停在 801；weapi（Chrome 指纹）
+    // 能让 App 确认，但最后一步被判 `8821 环境风险`。原因是壳里是系统网络栈，声称自己是浏览器就要
+    // 过 TLS/头部一致性检查，而声称自己是桌面客户端没有可被比对的地方，这正是参考实现默认走它的理由。
     '/login/qr/key': {
-        mode: 'eapi',
+        mode: 'api',
         uri: '/api/login/qrcode/unikey',
         payload: () => ({ type: 3 }),
         shape: data => ({ code: 200, data }),
         needsAnonymous: false,
     },
     // 实例把 Set-Cookie 拉平后塞进 `cookie` 字段，provider 靠它落盘登录态。
+    // 必须和申请 unikey 时同一档（`api`）：这一跳是风控判定“环境”的最后一关。
     '/login/qr/check': {
-        mode: 'eapi',
+        mode: 'api',
         uri: '/api/login/qrcode/client/login',
         payload: query => ({ key: query.get('key'), type: 3 }),
         shape: (data, cookie) => ({ ...data, cookie }),
@@ -359,6 +375,35 @@ const ROUTES: Record<string, NeteaseRoute> = {
         uri: '/api/artist/top/song',
         payload: query => ({ id: query.get('id') }),
     },
+    // 歌手的“全部歌曲”页（`artist/songs`），与上面三条同一批，参考实现 module/artist_songs.js。
+    '/artist/songs': {
+        mode: 'weapi',
+        uri: '/api/v1/artist/songs',
+        payload: query => ({
+            id: query.get('id'),
+            order: query.get('order') || 'hot',
+            limit: readNumber(query.get('limit'), 100),
+            offset: readOffset(query.get('offset')),
+        }),
+    },
+
+    // --- 专辑页 ------------------------------------------------------------------
+    // 参考实现 module/album.js：专辑 id 同样在路径里，`/api/v1/album/{id}`。
+    //
+    // 缺了这条，从歌手页点进任何一张专辑都是空的：`services/netease.ts` 的 `getAlbum` 打 `/album`，
+    // 路由表里没有就直落 404 分支，页面拿到 `{code:404}` —— 表现为「专辑页加载不出歌曲」，
+    // 而且壳日志里一条网络请求都不会出现（404 在本地就返回了），很容易被误判成网络问题。
+    '/album': {
+        mode: 'weapi',
+        uri: query => `/api/v1/album/${query.get('id') ?? ''}`,
+        payload: () => ({}),
+    },
+    // 专辑页顶部的动态信息（是否已收藏、评论数）。缺它只是少一行状态，不影响歌曲列表。
+    '/album/detail/dynamic': {
+        mode: 'weapi',
+        uri: '/api/album/detail/dynamic',
+        payload: query => ({ id: query.get('id') }),
+    },
 };
 
 /**
@@ -470,7 +515,9 @@ export const requestLocalNetease = async (endpoint: string): Promise<any> => {
         session.profile = resolveNeteaseDeviceProfile();
     }
 
-    const call = route.mode === 'weapi' ? callNeteaseWeapi : callNeteaseEapi;
+    const call = route.mode === 'weapi'
+        ? callNeteaseWeapi
+        : route.mode === 'api' ? callNeteaseApi : callNeteaseEapi;
     const { data, cookies } = await call(session, resolveRouteUri(route, query), payload);
 
     session.jar = mergeSetCookies(session.jar, cookies);

@@ -84,6 +84,7 @@ const baseSnapshot = (): LibraryAccountSnapshot => ({
     providers: PROVIDERS,
     activeProviderId: 'netease',
     login: null,
+    phoneLogin: null,
     pendingSwitch: null,
     logout: { providerId: null, status: 'idle' },
     lastLoginCompletion: null,

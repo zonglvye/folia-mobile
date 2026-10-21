@@ -24,6 +24,12 @@ const FAKES: Partial<Record<HookedLocalMusicServiceFunction, (...args: unknown[]
         await saveLocalSongs([HOME_IMPORTED_LOCAL_SONG]);
         return [HOME_IMPORTED_LOCAL_SONG];
     },
+    // 与 importFolder 同一个替身：浏览器环境里本地页签的导入入口是「导入文件」，点它会弹系统文件选择器。
+    // 用例要断言的是「点了入口之后真的走导入、并刷新曲库」，所以两条入口路径给同一个可观察结果。
+    importLocalFilesViaInput: async (): Promise<LocalSong[]> => {
+        await saveLocalSongs([HOME_IMPORTED_LOCAL_SONG]);
+        return [HOME_IMPORTED_LOCAL_SONG];
+    },
     resyncAllFolders: async (): Promise<LocalSong[]> => getLocalSongs(),
     resyncFolder: async () => null,
     clearFolderIgnore: async () => undefined,

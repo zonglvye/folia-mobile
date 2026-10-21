@@ -52,11 +52,13 @@ const PlaybackSettingsSubview: React.FC<PlaybackSettingsSubviewProps> = ({
         enableTranscodeFallback,
         neteaseScrobbleEnabled,
         playbackFadeEnabled,
+        directOutputEnabled,
         autoSkipUnplayable,
         queueAddBehavior,
         onToggleTranscodeFallback,
         onToggleNeteaseScrobble,
         onTogglePlaybackFade,
+        onToggleDirectOutput,
         onToggleAutoSkipUnplayable,
         onQueueAddBehaviorChange,
     } = useAudioSettingsStore(useShallow(state => ({
@@ -64,11 +66,13 @@ const PlaybackSettingsSubview: React.FC<PlaybackSettingsSubviewProps> = ({
         enableTranscodeFallback: state.enableTranscodeFallback,
         neteaseScrobbleEnabled: state.neteaseScrobbleEnabled,
         playbackFadeEnabled: state.playbackFadeEnabled,
+        directOutputEnabled: state.directOutputEnabled,
         autoSkipUnplayable: state.autoSkipUnplayable,
         queueAddBehavior: state.queueAddBehavior,
         onToggleTranscodeFallback: state.handleToggleTranscodeFallback,
         onToggleNeteaseScrobble: state.handleToggleNeteaseScrobble,
         onTogglePlaybackFade: state.handleTogglePlaybackFade,
+        onToggleDirectOutput: state.handleToggleDirectOutput,
         onToggleAutoSkipUnplayable: state.handleToggleAutoSkipUnplayable,
         onQueueAddBehaviorChange: state.handleSetQueueAddBehavior,
     })));
@@ -258,6 +262,32 @@ const PlaybackSettingsSubview: React.FC<PlaybackSettingsSubviewProps> = ({
                             neteaseScrobbleEnabled,
                             () => onToggleNeteaseScrobble(!neteaseScrobbleEnabled),
                             !canReportNeteasePlayback,
+                        )}
+                    </div>
+                </div>
+            </SettingsAnchor>
+
+            {/* 直出模式：Web Audio 在这台机器上不出声时的旁路（代价是没有可视化/均衡/淡入淡出）。 */}
+            <SettingsAnchor anchorId="directOutputSettings" label={t('options.directOutput')}>
+                <SettingsSectionHeading icon={AudioLines} label={t('options.directOutput')} />
+                <div className={`p-4 rounded-xl border space-y-4 ${settingsCardClass}`}>
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1">
+                            <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                                {t('options.directOutput')}
+                            </div>
+                            <div className="text-[11px] opacity-50 max-w-[420px]" style={{ color: 'var(--text-secondary)' }}>
+                                {t('options.directOutputDesc')}
+                            </div>
+                            {directOutputEnabled && (
+                                <div className="text-[11px] max-w-[420px]" style={{ color: 'var(--text-secondary)' }}>
+                                    {t('options.directOutputRestartHint')}
+                                </div>
+                            )}
+                        </div>
+                        {renderToggle(
+                            directOutputEnabled,
+                            () => onToggleDirectOutput(!directOutputEnabled),
                         )}
                     </div>
                 </div>

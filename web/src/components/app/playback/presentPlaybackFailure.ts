@@ -2,7 +2,16 @@ import { PlayerState, type SongResult, type StatusMessage } from '../../../types
 import type { SkipPromptMessageKey } from '../../../types/appPlayback';
 import type { PlaybackFailure, PlaybackFailureContext } from '../../../types/playbackFailure';
 import type { StatusSetter } from '../../../stores/useStatusMessageStore';
-import { buildPlaybackFailureStatus, resolvePlaybackFailurePolicy } from '../../../services/playbackRecovery/playbackFailurePolicy';
+import {
+    buildPlaybackFailureStatus,
+    isReconnectableFailure,
+    resolvePlaybackFailurePolicy,
+} from '../../../services/playbackRecovery/playbackFailurePolicy';
+import {
+    clearNetworkRetry,
+    isNetworkOffline,
+    registerNetworkRetry,
+} from '../../../services/playbackRecovery/networkReconnect';
 import type { PlaybackFailedNotice } from '../../../services/hostExtensionHooks';
 
 // src/components/app/playback/presentPlaybackFailure.ts
@@ -43,7 +52,11 @@ export const presentPlaybackFailure = (input: PlaybackFailurePresentation, deps:
     const { failure, song, context, isCurrent, skipCount, retry, skip } = input;
     if (!isCurrent()) return;
 
-    const policy = resolvePlaybackFailurePolicy(failure, context, { autoSkipUnplayable: deps.getAutoSkipUnplayable() });
+    const policy = resolvePlaybackFailurePolicy(failure, context, {
+        autoSkipUnplayable: deps.getAutoSkipUnplayable(),
+        // 离线时换一句「恢复后会自动继续」，与下面的自动重试对应；网络类以外的失败不受影响。
+        offline: isNetworkOffline(),
+    });
     deps.setIsLyricsLoading(false);
 
     // 该原因原本的处理：按策略停播，再给出它自己的消息与按钮。不倒计时时直接走这里，倒计时被取消时也退回这里。
@@ -56,8 +69,10 @@ export const presentPlaybackFailure = (input: PlaybackFailurePresentation, deps:
 
         // 按钮可能在用户切歌之后才被点：先确认仍是这次请求，再清掉消息、执行动作。
         // 陈旧时不执行动作，但仍收起这条常驻消息（只收起自己那条，期间换上的新消息不动），否则它关不掉。
+        // 用户一旦点了消息上的任何按钮，就说明不打算等网络自动重试了，登记一并取消。
         let built: StatusMessage | null = null;
         const wrap = (action?: () => void) => action && (() => {
+            clearNetworkRetry();
             if (!isCurrent()) {
                 deps.setStatusMsg(current => (current === built ? null : current));
                 return;
@@ -66,12 +81,29 @@ export const presentPlaybackFailure = (input: PlaybackFailurePresentation, deps:
             action();
         });
 
+        const retryAction = wrap(retry);
         built = buildPlaybackFailureStatus(policy, deps.t, {
-            retry: wrap(retry),
+            retry: retryAction,
             skip: wrap(skip),
             dismiss: () => deps.setStatusMsg(null),
         });
         deps.setStatusMsg(built);
+
+        // 网络类失败：网络一恢复就自动重试，不用用户点。其他原因（登录、会员、地区…）重试也不会变好，
+        // 顺手取消上一条登记，免得恢复后替用户点了一次已经过时的重试。
+        if (retryAction && policy.actions.includes('retry') && isReconnectableFailure(failure)) {
+            registerNetworkRetry({
+                run: () => {
+                    clearNetworkRetry();
+                    retryAction();
+                },
+                isCurrent,
+                // 点歌失败是用户刚表达过的意图，优先于播放中旧元素顺带报出的网络错误。
+                priority: context === 'play' ? 2 : 1,
+            });
+        } else {
+            clearNetworkRetry();
+        }
     };
 
     // 只有 taken-down 会走到倒计时；次数用尽或没有下一首时落到下面的普通消息。

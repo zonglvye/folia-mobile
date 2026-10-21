@@ -47,7 +47,15 @@ export const useLibraryHomeOnline = (
         [personalFmModeLabel, radioFeed.data, t],
     );
 
-    const items = tab === 'playlist' ? playlistCards : tab === 'albums' ? albumCards : tab === 'radio' ? radioCards : NO_CARDS;
+    // 电台页签里连自己的歌单一起列出来：首页一张网格就能看到「私人FM / 每日推荐 / 推荐歌单 / 我的歌单」，
+    // 不必为了打开自己的歌单先切页签（账户歌单页签仍然保留，内容不变）。
+    const items = tab === 'playlist'
+        ? playlistCards
+        : tab === 'albums'
+            ? albumCards
+            : tab === 'radio'
+                ? [...radioCards, ...playlistCards]
+                : NO_CARDS;
     const onlineTab = isOnlineHomeTab(tab) ? tab : 'radio';
     const unavailable = resolveOnlineTabUnavailableReason(online, onlineTab);
     return {

@@ -19,6 +19,7 @@ import { buildStoredMonetPortraitImage, clearMonetPortraitImage, isSupportedMone
 import { setStatusMessage } from './useStatusMessageStore';
 import { LUMIERE_TUNING_STORAGE_KEY, VISUALIZER_OPACITY_STORAGE_KEY, clampCladdaghEllipseTiltDeg, clampCladdaghFocusScaleRatio, clampCladdaghLetterSpacingOffset, clampCladdaghRadiusScale, clampClassicBreathingFloatMultiplier, clampClassicWordSpacing, clampFumeBackgroundObjectOpacity, clampFumeCameraSpeed, clampFumeGlowIntensity, clampFumeHeroScale, clampFumeTextHoldRatio, clampPartitaStagger, clampUnit, readStoredBackgroundOpacity, readStoredCadenzaTuning, readStoredCappellaTuning, readStoredCladdaghTuning, readStoredClassicTuning, readStoredDioramaTuning, readStoredFumeTuning, readStoredLatentBackgroundTuning, readStoredLumiereTuning, readStoredMonetBackgroundTuning, readStoredMonetTuning, readStoredNomandBackgroundTuning, readStoredPartitaTuning, readStoredPendoloTuning, readStoredSonnetTuning, readStoredSoraBackgroundTuning, readStoredTemperaTuning, readStoredTiltTuning, readStoredUrlBackgroundList, readStoredUrlBackgroundSelectedId, readStoredVisualizerBackgroundMode, readStoredVisualizerFrameRate, readStoredVisualizerMode, readStoredVisualizerOpacity, resolveCappellaAvatarSource, resolveFumeCameraTrackingMode, resolvePendoloNumber, resolveStoredDioramaTuning, resolveStoredLatentBackgroundTuning, resolveStoredMonetBackgroundTuning, resolveStoredMonetTuning, resolveStoredNomandBackgroundTuning, resolveStoredSoraBackgroundTuning, sanitizeTemperaLayerImages } from './visualizerSettingsPersistence';
 import { getStoredBoolean, setStoredBoolean } from './storagePrimitives';
+import { isAndroidShell } from '../utils/platform';
 import { useVisualizerAssetStore } from './useVisualizerAssetStore';
 import { normalizeLumiereTuning } from '../utils/lumiereTuning';
 
@@ -111,9 +112,12 @@ export type VisualizerSettingsState = {
     handleClearCustomCappellaAvatar: () => Promise<void>;
 };
 
+// 手机壳的默认外观是「极简歌词页」：压暗的网点（vignette）与几何背景默认关掉，
+// 与 visualizerSettingsPersistence 里把默认模式设成 `still` 是同一条决定。
+// 桌面上这两个默认值不变，仍是开着的。
 export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set, get) => ({
-    disableVisualizerVignette: getStoredBoolean('disable_visualizer_vignette', false),
-    disableVisualizerGeometricBackground: getStoredBoolean('disable_visualizer_geometric_background', false),
+    disableVisualizerVignette: getStoredBoolean('disable_visualizer_vignette', isAndroidShell()),
+    disableVisualizerGeometricBackground: getStoredBoolean('disable_visualizer_geometric_background', isAndroidShell()),
     backgroundOpacity: readStoredBackgroundOpacity(),
     visualizerOpacity: readStoredVisualizerOpacity(),
     visualizerBackgroundMode: readStoredVisualizerBackgroundMode(),

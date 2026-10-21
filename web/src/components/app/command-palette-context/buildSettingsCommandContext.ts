@@ -183,6 +183,9 @@ export const buildSettingsCommandContext = (
         togglePlaybackFade: () => audio.handleTogglePlaybackFade(
             !useAudioSettingsStore.getState().playbackFadeEnabled,
         ),
+        toggleDirectOutput: () => audio.handleToggleDirectOutput(
+            !useAudioSettingsStore.getState().directOutputEnabled,
+        ),
         toggleAutoSkipUnplayable: () => audio.handleToggleAutoSkipUnplayable(
             !useAudioSettingsStore.getState().autoSkipUnplayable,
         ),

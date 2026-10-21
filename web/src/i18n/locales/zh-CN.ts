@@ -1,6 +1,18 @@
 
 
 export default {
+  "kugouLogin": {
+    "title": "登录酷狗",
+    "hint": "输入手机号，收到验证码后登录。登录状态会跟着账号记住，切平台再切回来不用重登。",
+    "mobile": "手机号",
+    "code": "验证码",
+    "send": "获取验证码",
+    "resend": "{{seconds}} 秒后重发",
+    "submit": "登录",
+    "sending": "发送中…",
+    "loggingIn": "登录中…",
+    "failed": "登录失败：{{message}}"
+  },
   "libraryBravais": {
     "suiteName": "Bravais 墙面",
     "homeTitle": "书库",
@@ -378,6 +390,7 @@ export default {
     "songTemporarilyUnavailableMaybeMembership": "暂时无法播放这首歌，完整播放可能需要会员",
     "songTemporarilyUnavailableMaybeRegion": "暂时无法播放这首歌，可能受所在地区限制",
     "songNetworkFailed": "连接失败，无法获取这首歌，请检查网络后重试",
+    "songWaitingForNetwork": "网络已断开，恢复后会自动继续播放",
     "songRequestTimedOut": "获取歌曲超时，请稍后重试",
     "songRetrying": "连接失败，正在重试…",
     "songServiceUnavailable": "音源服务暂时不可用，请稍后重试",
@@ -829,6 +842,7 @@ export default {
       "settings-toggle-auto-play-on-launch": { "title": "进入应用后自动播放", "description": "切换打开应用时是否自动续播上次的歌曲" },
       "settings-toggle-transcode-fallback": { "title": "自动转换不支持的音频", "description": "切换 Electron 对 Chromium 无法解码的本地与 Navidrome 音频的恢复" },
       "settings-toggle-playback-fade": { "title": "暂停/播放淡入淡出", "description": "切换暂停和恢复播放时的短淡入淡出" },
+      "settings-toggle-direct-output": { "title": "直出模式", "description": "不经过 Web Audio，让声音直接输出（没有可视化、均衡与淡入淡出），需要重启应用生效" },
       "settings-toggle-auto-skip-unplayable": { "title": "无法播放时自动跳过", "description": "切换歌曲受限或原因不明无法播放时是否倒计时跳到下一首" },
       "settings-toggle-bottom-subtitle-overlay": { "title": "切换底部字幕层", "description": "显示或隐藏整个底部字幕层" },
       "settings-cycle-subtitle-content-mode": { "title": "切换翻译字幕状态", "description": "在翻译、罗马音、罗马音加翻译之间切换副字幕内容" },
@@ -2837,6 +2851,9 @@ export default {
     "neteaseScrobble": "上报播放记录(仅网易云)",
     "neteaseScrobbleDesc": "在线网易云歌曲真实播放满 30 秒后，向你的网易云账号上报一次听歌记录。本地文件、云盘歌曲和其他音乐平台一律不上报；此功能可能有一定风险，请谨慎使用",
     "neteaseScrobbleSignInHint": "需要先登录网易云音乐账号。",
+    "directOutput": "直出模式",
+    "directOutputDesc": "不经过 Web Audio，让声音直接输出。给 Web Audio 在这台机器上不出声的情况用（鸿蒙 NEXT 的安卓兼容环境会这样），代价是没有可视化、没有均衡与音效、没有淡入淡出。",
+    "directOutputRestartHint": "已开启：请完全退出应用再重新打开，才会生效。",
     "queueDefaultBehavior": "加入队列的默认位置",
     "queueDefaultBehaviorDesc": "加入播放队列按钮的默认行为。",
     "queueAppendLabel": "追加到末尾",

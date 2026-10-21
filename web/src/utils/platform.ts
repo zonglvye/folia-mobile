@@ -28,6 +28,11 @@ export const PRIMARY_MODIFIER_LABEL = isMacPlatform ? 'Cmd' : 'Ctrl';
  * The shell injects `window.foliaAndroid` (see services/deviceAudioLibrary.ts); a browser and the
  * Electron main window both lack it. Detected by presence rather than user agent, so a phone
  * browser visiting the same build is not mistaken for the packaged app.
+ *
+ * The HarmonyOS shell injects the same object under the same name on purpose, so this answers true
+ * there as well - and that is wanted: every packaged-shell branch (bundled NetEase provider, 60 fps
+ * default, service worker retirement) applies to it. Use `getShellKind()` from
+ * services/shellNowPlaying.ts to tell the two shells apart, never this.
  */
 export const isAndroidShell = (): boolean => (
     typeof window !== 'undefined' && Boolean((window as { foliaAndroid?: unknown }).foliaAndroid)

@@ -21,6 +21,8 @@ import { classifyMissingAudioUrl, classifyPlaybackError } from './playbackRecove
 import { resolvePlaybackFailurePolicy, sleepForPlaybackRetry } from './playbackRecovery/playbackFailurePolicy';
 import { getProviderPlaybackCooldown, noteProviderFailure } from './playbackRecovery/providerPlaybackCooldown';
 import { isCachedSongAudioDistrusted } from './playbackRecovery/mediaCacheGuard';
+import { isNetworkOffline } from './playbackRecovery/networkReconnect';
+import { materializeShellAudioSource } from './shellOnlineAudio';
 
 export interface LoadOnlineAudioSourceOptions {
     stage?: 'resolve-url' | 'refresh' | 'restore';
@@ -66,10 +68,14 @@ export async function loadOnlineSongAudioSource(
         }
     }
 
-    if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt)) {
+    if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt) && !isNetworkOffline()) {
+        // 鸿蒙壳里远程地址要先换成同源 blob（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
+        // 离线时跳过这条：预取到的签名地址这时也取不回来，交给下面的 provider 失败路径（文案与自动重连都按网络处理）。
+        const playable = await materializeShellAudioSource(prefetched.audioUrl);
         return {
             kind: 'ok',
-            audioSrc: prefetched.audioUrl,
+            audioSrc: playable.audioSrc,
+            ...(playable.blobUrl ? { blobUrl: playable.blobUrl } : {}),
             replayGain: song.replayGain ?? prefetched.replayGain,
         };
     }
@@ -108,9 +114,15 @@ export async function loadOnlineSongAudioSource(
             const url = toPlayableAudioUrl(source?.url);
             if (url) {
                 const replayGain = applyOnlineAudioSourceMetadata(song, source?.replayGain).replayGain;
-                // 预取条目只在成功时更新；失败永不回写。
+                // 预取条目只在成功时更新；失败永不回写。预取里存的是**远程**地址（缓存给下次用）。
                 updatePrefetchedAudioUrl(song, url, audioQuality, replayGain);
-                return { kind: 'ok', audioSrc: url, replayGain };
+                const playable = await materializeShellAudioSource(url);
+                return {
+                    kind: 'ok',
+                    audioSrc: playable.audioSrc,
+                    ...(playable.blobUrl ? { blobUrl: playable.blobUrl } : {}),
+                    replayGain,
+                };
             }
             failure = classifyMissingAudioUrl(source?.url, { stage, providerId });
             console.warn('[OnlinePlayback] Provider returned no playable audio URL', failure.reason);
@@ -118,7 +130,9 @@ export async function loadOnlineSongAudioSource(
 
         noteProviderFailure(failure);
 
-        const delays = resolvePlaybackFailurePolicy(failure, 'play').autoRetryDelaysMs;
+        // 明确离线时不做这几次静默重试：请求一定发不出去，只会把失败提示推迟 4 秒。
+        // 网络恢复后的重试交给 playbackRecovery/networkReconnect。
+        const delays = isNetworkOffline() ? [] : resolvePlaybackFailurePolicy(failure, 'play').autoRetryDelaysMs;
         const retry = options.retry;
         if (retry && attempt < delays.length && retry.isCurrent()) {
             retry.onRetrying?.(failure, attempt + 1);

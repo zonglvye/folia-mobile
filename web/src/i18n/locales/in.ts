@@ -1,6 +1,18 @@
 
 
 export default {
+  "kugouLogin": {
+    "title": "Masuk ke KuGou",
+    "hint": "Masukkan nomor ponsel dan kode yang kami kirim. Sesi diingat bersama akun, jadi berpindah platform tidak membuat Anda keluar.",
+    "mobile": "Nomor ponsel",
+    "code": "Kode verifikasi",
+    "send": "Kirim kode",
+    "resend": "Kirim ulang dalam {{seconds}} dtk",
+    "submit": "Masuk",
+    "sending": "Mengirim…",
+    "loggingIn": "Sedang masuk…",
+    "failed": "Gagal masuk: {{message}}"
+  },
   "libraryBravais": {
     "suiteName": "Dinding Bravais",
     "homeTitle": "Pustaka",
@@ -376,6 +388,7 @@ export default {
     "songTemporarilyUnavailableMaybeMembership": "Lagu ini belum dapat diputar saat ini. Pemutaran penuh mungkin memerlukan keanggotaan.",
     "songTemporarilyUnavailableMaybeRegion": "Lagu ini belum dapat diputar saat ini. Lagu ini mungkin dibatasi di wilayah Anda.",
     "songNetworkFailed": "Gagal terhubung untuk memuat lagu ini. Periksa jaringan Anda lalu coba lagi.",
+    "songWaitingForNetwork": "Anda sedang offline. Pemutaran akan dilanjutkan saat jaringan kembali.",
     "songRequestTimedOut": "Waktu memuat lagu ini habis. Silakan coba lagi.",
     "songRetrying": "Koneksi gagal. Mencoba lagi…",
     "songServiceUnavailable": "Layanan musik sedang tidak tersedia. Silakan coba lagi nanti.",
@@ -827,6 +840,7 @@ export default {
       "settings-toggle-auto-play-on-launch": { "title": "Putar otomatis saat dibuka", "description": "Alihkan apakah membuka aplikasi langsung melanjutkan sesi terakhir" },
       "settings-toggle-transcode-fallback": { "title": "Konversi audio yang tidak didukung", "description": "Alihkan pemulihan Electron untuk audio lokal dan Navidrome yang tidak dapat didekode Chromium" },
       "settings-toggle-playback-fade": { "title": "Fade saat jeda dan lanjut", "description": "Alihkan fade singkat saat menjeda dan melanjutkan pemutaran" },
+      "settings-toggle-direct-output": { "title": "Output audio langsung", "description": "Lewati Web Audio agar elemen audio langsung ke sistem (tanpa visualiser, equalizer, dan fade). Perlu mulai ulang aplikasi." },
       "settings-toggle-auto-skip-unplayable": { "title": "Lewati lagu yang tidak dapat diputar", "description": "Alihkan hitung mundur untuk melewati lagu yang dibatasi atau gagal diputar tanpa alasan yang jelas" },
       "settings-toggle-bottom-subtitle-overlay": { "title": "Alihkan overlay subtitle bawah", "description": "Tampilkan atau sembunyikan seluruh overlay subtitle bawah" },
       "settings-cycle-subtitle-content-mode": { "title": "Putar mode konten subtitle", "description": "Putar konten subtitle antara terjemahan, romanisasi, dan romanisasi plus terjemahan" },
@@ -2701,6 +2715,9 @@ export default {
     "neteaseScrobble": "Laporkan pemutaran (khusus NetEase)",
     "neteaseScrobbleDesc": "Melaporkan satu pemutaran ke akun NetEase Anda setelah lagu NetEase daring benar-benar diputar minimal 30 detik. Berkas lokal, unggahan cloud, dan penyedia lain tidak pernah dilaporkan. Fitur ini memiliki risiko tertentu - gunakan dengan hati-hati.",
     "neteaseScrobbleSignInHint": "Masuk ke NetEase Cloud Music untuk memakai ini.",
+    "directOutput": "Output langsung",
+    "directOutputDesc": "Mengirim suara langsung keluar tanpa Web Audio. Untuk perangkat yang tidak mengeluarkan suara lewat Web Audio (lapisan kompatibilitas Android HarmonyOS NEXT begini). Konsekuensinya: tanpa visualiser, equalizer, dan fade.",
+    "directOutputRestartHint": "Aktif: tutup aplikasi sepenuhnya lalu buka lagi agar berlaku.",
     "queueDefaultBehavior": "Posisi default saat menambahkan ke antrean",
     "queueDefaultBehaviorDesc": "Perilaku default saat menambahkan lagu ke antrean.",
     "queueAppendLabel": "Tambahkan ke akhir",

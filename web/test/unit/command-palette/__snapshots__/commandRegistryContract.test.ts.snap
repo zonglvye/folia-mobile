@@ -175,6 +175,7 @@ exports[`command palette registry contract > keeps the registered command order 
   "settings-toggle-auto-play-on-launch",
   "settings-toggle-transcode-fallback",
   "settings-toggle-playback-fade",
+  "settings-toggle-direct-output",
   "settings-toggle-auto-skip-unplayable",
   "settings-toggle-bottom-subtitle-overlay",
   "settings-cycle-subtitle-content-mode",

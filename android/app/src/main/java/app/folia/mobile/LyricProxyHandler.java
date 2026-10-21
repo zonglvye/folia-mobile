@@ -65,6 +65,20 @@ public final class LyricProxyHandler {
 
     private static final Pattern CHARSET = Pattern.compile("charset=([^;]+)", Pattern.CASE_INSENSITIVE);
 
+    /**
+     * Request headers the page may set through the `headers` query parameter (a flat JSON object).
+     *
+     * The page cannot influence the real request headers of a `fetch()` that the WebView routes
+     * through {@code shouldInterceptRequest}, so the login flow passes the client headers KuGou
+     * expects in the query instead. Only these names are honoured — the same allowlist the Harmony
+     * shell uses — so this cannot become a way to send arbitrary headers.
+     */
+    private static final String[] ALLOWED_QUERY_HEADERS = {
+            "user-agent", "support-calm", "content-type", "x-router",
+            "kg-rc", "kg-thash", "kg-rec", "kg-rf",
+            "dfid", "mid", "clienttime",
+    };
+
     private LyricProxyHandler() {
     }
 
@@ -81,7 +95,9 @@ public final class LyricProxyHandler {
         }
 
         // WebViewResourceRequest exposes no request body, so a write could not be forwarded
-        // faithfully. Every caller in this app uses GET; say so rather than sending an empty body.
+        // faithfully. Every caller in this app issues a GET and, when it needs a POST upstream,
+        // says so through the `method` query parameter (see below) — the page-side helper always
+        // uses fetch(..., 'GET') so the WebView interception path stays uniform.
         if (!"GET".equalsIgnoreCase(request.getMethod())) {
             return jsonError(501, "Only GET is proxied");
         }
@@ -90,6 +106,13 @@ public final class LyricProxyHandler {
         if (target == null || target.isEmpty()) {
             return jsonError(400, "Missing url parameter");
         }
+
+        // The page asks for an upstream POST through the query (`method=POST` + `body` + `headers`),
+        // because the interception API gives no access to the fetch body. KuGou's phone-code login
+        // and the account endpoints are the callers that need it.
+        boolean upstreamPost = "POST".equalsIgnoreCase(trimToEmpty(uri.getQueryParameter("method")));
+        String upstreamBody = uri.getQueryParameter("body");
+        String upstreamHeaders = uri.getQueryParameter("headers");
 
         URL targetUrl;
         try {
@@ -112,7 +135,7 @@ public final class LyricProxyHandler {
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection) targetUrl.openConnection();
-            connection.setRequestMethod("GET");
+            connection.setRequestMethod(upstreamPost ? "POST" : "GET");
             connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
             connection.setReadTimeout(READ_TIMEOUT_MS);
             connection.setInstanceFollowRedirects(true);
@@ -121,6 +144,28 @@ public final class LyricProxyHandler {
             Map<String, String> forwarded = filterHeaders(request.getRequestHeaders());
             for (Map.Entry<String, String> header : forwarded.entrySet()) {
                 connection.setRequestProperty(header.getKey(), header.getValue());
+            }
+
+            // Headers the page put in the query (see ALLOWED_QUERY_HEADERS).
+            Map<String, String> queryHeaders = parseQueryHeaders(upstreamHeaders);
+            for (Map.Entry<String, String> header : queryHeaders.entrySet()) {
+                connection.setRequestProperty(header.getKey(), header.getValue());
+            }
+
+            if (upstreamPost) {
+                byte[] payload = (upstreamBody == null ? "" : upstreamBody)
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                if (connection.getRequestProperty("Content-Type") == null) {
+                    connection.setRequestProperty("Content-Type", "application/json");
+                }
+                connection.setDoOutput(true);
+                connection.setFixedLengthStreamingMode(payload.length);
+                java.io.OutputStream output = connection.getOutputStream();
+                try {
+                    output.write(payload);
+                } finally {
+                    output.close();
+                }
             }
 
             // Tencent's lyric host only answers when it is treated as a logged-out mobile client.
@@ -160,6 +205,52 @@ public final class LyricProxyHandler {
         return host.equals("qq.com") || host.endsWith(".qq.com")
                 || host.equals("y.gtimg.cn")
                 || host.equals("kugou.com") || host.endsWith(".kugou.com");
+    }
+
+    private static String trimToEmpty(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    /**
+     * Parses the page-supplied `headers` query parameter (flat JSON object) and keeps only the
+     * allowlisted names. Malformed JSON yields no headers instead of failing the request: the
+     * upstream call then behaves exactly like it did before this parameter existed.
+     */
+    private static Map<String, String> parseQueryHeaders(String json) {
+        Map<String, String> headers = new LinkedHashMap<>();
+        if (json == null || json.isEmpty()) {
+            return headers;
+        }
+        org.json.JSONObject object;
+        try {
+            object = new org.json.JSONObject(json);
+        } catch (org.json.JSONException malformed) {
+            Log.w(TAG, "Ignoring malformed proxy headers: " + malformed.getMessage());
+            return headers;
+        }
+        java.util.Iterator<String> keys = object.keys();
+        while (keys.hasNext()) {
+            String name = keys.next();
+            if (name == null || name.isEmpty()) {
+                continue;
+            }
+            String lower = name.toLowerCase(Locale.US);
+            boolean allowed = false;
+            for (String candidate : ALLOWED_QUERY_HEADERS) {
+                if (candidate.equals(lower)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) {
+                continue;
+            }
+            String value = object.optString(name, "");
+            if (!value.isEmpty()) {
+                headers.put(name, value);
+            }
+        }
+        return headers;
     }
 
     private static Map<String, String> filterHeaders(Map<String, String> requestHeaders) {

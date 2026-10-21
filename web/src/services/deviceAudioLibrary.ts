@@ -18,6 +18,12 @@ interface FoliaAndroidBridge {
   getAppInfo?: () => string | null;
   setImmersiveMode?: (enabled: boolean) => void;
   setPlaybackSnapshot?: (snapshotJson: string) => void;
+  /**
+   * Which shell this is, when it is willing to say. The Android shell never answers; the HarmonyOS
+   * one answers `harmony`, and that answer is what wakes up the now-playing mirror in
+   * `services/shellNowPlaying.ts`. See that module for why presence alone is not trusted.
+   */
+  getShellKind?: () => string;
   openBatteryOptimizationSettings?: () => void;
   openAppDetailsSettings?: () => void;
 }

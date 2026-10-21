@@ -415,6 +415,50 @@
         white-space: nowrap;
         writing-mode: horizontal-tb;
     }
+
+    /* 收紧海报底块的纵向留白。默认那 30px 上边距 + 40px 下内边距是给整幅纸用的留白，
+     * 在 374 高的屏幕上它们直接把动作行（播放热门 / 列表 / 更多）顶到屏幕外：实测底边 416，
+     * 比屏幕还低 42px，「列表」被裁在边线上。这一档让动作行不滚动就落在屏幕里，
+     * 上面的缝体滚动退化成兜底（内容特别长时仍然够得着）。 */
+    .bravais-seam .bravais-poster-bottom {
+        margin-top: 8px;
+        padding-bottom: 8px;
+        gap: 8px;
+    }
+
+    .bravais-seam .bravais-poster-actions {
+        gap: 10px;
+        margin-top: 0;
+    }
+
+    .bravais-seam .bravais-seam-about {
+        gap: 6px;
+    }
+
+    /* 简介在矮视口上只留一行。默认两行（--bravais-blurb-lines: 2），两行恰好把那 15px
+     * 又抢回去，「列表」会被裁在屏幕边线上。它本来就是个「点开看全文」的按钮
+     * （.bravais-seam-blurb.is-open 里封顶 14em 并可块内滚动），所以收一行不丢信息。 */
+    .bravais-seam .bravais-poster .bravais-seam-blurb {
+        max-height: 1.8em;
+        -webkit-line-clamp: 1;
+    }
+
+    /* 内容比屏幕高的缝（歌手页最典型：简介 + 热门歌曲 + 两行动作）在矮视口上会掉到屏幕外。
+     * 实测 823×374：动作行底边 416（屏幕外 42px），「列表」「更多」两个按钮整块点不到，
+     * 而从按钮往上一路**没有任何可滚动的祖先** —— 缝本体是 overflow: hidden，谁也滚不动，
+     * 页面上又没有滚动条或手势能把它露出来，看起来就是「歌手页显示不全」。
+     * 这一档让缝体自己纵向滚动：内容再长也够得着，横向手势仍留给缝内的翻页/切换。 */
+    .bravais-seam .bravais-seam-body {
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        touch-action: pan-y;
+        scrollbar-width: none;
+    }
+
+    .bravais-seam .bravais-seam-body::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+    }
 }
 
 .bravais-seam-rule { flex: none; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); }

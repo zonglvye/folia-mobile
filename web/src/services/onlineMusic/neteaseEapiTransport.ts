@@ -36,6 +36,8 @@ const WEAPI_ORIGIN = 'https://music.163.com';
 /** 参考实现对 eapi 用的是 iPhone 档 UA，weapi 是桌面 Chrome 档，两者不能混用。 */
 const EAPI_USER_AGENT = 'NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)';
 const WEAPI_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0';
+/** api 档是桌面客户端，UA 与参考实现的 `userAgentMap.api.pc` 逐字一致。 */
+const API_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117';
 
 const VERSION_CODE = '140';
 const RESOLUTION = '1920x1080';
@@ -198,4 +200,26 @@ export const callNeteaseWeapi = async (
     const body = new URLSearchParams({ params, encSecKey }).toString();
     const target = `${WEAPI_ORIGIN}/weapi/${uri.replace(/^\/api\//, '')}`;
     return postThroughShell(target, body, encodeCookieHeader(buildProcessedCookie(session)), WEAPI_USER_AGENT, WEAPI_ORIGIN);
+};
+
+/**
+ * api：明文表单直发 `music.163.com/api/...`，身份只靠 Cookie，UA 是**桌面客户端**那一档。
+ *
+ * 参考实现把这一档设为默认（`request.js` 里 `crypto === '' → 'api'`），大量真实请求走的就是它。
+ * 对扫码登录尤其重要：非浏览器的 HTTP 栈（壳里是系统网络栈）声称自己是 Chrome，会同时踩到
+ * TLS/头部一致性检查；而声称自己是网易桌面客户端没有任何可被比对的地方，正是这一档的默认假设。
+ */
+export const callNeteaseApi = async (
+    session: NeteaseSession,
+    uri: string,
+    payload: Record<string, unknown>,
+): Promise<NeteaseTransportResult> => {
+    const form = new URLSearchParams();
+    for (const [key, value] of Object.entries(payload)) {
+        if (value !== undefined && value !== null) {
+            form.set(key, String(value));
+        }
+    }
+    const target = `${WEAPI_ORIGIN}${uri}`;
+    return postThroughShell(target, form.toString(), encodeCookieHeader(buildProcessedCookie(session)), API_USER_AGENT, WEAPI_ORIGIN);
 };

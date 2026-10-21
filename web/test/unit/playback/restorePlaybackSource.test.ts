@@ -42,6 +42,8 @@ vi.mock('@/stores/useLyricSettingsStore', () => ({
 vi.mock('@/services/onlineMusic/resourceCache', () => ({
     getCachedSongCoverUrl: vi.fn(async () => null),
     getSongCacheWithLegacyMigration: vi.fn(async () => null),
+    // 封面查缓存是有期限的（真机上它曾经扣住音源），恢复流程按这个数配 settleWithin。
+    COVER_LOOKUP_DEADLINE_MS: 1200,
 }));
 vi.mock('@/utils/onlineLyricsState', () => ({
     loadOnlineLyricsState: vi.fn(async () => null),

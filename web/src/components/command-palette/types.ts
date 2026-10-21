@@ -299,6 +299,8 @@ export type CommandPaletteSettingsContext = {
     toggleTranscodeFallback: () => void;
     /** Whether pause and resume fade the sound out and in. */
     togglePlaybackFade: () => void;
+    /** 直出模式：不建 Web Audio 图（没有可视化/均衡/淡入淡出），重启后生效。 */
+    toggleDirectOutput: () => void;
     /** Whether restricted songs and unknown failures count down to a skip, like taken-down ones. */
     toggleAutoSkipUnplayable: () => void;
     /**

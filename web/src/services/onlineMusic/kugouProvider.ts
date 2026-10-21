@@ -1,5 +1,6 @@
 import type { SongResult, UnifiedSong } from '../../types';
 import {
+    ANONYMOUS_PUBLIC_MODE,
     OnlineProviderError,
     type AudioQualityPreference,
     type ChorusRange,
@@ -16,6 +17,7 @@ import {
 } from '../../types/onlineMusic';
 import { getSizedCoverUrl } from '../../utils/coverUrl';
 import { parseLyricsByFormat } from '../../utils/lyrics/parserCore';
+import { fetchKugouLyrics } from '../../utils/lyrics/providers/kugouLyricProvider';
 import { isPureMusicLyricText } from '../../utils/lyrics/pureMusic';
 import { hasRenderableLyrics } from '../../utils/lyrics/validity';
 import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
@@ -26,6 +28,15 @@ import {
     normalizeSongTitleForLyricSearch,
 } from '../../utils/lyrics/searchQuery';
 import { removeProviderSessionValue, readProviderSessionValue } from './providerStorage';
+import {
+    clearKugouWebSession,
+    fetchKugouWebPlaylists,
+    fetchKugouWebPlaylistTracks,
+    fetchKugouWebUser,
+    hasKugouWebSession,
+    loginKugouWithCode,
+    sendKugouLoginCode,
+} from './kugouWebAuth';
 import { attemptChainDecision, attemptFromError, emptyAttempt, summarizePlaybackAttempts } from './playbackAttempts';
 import {
     createKugouLegacyPaywallError,
@@ -700,6 +711,8 @@ const parseKugouChorusRanges = (response: unknown): ChorusRange[] => {
 const getKugouChorusRanges = async (songId: MediaId): Promise<ChorusRange[]> => {
     const hash = String(songId).trim().toUpperCase();
     if (!hash) return [];
+    // 匿名公开模式没有 song_climax 接口；直接给空，让上层走文本兜底，不必每首歌打一次注定失败的请求。
+    if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) return [];
 
     const cached = kugouChorusRangesCache.get(hash);
     if (cached) return cached;
@@ -731,8 +744,58 @@ const getKugouLyricCandidate = async (song: SongResult): Promise<any | null> => 
     return Array.isArray(candidates) ? candidates[0] ?? null : null;
 };
 
+/**
+ * 旧版 playInfo 的字段名是 songName / author_name / imgUrl，和检索接口那套 SongName / Singers / FileHash 不同。
+ * 这里只补上归一化认得的键，其余原样带过去，不再养第二条 normalize 分支。
+ */
+const getKugouLegacySongDetail = async (id: MediaId): Promise<UnifiedSong | null> => {
+    const hash = String(id ?? '').trim().toUpperCase();
+    if (!hash) return null;
+    const raw = await requestKugouLegacyPlayInfo(hash);
+    if (!raw || typeof raw !== 'object') return null;
+    const song = normalizeKugouSong({
+        ...raw,
+        SongName: raw.songName,
+        SingerName: raw.author_name,
+        FileHash: raw.hash || hash,
+        Duration: raw.timeLength,
+        AlbumID: raw.albumid ?? raw.req_albumid,
+        Image: raw.imgUrl || raw.album_img,
+    });
+    return song.id ? song : null;
+};
+
+/**
+ * 匿名公开模式的歌词：酷狗自己的 search + download 两条公开接口，KRC 在页面里解密。
+ * 这条通道原本只服务歌词页的自动匹配，匿名 provider 没有实例可问，正好复用。
+ */
+const getKugouAnonymousLyrics = async (song: SongResult) => {
+    const parsed = await fetchKugouLyrics(song).catch(error => {
+        console.warn('[KugouProvider] anonymous lyric fetch failed', error);
+        return null;
+    });
+    if (!parsed) return { lyrics: null, isPureMusic: false, chorusRanges: [] };
+    // 公开接口只回解析结果、不回原始 KRC 文本；mainText 用逐行文本回填，纯音乐判定与缓存都沿用这个字符串。
+    const lyricText = parsed.lines.map((line: { fullText: string }) => line.fullText).join('\n');
+    if (isPureMusicLyricText(lyricText)) {
+        return { lyrics: null, mainText: lyricText, wordByWordText: lyricText, isPureMusic: true, chorusRanges: [] };
+    }
+    return {
+        lyrics: parsed,
+        mainText: lyricText,
+        wordByWordText: parsed.isWordByWord ? lyricText : undefined,
+        isPureMusic: false,
+        chorusRanges: [],
+    };
+};
+
 // Fetches the server-decoded KRC payload exposed by the current KuGou provider API.
 const getKugouLyrics = async (song: SongResult) => {
+    // 匿名公开模式没有实例接口，歌词改走公开通道，否则每首歌都会以
+    // 「VITE_KUGOU_API_BASE is not configured」失败，歌词页一片空白。
+    if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
+        return getKugouAnonymousLyrics(song);
+    }
     const candidate = await getKugouLyricCandidate(song);
     if (!candidate?.id || !candidate?.accesskey) {
         return { lyrics: null, isPureMusic: false, chorusRanges: [] };
@@ -765,8 +828,26 @@ const getKugouLyrics = async (song: SongResult) => {
     };
 };
 
+/**
+ * 账号类请求的分发：有页面直连登录态时走页面（kugouWebAuth 里的两个账号接口），否则走实例。
+ * 目前页面只实现了歌单列表与歌单歌曲——正好是「我的歌单」和「我喜欢」需要的那两条。
+ */
+const requestKugouAccount = async (
+    operation: 'user_playlist' | 'playlist_track_all',
+    params: Record<string, string | number>,
+): Promise<any> => {
+    if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE && hasKugouWebSession()) {
+        if (operation === 'user_playlist') {
+            const userid = String(params.userid ?? readProviderSessionValue('kugou', 'userid') ?? '');
+            return fetchKugouWebPlaylists(userid, Number(params.page ?? 1), Number(params.pagesize ?? 100));
+        }
+        return fetchKugouWebPlaylistTracks(String(params.id ?? ''), Number(params.page ?? 1), Number(params.pagesize ?? 100));
+    }
+    return requestKugou(operation, params);
+};
+
 const getKugouUserPlaylistItems = async (userId: MediaId): Promise<any[]> => {
-    const response = await requestKugou('user_playlist', {
+    const response = await requestKugouAccount('user_playlist', {
         userid: String(userId),
         page: 1,
         pagesize: 100,
@@ -843,7 +924,7 @@ const getKugouPlaylistFallbackCover = async (rawPlaylist: any): Promise<string |
     const globalCollectionId = valueOf(rawPlaylist, 'global_collection_id', 'globalCollectionId');
     if (globalCollectionId === undefined || globalCollectionId === null) return undefined;
 
-    const response = await requestKugou('playlist_track_all', {
+    const response = await requestKugouAccount('playlist_track_all', {
         id: String(globalCollectionId),
         page: 1,
         pagesize: 1,
@@ -896,7 +977,7 @@ const getKugouPlaylistTrackSongs = async (
     const songs: UnifiedSong[] = [];
     let completed = false;
     for (let page = 1; page <= KUGOU_LIKED_TRACK_MAX_PAGES; page += 1) {
-        const response = await requestKugou('playlist_track_all', {
+        const response = await requestKugouAccount('playlist_track_all', {
             id: globalCollectionId,
             page,
             pagesize: KUGOU_MAX_PAGE_SIZE,
@@ -977,16 +1058,13 @@ const KUGOU_FULL_CAPABILITIES: ProviderCapabilities = {
 };
 
 /**
- * 匿名公开模式（网页版没有实例、也没有账号后端）下只承诺三件事：检索、播放、歌词——它们由酷狗自己的
- * 公开接口承担，已对真实端点实测可用。其余能力全部落在实例或账户那一侧，声明为真只会让界面摆出
- * 点了必然失败的功能。
- *
- * `auth` 尤其关键：omni 用它算出 requiresAccount，为真时选中音源会进入二维码登录流程而不是直接切换，
- * 而这一模式没有可登录的后端，于是活动音源永远切不过去，能用的匿名检索也就无从进入。
+ * 匿名公开模式（网页版没有实例、也没有账号后端）下的能力：检索、播放、歌词由酷狗自己的公开接口承担，
+ * 登录走页面直连的手机号验证码通道（kugouWebAuth），因此 auth 为真——选中音源会先进登录表单。
+ * 歌单/红心/日推这些仍需要实例接口，声明为真只会让界面摆出点了必然失败的功能。
  */
 const KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES: ProviderCapabilities = {
     ...KUGOU_FULL_CAPABILITIES,
-    auth: false,
+    auth: true,
     userLibrary: false,
     playlists: false,
     albums: false,
@@ -1001,16 +1079,26 @@ const KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES: ProviderCapabilities = {
     userAlbums: false,
 };
 
+/**
+ * 已用页面直连账号登录的匿名公开模式：在匿名能力之上补上「我的歌单」和「我喜欢」。
+ * 账号接口只有两条（歌单列表 / 歌单歌曲），红心、歌单订阅、云盘、日推仍然没有实现。
+ */
+const KUGOU_WEB_SESSION_CAPABILITIES: ProviderCapabilities = {
+    ...KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES,
+    userLibrary: true,
+    playlists: true,
+    likes: true,
+};
+
 export const kugouProvider: OnlineMusicProvider = {
     id: 'kugou',
     displayName: 'KuGou Music',
     shortName: '酷狗',
     getAvailability: getKugouTransportAvailability,
-    // 能力随取数模式而变，理由见上面两个常量。
+    // 能力随取数模式而变，理由见上面几个常量；登录之后还会多出歌单与红心。
     get capabilities(): ProviderCapabilities {
-        return getKugouTransportMode() === 'anonymous-public'
-            ? KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES
-            : KUGOU_FULL_CAPABILITIES;
+        if (getKugouTransportMode() !== 'anonymous-public') return KUGOU_FULL_CAPABILITIES;
+        return hasKugouWebSession() ? KUGOU_WEB_SESSION_CAPABILITIES : KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES;
     },
     normalizeSong: normalizeKugouSong,
     normalizeUser,
@@ -1053,6 +1141,10 @@ export const kugouProvider: OnlineMusicProvider = {
     },
     playback: {
         async getSongDetail(id) {
+            // 匿名公开模式没有实例接口；旧版 playInfo 的同一份应答里就有歌名、歌手、封面、时长。
+            if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
+                return getKugouLegacySongDetail(id);
+            }
             const response = await requestKugou('audio', { hash: String(id) });
             const item = listOf(response)[0] ?? dataOf(response);
             return hashOf(item) ? normalizeKugouSong(item) : null;
@@ -1239,6 +1331,19 @@ export const kugouProvider: OnlineMusicProvider = {
     },
     auth: {
         async getLoginStatus() {
+            // 匿名公开模式没有实例，但登录态可以有：手机号验证码登录把 token/userid 存在 provider 存储里，
+            // 这里直接用它们在页面里查账号资料（见 kugouWebAuth）。
+            if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
+                // 登录态与资料都在这条通道里，日志只记「有没有」和 id，不记 token。
+                const webUser = await fetchKugouWebUser();
+                console.info(`[KugouProvider] web login status ${JSON.stringify({
+                    hasUser: Boolean(webUser),
+                    userId: webUser ? String(webUser.id) : null,
+                    hasNickname: Boolean(webUser?.nickname),
+                    hasAvatar: Boolean(webUser?.avatarUrl),
+                })}`);
+                return webUser;
+            }
             const userId = readProviderSessionValue('kugou', 'userid');
             const hasElectronTransport = typeof window !== 'undefined' && Boolean(window.electron?.kugouRequest);
             console.info('[KugouProvider] login-status:start', {
@@ -1282,10 +1387,36 @@ export const kugouProvider: OnlineMusicProvider = {
             }
         },
         async logout() {
+            if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
+                clearKugouWebSession();
+                clearKugouLikedCaches();
+                lastSeenKugouUserId = null;
+                return;
+            }
             await requestKugou('logout').catch(() => undefined);
             ['cookie', 'token', 'userid', 'dfid'].forEach(key => removeProviderSessionValue('kugou', key));
             clearKugouLikedCaches();
             lastSeenKugouUserId = null;
+        },
+        // 手机号验证码登录：只有匿名公开模式需要（其它模式由 KuGouMusicApi 的扫码接口承担）。
+        async sendLoginCode(mobile: string) {
+            if (getKugouTransportMode() !== ANONYMOUS_PUBLIC_MODE) {
+                throw new OnlineProviderError('unsupported', 'KuGou phone login is only used without a backend', 'kugou');
+            }
+            await sendKugouLoginCode(mobile);
+        },
+        async loginWithCode(mobile: string, code: string) {
+            if (getKugouTransportMode() !== ANONYMOUS_PUBLIC_MODE) {
+                throw new OnlineProviderError('unsupported', 'KuGou phone login is only used without a backend', 'kugou');
+            }
+            const session = await loginKugouWithCode(mobile, code);
+            // 登录已经成功、token 已经落盘：资料这一步失败不该把登录判成失败（否则用户会以为没登进去，
+            // token 却留在存储里）。先给一个只带 id 的占位用户，账户刷新会补上昵称头像。
+            const user = await fetchKugouWebUser().catch(error => {
+                console.warn('[KugouProvider] profile after login failed', error);
+                return null;
+            });
+            return user ?? { id: session.userid, nickname: '酷狗', avatarUrl: '' };
         },
         async getQrKey() {
             const response = await requestKugou('login_qr_key');
@@ -1311,7 +1442,7 @@ export const kugouProvider: OnlineMusicProvider = {
     library: {
         async getUserPlaylists(userId, limit, offset) {
             const requestLimit = Math.min(Math.max(1, limit), KUGOU_MAX_PAGE_SIZE);
-            const response = await requestKugou('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
+            const response = await requestKugouAccount('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
             const rawItems = listOf(response);
             const playlistItems = rawItems
                 .filter(item => getKugouUserCollectionType(item) === 'playlist')
@@ -1326,7 +1457,7 @@ export const kugouProvider: OnlineMusicProvider = {
         },
         async getUserAlbums(userId, limit, offset) {
             const requestLimit = Math.min(Math.max(1, limit), KUGOU_MAX_PAGE_SIZE);
-            const response = await requestKugou('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
+            const response = await requestKugouAccount('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
             const rawItems = listOf(response);
             const items = rawItems
                 .filter(item => getKugouUserCollectionType(item) === 'album')
@@ -1343,14 +1474,17 @@ export const kugouProvider: OnlineMusicProvider = {
         },
     },
     catalog: {
-        canResolveSongCatalogRefs: song => Boolean(getKugouCatalogLookupId(song)),
+        // 匿名公开模式没有专辑/歌手接口：检索结果自带歌名、歌手、专辑名与封面，再 hydrate 只会
+        // 拿一条「VITE_KUGOU_API_BASE is not configured」回来，所以这里直接说不。
+        canResolveSongCatalogRefs: song => getKugouTransportMode() !== ANONYMOUS_PUBLIC_MODE
+            && Boolean(getKugouCatalogLookupId(song)),
         resolveSongCatalogRefs: resolveKugouSongCatalogRefs,
         async getPlaylistTracks(id, limit, offset, collection) {
             const recommendationPage = await getKugouRecommendationPage(collection, limit, offset);
             if (recommendationPage) return recommendationPage;
 
             const requestLimit = Math.min(Math.max(1, limit), KUGOU_MAX_PAGE_SIZE);
-            const response = await requestKugou('playlist_track_all', { id: String(id), pagesize: requestLimit, page: Math.floor(offset / requestLimit) + 1 });
+            const response = await requestKugouAccount('playlist_track_all', { id: String(id), pagesize: requestLimit, page: Math.floor(offset / requestLimit) + 1 });
             return pageOf(listOf(response).map(normalizeKugouSong), response, requestLimit, offset);
         },
         async getCloudTracks(limit, offset) {

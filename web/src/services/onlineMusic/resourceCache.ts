@@ -93,6 +93,14 @@ export const saveSongReplayGain = async (song: SongResult, replayGain: ReplayGai
     await saveToCache(getSongResourceCacheKey('replayGain', song), replayGain);
 };
 
+/**
+ * 等封面缓存的期限。封面是装饰，**不能挡住音源**：`getCachedSongCoverUrl` 底下是几次 IDB 读，
+ * 旧地址还可能顺手回写一次 blob，任何一次不回来，等它的那条播放路径就一步都走不下去。
+ * 真机取证（2026-10，`play:timeout · running · rs 0/0`）：按下播放 4 秒后元素仍然空着 ——
+ * 歌曲显示着，音源却被封面缓存挡在两个 await 之间。调用处一律配 settleWithin 用这个期限。
+ */
+export const COVER_LOOKUP_DEADLINE_MS = 1200;
+
 export const getCachedSongCoverUrl = async (song: SongResult): Promise<string | null> => {
     const cacheKey = getSongResourceCacheKey('cover', song);
     const current = await getCachedCoverUrl(cacheKey);

@@ -13,6 +13,9 @@ export const LOCAL_MUSIC_SERVICE_PATH = '/src/services/localMusicService.ts';
 /** 经过钩子的函数（其余导出原样转出）。 */
 export const HOOKED_LOCAL_MUSIC_SERVICE_FUNCTIONS = [
     'importFolder',
+    // 浏览器与 Android WebView 的导入入口走的是它（无目录选择器时模型发的是 import-files）：
+    // 真实现会弹系统文件选择器，用例里必须由替身接管，否则点一下就会停在对话框上。
+    'importLocalFilesViaInput',
     'resyncAllFolders',
     'resyncFolder',
     'clearFolderIgnore',

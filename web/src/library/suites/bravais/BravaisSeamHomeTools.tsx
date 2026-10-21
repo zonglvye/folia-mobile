@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, type KeyboardEvent } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
 import {
     Disc3,
     EyeOff,
@@ -17,6 +16,7 @@ import { BRAVAIS_SPECIAL_ICONS } from './bravaisSpecialIcons';
 import { closeBravaisHomePopover, setBravaisHomeOpenRequest, setBravaisHomePopover, useBravaisHomeUiStore } from './bravaisHomeUiStore';
 import { useBravaisReducedTransitions } from './bravaisMotion';
 import { bravaisPopMotion } from './bravaisSeamMotion';
+import { BravaisSeamMenu } from './BravaisSeamMenuSheet';
 
 // src/library/suites/bravais/BravaisSeamHomeTools.tsx
 // 首页窄缝底部的工具格。
@@ -84,8 +84,12 @@ const BravaisSeamHomeTools: React.FC<{
     const local = home.menu ?? [];
     const jumps = menuShortcuts ?? [];
     const hasMenu = jumps.length > 0 || page.length > 0 || local.length > 0 || app.length > 0;
-    const open = menuOpen && hasMenu && !compact;
-    const pop = bravaisPopMotion('above', useBravaisReducedTransitions());
+    // 窄视口（手机横屏）也直接把菜单开出来：原先的写法是「书脊/窄缝上先展开、再打开」，
+    // 而展开那一步在真机上没兑现，用户看到的就是「点 ⋯ 什么都没出现」。
+    // BravaisSeamMenu 在窄视口本来就是底部升起的 portal 面板，不依赖缝的宽度。
+    const open = menuOpen && hasMenu;
+    const reduced = useBravaisReducedTransitions();
+    const pop = bravaisPopMotion('above', reduced);
 
     // 书脊上点了「⋯」：缝展开成窄缝后在这里把菜单打开。
     useEffect(() => {
@@ -102,11 +106,13 @@ const BravaisSeamHomeTools: React.FC<{
         if (shownRef.current) closeBravaisHomePopover('menu');
     }, []);
 
-    // 菜单开着时点别处收起（缝里、墙上都算）。
+    // 菜单开着时点别处收起（缝里、墙上都算）。窄视口下面板被 portal 挂到 stage 根节点上，不再在 dock 里，
+    // 所以点菜单内部的那一下要放行。
     useEffect(() => {
         if (!open) return undefined;
         const onPointerDown = (event: PointerEvent) => {
             if (event.target instanceof Node && dockRef.current?.contains(event.target)) return;
+            if (event.target instanceof Element && event.target.closest('[data-bravais-seam-menu]')) return;
             closeBravaisHomePopover('menu');
         };
         document.addEventListener('pointerdown', onPointerDown, true);
@@ -128,11 +134,7 @@ const BravaisSeamHomeTools: React.FC<{
     };
 
     const onMore = () => {
-        if (compact) {
-            setBravaisHomeOpenRequest('menu');
-            onExpand();
-            return;
-        }
+        // 不再区分宽窄：窄视口上「先展开缝再开菜单」在真机上打不开（见 open 的注释）。
         setBravaisHomePopover(menuOpen ? null : 'menu');
     };
 
@@ -150,9 +152,7 @@ const BravaisSeamHomeTools: React.FC<{
 
     return (
         <div ref={dockRef} className="bravais-seam-dock" onKeyDown={onKeyDown}>
-            <AnimatePresence>
-                {open && (
-                    <motion.div key="menu" className="bravais-seam-menu is-home" role="menu" aria-label={home.menuLabel} data-bravais-seam-menu {...pop}>
+            <BravaisSeamMenu open={open} isHome pop={pop} reduced={reduced} ariaLabel={home.menuLabel}>
                         {jumps.map(shortcut => {
                             const Icon = BRAVAIS_SPECIAL_ICONS[shortcut.special];
                             return (
@@ -173,9 +173,7 @@ const BravaisSeamHomeTools: React.FC<{
                         ))}
                         {(page.length > 0 || local.length > 0) && app.length > 0 && <div className="bravais-seam-menu-rule" role="separator" />}
                         {app.map(menuTool)}
-                    </motion.div>
-                )}
-            </AnimatePresence>
+            </BravaisSeamMenu>
             <div className="bravais-seam-tools">
                 {dock.map((tool) => {
                     const Icon = TOOL_ICONS[tool.id];

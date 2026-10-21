@@ -11,6 +11,7 @@ import type {
 import { BravaisSeamFlipText } from './BravaisSeamFlip';
 import { useBravaisReducedTransitions } from './bravaisMotion';
 import { bravaisPopMotion, bravaisRevealMotion } from './bravaisSeamMotion';
+import { BravaisSeamMenu } from './BravaisSeamMenuSheet';
 import './bravaisCollection.css';
 
 // src/library/suites/bravais/BravaisSeamCollection.tsx
@@ -124,11 +125,13 @@ export const BravaisSeamCollectionMenu: React.FC<{
     const items = collection?.menu ?? [];
     const hasMenu = items.length > 0 || Boolean(fold);
 
-    // 菜单开着时点别处收起（缝里、墙上都算）。
+    // 菜单开着时点别处收起（缝里、墙上都算）。窄视口下面板被 portal 挂到 stage 根节点上，不再在锚点里，
+    // 所以点菜单内部的那一下要放行，否则面板在 pointerdown 阶段就被收掉、里面的按钮永远点不到。
     useEffect(() => {
         if (!isOpen) return undefined;
         const onPointerDown = (event: PointerEvent) => {
             if (event.target instanceof Node && anchorRef.current?.contains(event.target)) return;
+            if (event.target instanceof Element && event.target.closest('[data-bravais-seam-menu]')) return;
             setIsOpen(false);
         };
         document.addEventListener('pointerdown', onPointerDown, true);
@@ -158,42 +161,38 @@ export const BravaisSeamCollectionMenu: React.FC<{
                     </button>
                 )}
             </div>
-            <AnimatePresence>
-                {isOpen && (
-                    <motion.div key="menu" className="bravais-seam-menu" role="menu" data-bravais-seam-menu {...pop}>
-                        {items.map(item => (
-                            <button
-                                key={item.id}
-                                type="button"
-                                role="menuitem"
-                                className={item.danger ? 'is-danger' : undefined}
-                                disabled={item.disabled}
-                                data-bravais-seam-action={item.id}
-                                onClick={() => {
-                                    setIsOpen(false);
-                                    item.run();
-                                }}
-                            >
-                                {item.label}
-                            </button>
-                        ))}
-                        {fold && items.length > 0 && <div className="bravais-seam-menu-rule" role="separator" />}
-                        {fold && (
-                            <button
-                                type="button"
-                                role="menuitem"
-                                data-bravais-seam-action="hide"
-                                onClick={() => {
-                                    setIsOpen(false);
-                                    fold.run();
-                                }}
-                            >
-                                {fold.label}
-                            </button>
-                        )}
-                    </motion.div>
+            <BravaisSeamMenu open={isOpen} pop={pop} reduced={reduced}>
+                {items.map(item => (
+                    <button
+                        key={item.id}
+                        type="button"
+                        role="menuitem"
+                        className={item.danger ? 'is-danger' : undefined}
+                        disabled={item.disabled}
+                        data-bravais-seam-action={item.id}
+                        onClick={() => {
+                            setIsOpen(false);
+                            item.run();
+                        }}
+                    >
+                        {item.label}
+                    </button>
+                ))}
+                {fold && items.length > 0 && <div className="bravais-seam-menu-rule" role="separator" />}
+                {fold && (
+                    <button
+                        type="button"
+                        role="menuitem"
+                        data-bravais-seam-action="hide"
+                        onClick={() => {
+                            setIsOpen(false);
+                            fold.run();
+                        }}
+                    >
+                        {fold.label}
+                    </button>
                 )}
-            </AnimatePresence>
+            </BravaisSeamMenu>
             </div>
             <AnimatePresence initial={false}>
                 {collection?.notice && (

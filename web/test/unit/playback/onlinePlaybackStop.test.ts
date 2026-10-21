@@ -55,6 +55,8 @@ vi.mock('@/services/onlineMusic/songAvailability', () => ({
 vi.mock('@/services/onlineMusic/resourceCache', () => ({
     hasCachedSongAudio: async () => null,
     getCachedSongCoverUrl: vi.fn(async () => null),
+    // 封面查缓存有期限（真机上它曾经扣住音源），落地流程按这个数配 settleWithin。
+    COVER_LOOKUP_DEADLINE_MS: 1200,
 }));
 vi.mock('@/services/prefetchService', () => ({
     getPrefetchedData: () => null,
@@ -656,21 +658,30 @@ describe('stale requests', () => {
     it.each([
         ['another song', '3'],
         ['the same song again', '2'],
-    ])('releases the blob of a landed song when %s lands during its cover lookup', async (_label, nextId) => {
+    ])('hands the landed song its source before the cover lookup, and leaves its blob to the deck when %s lands', async (_label, nextId) => {
+        // blob 地址按用例取不同的值：retireBlobUrl 的持有名单是模块级的，两个用例共用一个地址时
+        // 前一个用例留下的台账会在后一个用例里被清扫掉，断言就测不到这一条了。
+        const blobSrc = `blob:b-${nextId}`;
         const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
         const cover = deferred<string | null>();
         const nextSrc = `https://cdn.example/${nextId}-fresh.mp3`;
         vi.mocked(getCachedSongCoverUrl).mockReturnValueOnce(cover.promise);
-        loader.mockResolvedValueOnce({ kind: 'ok', audioSrc: 'blob:b', blobUrl: 'blob:b' })
+        loader.mockResolvedValueOnce({ kind: 'ok', audioSrc: blobSrc, blobUrl: blobSrc })
             .mockResolvedValueOnce({ kind: 'ok', audioSrc: nextSrc });
         const queue = controller();
         const landing = queue.playSong(songs[1], songs);
         await vi.waitFor(() => expect(getCachedSongCoverUrl).toHaveBeenCalledOnce());
+        // 音源在封面缓存之前就落地了（真机 `play:timeout · running · rs 0/0`：封面缓存不回来，
+        // 声音跟着一起被扣死，而且不报错）。封面还没回来的这一刻，deck 已经拿到了音源。
+        expect(usePlaybackStore.getState().audioSrc).toBe(blobSrc);
+        expect(queue.blobUrlRef.current).toBe(blobSrc);
         await queue.playSong(songs.find(song => song.id === nextId)!, songs);
 
         cover.resolve(null);
         await landing;
-        expect(revoke).toHaveBeenCalledWith('blob:b');
+        // 不直接回收：这条 URL 已经交给 deck 了，回收等于把它正在用的地址抽走。
+        // 交接由 retireBlobUrl 负责 —— 新歌落地时把它记进持有名单，等没有 deck 在放它时才回收。
+        expect(revoke).not.toHaveBeenCalledWith(blobSrc);
         expect(usePlaybackStore.getState().audioSrc).toBe(nextSrc);
         expect(queue.blobUrlRef.current).toBeNull();
     });

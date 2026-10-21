@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useTrackTitlePreview, type TrackNavSide } from '../../hooks/useTrackTitlePreview';
 import { usePlayerChromeSettingsStore } from '../../stores/usePlayerChromeSettingsStore';
+import { useSupportsFinePointer } from '../../hooks/useSupportsFinePointer';
 // src/components/floating-player/TrackTitleNavigator.tsx
 
 const PREVIEW_OPACITY = 0.55;
@@ -58,13 +59,20 @@ const TrackTitleNavigator: React.FC<TrackTitleNavigatorProps> = ({
         beginSwitch,
     } = useTrackTitlePreview({ title, trackKey, prevTitle, nextTitle, disabled });
     const alwaysShowArrows = usePlayerChromeSettingsStore(state => state.alwaysShowTrackSwitchButtons);
+    // 没有可悬停的指针时（手机壳、平板），`group-hover/title:opacity-70` 永远不会触发：
+    // 箭头留在原位、点得到，却彻底隐形 —— 真机实测 `(hover: hover) and (pointer: fine)` 为 false，
+    // 表现就是「切歌按钮看不见了，但盲点能切歌」。所以不能悬停就直接把箭头画出来，
+    // 顺便把命中区从 24px 放大到 32px（手指够得着）。
+    const canHover = useSupportsFinePointer();
+    const arrowsAlwaysVisible = alwaysShowArrows || !canHover;
 
     const isPreview = previewTitle !== null;
     const zoneClass = 'absolute inset-y-0 flex items-center';
     const arrowClass = [
-        'pointer-events-auto flex h-6 w-6 items-center justify-center rounded-full',
+        'pointer-events-auto flex items-center justify-center rounded-full',
+        canHover ? 'h-6 w-6' : 'h-8 w-8',
         'transition-opacity duration-200 hover:opacity-100!',
-        alwaysShowArrows ? 'opacity-70' : 'opacity-0 group-hover/title:opacity-70',
+        arrowsAlwaysVisible ? 'opacity-70' : 'opacity-0 group-hover/title:opacity-70',
         isDaylight ? 'hover:bg-black/10' : 'hover:bg-white/15',
     ].join(' ');
     const textClass = 'w-full truncate text-center text-sm font-bold';

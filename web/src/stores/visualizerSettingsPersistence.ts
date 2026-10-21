@@ -11,6 +11,7 @@ import {
 } from '../types/visualizerModes';
 import { resolveDioramaMoteCircumference, resolveDioramaMoteRadial } from '../components/visualizer/diorama/dioramaMoteField';
 import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
+import { isAndroidShell } from '../utils/platform';
 import { sanitizeUrlBackgroundList } from '../utils/urlBackground';
 import { normalizeLumiereTuning } from '../utils/lumiereTuning';
 
@@ -43,9 +44,20 @@ export const readStoredVisualizerOpacity = () => {
     return Number.isFinite(parsed) ? Math.min(1, Math.max(0.2, parsed)) : 1;
 };
 
+/**
+ * 手机壳里播放页的默认外观：`still`。
+ *
+ * 这个内建可视化器本来就不挂背景渲染器（见 components/visualizer/still/VisualizerStill.tsx 的文件头），
+ * 屏幕上只剩静态歌词 —— 也就是这台机器要的「极简歌词页」。墙面的纸感拼贴走的是另一套（bravais），不受影响。
+ * 桌面版仍是 DEFAULT_VISUALIZER_MODE；用户在设置里选过别的模式就按用户的选择。
+ */
+const resolveDefaultVisualizerMode = (): VisualizerMode => (
+    isAndroidShell() ? 'still' : DEFAULT_VISUALIZER_MODE
+);
+
 export const readStoredVisualizerMode = (): VisualizerMode => {
     if (typeof window === 'undefined') {
-        return DEFAULT_VISUALIZER_MODE;
+        return resolveDefaultVisualizerMode();
     }
 
     const saved = localStorage.getItem('visualizer_mode');
@@ -53,7 +65,7 @@ export const readStoredVisualizerMode = (): VisualizerMode => {
         return 'cadenza';
     }
 
-    return isBuiltinVisualizerMode(saved) ? saved : DEFAULT_VISUALIZER_MODE;
+    return isBuiltinVisualizerMode(saved) ? saved : resolveDefaultVisualizerMode();
 };
 
 export const readStoredVisualizerFrameRate = (): VisualizerFrameRate => {

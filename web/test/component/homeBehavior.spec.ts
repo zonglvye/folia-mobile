@@ -1011,13 +1011,21 @@ test.describe(`[${suite}] hidden items`, () => {
 });
 
 test.describe(`[${suite}] imports`, () => {
-    test('folder import calls the import service and refreshes the library', async ({ mount, page }) => {
+    // 导入入口的 id 随环境变：有目录选择器（Electron）时模型发 import-folder，浏览器与 Android WebView 没有目录
+    // 选择器，发的是 import-files（core/model/localHomeModel 的 resolveLocalHomeActions 按 canImportFiles 选）。
+    // 两条路径都该真的走导入并刷新曲库——探针把两者的服务函数都换成了同一个替身。
+    test('the local import entry calls the import service and refreshes the library', async ({ mount, page }) => {
         await mountHome(mount, page, suite);
         await showList(page, 'local');
         await clearLog(page);
 
-        expect(await page.evaluate(() => window.__homeProbe!.runAction('import-folder'))).toBe(true);
-        await expect.poll(() => serviceCalls(page)).toEqual([{ name: 'importFolder', args: [] }]);
+        const importAction = await page.evaluate(() => window.__homeProbe!.actions()
+            .find(action => action.id === 'import-folder' || action.id === 'import-files')?.id ?? null);
+        expect(importAction).not.toBeNull();
+        expect(await page.evaluate(id => window.__homeProbe!.runAction(id), importAction!)).toBe(true);
+        await expect.poll(() => serviceCalls(page)).toEqual([
+            { name: importAction === 'import-files' ? 'importLocalFilesViaInput' : 'importFolder', args: [] },
+        ]);
         await expect.poll(() => calls(page, 'refreshLocalSongs')).toHaveLength(1);
         await expect.poll(() => itemIds(page)).toContain(homeFolderId('Imported'));
     });

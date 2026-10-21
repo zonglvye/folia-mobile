@@ -429,6 +429,9 @@ export type LoginSelfCheckResult = {
 export interface OnlineAuthProvider {
     getLoginStatus(): Promise<ProviderUser | null>;
     logout(): Promise<void>;
+    // 手机号验证码登录（酷狗在没有后端实例时走这条路）；不实现的 provider 不显示手机号入口。
+    sendLoginCode?(mobile: string): Promise<void>;
+    loginWithCode?(mobile: string, code: string): Promise<ProviderUser>;
     getQrLoginMethods?(): QrLoginMethod[];
     // 需要远端能力发现的 provider 在这里等待结果；UI 用同一份返回值决定单步或多步流程。
     resolveQrLoginMethods?(): Promise<QrLoginMethod[]>;
