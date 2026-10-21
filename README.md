@@ -308,6 +308,12 @@ patches/0029-perf-bravais-mount-the-ring-a-pan-brings-in-over-sev.patch
 
 音频始终由 WebView 内的 Chromium 媒体栈播放。原生侧若再申请音频焦点会把它顶掉，页面收到 `AUDIOFOCUS_LOSS` 后立即自动暂停——表现为"一按播放就停"。壳的职责只有三件：把进程提到前台优先级、提供通知栏与锁屏传输控制、把系统事件（耳机拔出、语音搜索）翻译成给页面的命令。
 
+## 相关项目
+
+同一个作者、同样是「不需要服务器」的另一个手机小应用，不在本仓库里，单独维护：
+
+- **[zonglvye/class-schedule](https://github.com/zonglvye/class-schedule)** · [直接使用](https://zonglvye.github.io/class-schedule/) —— 课表 + 作业待办 + 定时提醒。纯前端 PWA，数据只存在本机浏览器里；另有一个 Android 壳，把提醒交给系统闹钟，页面关掉也能准点响。它和 Folia 移植没有代码依赖，只是同一个做法：把 Web 产物装进壳里，离线是结构性的。
+
 ## 许可
 
 **AGPL-3.0**，与上游一致。`web/` 是上游 `chthollyphile/folia-major` v0.7.20 的完整源码（AGPL-3.0），壳代码以同一许可发布。详见 `NOTICE`。
