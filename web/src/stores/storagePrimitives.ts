@@ -26,3 +26,10 @@ export const getStoredString = (key: string, fallback: string) => {
 
     return localStorage.getItem(key) || fallback;
 };
+
+/** 写一段字符串（随机歌词动画的池子存成 JSON 就用到它）。 */
+export const setStoredString = (key: string, value: string) => {
+    if (typeof window !== 'undefined') {
+        localStorage.setItem(key, value);
+    }
+};

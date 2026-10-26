@@ -11,10 +11,10 @@
 
 ## 下载
 
-**Android APK（0.6.13）** → **[folia-mobile-0.6.13.apk](https://github.com/zonglvye/folia-mobile/releases/download/v0.6.13/folia-mobile-0.6.13.apk)**
-11.2 MB · Android 8.0+（`minSdk 26`）· `versionCode 29` · 证书 `CN=Folia Mobile`
+**Android APK（0.6.14）** → **[folia-mobile-0.6.14.apk](https://github.com/zonglvye/folia-mobile/releases/download/v0.6.14/folia-mobile-0.6.14.apk)**
+11.3 MB · Android 8.0+（`minSdk 26`）· `versionCode 30` · 证书 `CN=Folia Mobile`
 
-SHA-256 `963A31049B127F393F0E5F3F64C10154B7A4794314531419D83B855AB3481C84`（下完可以自己核一遍）。这一版加了什么、还缺什么，写在 [Release 说明](https://github.com/zonglvye/folia-mobile/releases/tag/v0.6.13)里。
+SHA-256 `e216223faf92c9753facca656113b7ca95e6bd8d3ea8d5108225e6a8af64d1f1`（下完可以自己核一遍）。这一版加了什么、还缺什么，写在 [Release 说明](https://github.com/zonglvye/folia-mobile/releases/tag/v0.6.14)里。
 
 **鸿蒙 HAP**：**没有提供**。DevEco 的自动签名是调试证书，绑账号与设备列表，别人装了起不来；要装请按下面「构建 → 3. HAP」自己出包，并在 DevEco 里配自己的签名。
 
@@ -31,6 +31,11 @@ SHA-256 `963A31049B127F393F0E5F3F64C10154B7A4794314531419D83B855AB3481C84`（下
 > - **v0.6.4 的三项改动尚未在真机上验证**：列表面板的宽度与矮视口排法、窄视口上集合层不再收成书脊、以及上面那条黑屏修复。前两项是在开发探针的 816×377 视口上量出来并用组件用例钉住的（面板 520 宽、行高 30px、列表 5 行），不是真机读数。
 > - **v0.6.4 的黑屏修复至今没有再复现**：vc20、vc21 上都没有新的 `blank` 记录（HUD 里那条是持久保存的旧事故，带时间戳）。
 > - **v0.6.5 的两项改动已在真机上确认**。**蓝牙耳机**连上后点播放能出声了——根因是 `AudioContext.resume()` 在这条路由上永不决议，而 `PLAYING` 只写在它和 `play()` 之后，于是 `play()` 从未被调用、进度条不动；现在 `resume()` 有 1.2s 期限，超时照常往下走。**墙面滑动**从 `longtasks 23 · max 210 ms`、`jank 10.6 %`、`p50 22.4 ms` 降到 `1 · 94 ms`、`0.5 %`、`11.1 ms`：重算裁剪新增的那一圈磁贴改成每帧挂 10 张，摊到几帧里（那一圈本来就在视野外，看不见）。剩下那一条 94ms 仍是 `wall cull`，是刚进墙或大幅跳转时的一次重算，不是滑动。
+> - **v0.6.14 的四个 web 改动在鸿蒙真机上验过，新加的安卓壳代码一次都没在安卓真机上跑过。**花火、面板页签、随机样式范围、时长显示
+>   都在 HAP 上截图确认（池子 15 项全部选中；取消花火后当前样式自动从 花火 换成 浮名、随机仍然开着；点下一首 浮名 → 云阶；时长显示 `04:21` 而不是 `Infinity:NaN`）。
+>   但这一版给安卓壳新加的 `MediaCache` / `/api/media-proxy` 是纯 Java 新代码，**本机没有安卓设备也没有 adb**，所以只到「能编译、签名一致、产物核对」。
+>   如果装上后在线播放反而没声音，最可能就是这条链路；回退是把 `needsShellAudioRelay` 的判据改回只认鸿蒙再打一个**更高**的 versionCode
+>   （**不要**直接装回 0.6.13：versionCode 更低会被系统拒绝覆盖，卸载重装会连曲库与登录一起清掉）。
 > - v0.3.0 以来**封面仍未接通**：设备音乐库里的歌显示占位图。
 > - **本仓库没有可用的 adb 通道**：目标机型跑 HarmonyOS，它的 USB 调试功能是 HDC（厂商接口 `ff/50`），不是 adb 认的 `ff/42`，无线调试也没有配对入口。`dumpsys gfxinfo` 在这台设备上取不到，性能数据只能靠 v0.4.0 新增的应用内帧率 HUD 读。
 > - **两个壳是两份独立实现**（Java 对 ArkTS），在同一台真机（HarmonyOS 7.0.0.109，型号 SCA-AL00）上分别取证：鸿蒙侧的酷狗手机号登录、我的歌单、我喜欢、歌词与播放都已走通。本文其余「真机确认」条目默认指安卓壳。
@@ -61,6 +66,11 @@ SHA-256 `963A31049B127F393F0E5F3F64C10154B7A4794314531419D83B855AB3481C84`（下
 - **不再被旧缓存打黑（v0.6.4）**：壳里退役 Service Worker，并加了全局错误边界与事故记录器——动态 import 失败自动重载一次，其它错误给一张可读的兜底页；`gl` / `err` / `blank` 三行从此真的会写。
 - **蓝牙耳机能播了（v0.6.5）**：安卓 WebView 在蓝牙路由上 `AudioContext.resume()` 可能永不决议，而播放状态只写在它和 `play()` 之后，于是按下播放什么都不发生、进度条不动。现在两个等待点都有期限：`resume()` 超时照常往下走，`play()` 超时也继续等它（真起来了照样把界面补正）。HUD 新增 `audio` 行，直接写明最后是哪一步、什么结局。
 - **滑动不再一顿一顿（v0.6.5）**：墙面平移时每次重算裁剪会一次挂上二三十张新磁贴，手机上那就是一条 90–210ms 的主线程长任务。现在这一圈按每帧 10 张分帧挂完——它本来就在视野外，晚一两帧看不见。真机读数：`longtasks` 23 → 1、`jank` 10.6 % → 0.5 %、`p50` 22.4 → 11.1 ms。顺带给这次重算开了 `wall cull` 的记账，HUD 的 `block` 行不再显示「无归属」。
+- **花火（v0.6.14）**：上游 v0.7.22 的歌词样式，43 个文件 608 KB 原样搬来（`components/visualizer/hanabi/`），连同它依赖的 pixi 运行时（WebGL2 + bloom）。它自带一套渲染管线，字号按画面尺寸与歌词量自己排，所以「通用字体尺寸」在这个样式下只影响底部字幕。**设置面板还没搬**，跑的是默认参数。
+- **面板页签贴到下边缘（v0.6.14）**：照上游 v0.7.22 的样子，页签从卡片顶部挪到下边缘、选中项是一块会滑的底色；装得下就只显示名字不显示图标，装不下时非当前项才带图标。
+- **随机样式范围（v0.6.14）**：控制页可以勾选「参与每首随机的样式」（15 个内置样式，含花火），抽签绝不抽当前这个；抽签切样式不会把自己关掉；一首歌只抽一次。池子暂不参与配置同步与导入导出。
+- **切歌不再等整首下完（v0.6.14）**：在线音频以前要等整首 8–10 MB 下完才出声（约 4 秒）。现在壳一边下、页面一边通过 MediaSource 播，64 KB 就能起播；不是 mp3 的（比如无损 flac）自动退回整首 blob。安卓壳这次补上了鸿蒙壳早就有的 `MediaCache` + `/api/media-proxy` + 四个桥方法。
+- **时长不再是 `Infinity:NaN`（v0.6.14）**：MediaSource 起播时 `loadedmetadata` 报的 duration 是无穷大，现在非有限值不显示，等 `durationchange` / `ended` 补上真实时长。
 
 **未完成**
 
@@ -177,7 +187,7 @@ v0.3.1 起，「设置 → 集成 → 网易云 API 地址」可以直接填，*
 | `shell/AssetServer.ets` | 静态资源服务：虚拟源、正确的 MIME、缺省回 `index.html` |
 | `shell/HttpProxy.ets` | `/api/lyric-proxy` 与 `/api/netease-proxy`：域名白名单、请求头白名单、GET/POST、音频 `Range` 透传 |
 | `shell/WebNeteaseBridge.ets` | 网易中转页：同源 fetch，登录态因此保得住 |
-| `shell/MediaCache.ets` | 在线音频先整首取进内存，页面按 1MiB 分块取回 |
+| `shell/MediaCache.ets` | 在线音频取进内存，页面按 256 KiB 分段经 MediaSource 边下边放（安卓壳同构：`MediaCache.java` + `/api/media-proxy`） |
 | `shell/PlaybackSession.ets` | AVSession：锁屏与通知栏控制 |
 | `shell/NetworkMonitor.ets` | 断网时快速失败，不干等超时 |
 

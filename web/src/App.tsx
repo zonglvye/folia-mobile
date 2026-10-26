@@ -466,6 +466,7 @@ export default function App() {
     const {
         visualizerMode,
         randomVisualizerModePerSong,
+        randomVisualizerModes,
         handleSetVisualizerMode,
     } = useVisualizerSettingsStore(useShallow(selectVisualizerSettingsSnapshot));
 
@@ -500,6 +501,7 @@ export default function App() {
         currentSong,
         enabled: randomVisualizerModePerSong,
         visualizerMode,
+        modes: randomVisualizerModes,
         setVisualizerMode: handleSetVisualizerMode,
     });
 
@@ -1363,6 +1365,30 @@ export default function App() {
             setDuration(element.duration);
         }
     }, [audioSrc, audioRef, setDuration]);
+
+    /*
+     * 长度为 Infinity 的源：壳里的 MediaSource 就是这种。
+     *
+     * MP3 边下边播时，`loadedmetadata` 在收到第一块数据时就到，那会儿 `duration` 还是 Infinity，
+     * 于是上面那段「有限才写」的守卫只是跳过，`duration` 一直停在 0（或 Infinity），
+     * 进度条右边就成了 "Infinity:NaN"，进度也拖不动。整首收完、`endOfStream()` 之后浏览器把
+     * 真实长度算出来并补发一次 `durationchange` —— 这里接住它。
+     */
+    useEffect(() => {
+        const element = audioRef.current;
+        if (!element) return undefined;
+        const publishFiniteDuration = () => {
+            if (Number.isFinite(element.duration) && element.duration > 0) {
+                setDuration(element.duration);
+            }
+        };
+        element.addEventListener('durationchange', publishFiniteDuration);
+        element.addEventListener('ended', publishFiniteDuration);
+        return () => {
+            element.removeEventListener('durationchange', publishFiniteDuration);
+            element.removeEventListener('ended', publishFiniteDuration);
+        };
+    }, [audioRef, setDuration]);
 
     const { setupAudioAnalyzer, cacheSongAssets, cacheSongAssetsFor, adoptActiveDeckSource } = usePlaybackAudioBridge({
         audioRef,

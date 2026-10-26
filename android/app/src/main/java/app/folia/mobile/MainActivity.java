@@ -263,6 +263,13 @@ public class MainActivity extends Activity {
         if (deviceAudioResponse != null) {
             return deviceAudioResponse;
         }
+        // Online audio the shell is holding in memory for the page. Same reason as above for being
+        // ahead of the asset loader, plus one of its own: a miss here must be a JSON 404 the page can
+        // recognise, not an HTML document that makes the fetch look successful.
+        WebResourceResponse mediaResponse = MediaProxyHandler.handle(request);
+        if (mediaResponse != null) {
+            return mediaResponse;
+        }
         return assetLoader == null ? null : assetLoader.shouldInterceptRequest(url);
     }
 
@@ -614,6 +621,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         PlaybackService.setCommandSink(null);
+        // Whatever the page was streaming dies with the WebView; holding the bytes would keep up to
+        // three tracks of memory alive for a page that no longer exists.
+        MediaCache.clearAll();
         if (webView != null) {
             rootLayout.removeView(webView);
             webView.destroy();

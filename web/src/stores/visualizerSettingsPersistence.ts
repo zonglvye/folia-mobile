@@ -14,8 +14,25 @@ import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../
 import { isAndroidShell } from '../utils/platform';
 import { sanitizeUrlBackgroundList } from '../utils/urlBackground';
 import { normalizeLumiereTuning } from '../utils/lumiereTuning';
+import { normalizeRandomVisualizerModes } from '../utils/randomVisualizerModes';
 
 export const VISUALIZER_OPACITY_STORAGE_KEY = 'visualizer_opacity';
+
+// 「每首歌随机歌词动画」的抽签池。存成一个样式 id 的 JSON 数组；
+// 读的时候一律过 normalizeRandomVisualizerModes：存档坏了、格式变了、池子空了都退回全部内置样式。
+export const RANDOM_VISUALIZER_MODES_STORAGE_KEY = 'random_visualizer_modes';
+
+export const readStoredRandomVisualizerModes = () => {
+    if (typeof window === 'undefined') {
+        return normalizeRandomVisualizerModes(null);
+    }
+    try {
+        const raw = localStorage.getItem(RANDOM_VISUALIZER_MODES_STORAGE_KEY);
+        return normalizeRandomVisualizerModes(raw === null ? null : JSON.parse(raw));
+    } catch {
+        return normalizeRandomVisualizerModes(null);
+    }
+};
 
 // src/stores/visualizerSettingsPersistence.ts
 // localStorage read/clamp/resolve helpers for every visualizer and background setting.

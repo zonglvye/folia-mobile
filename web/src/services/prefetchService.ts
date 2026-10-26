@@ -24,6 +24,7 @@ import { useAutomixSettingsStore } from '../stores/useAutomixSettingsStore';
 import { useAudioSettingsStore } from '../stores/useAudioSettingsStore';
 import { classifyPlaybackError } from './playbackRecovery/onlinePlaybackFailure';
 import { getProviderPlaybackCooldown, noteProviderFailure } from './playbackRecovery/providerPlaybackCooldown';
+import { prefetchShellAudio } from './shellOnlineAudio';
 
 // Prefetch configuration
 //
@@ -243,6 +244,9 @@ const prefetchSong = async (
         console.log(`[Prefetch] Already cached: ${song.name}`);
         touchPrefetchCacheEntry(songKey, existing);
         analyseForAutomix(song, existing.audioUrl);
+        // URL 还在缓存里就早退了，但壳的内存里未必有这首（它只留三条）。补一次预取，
+        // 否则“URL 命中缓存”的曲目切过去仍要等整首下载。
+        prefetchShellAudio(existing.audioUrl);
         return;
     }
 
@@ -268,6 +272,8 @@ const prefetchSong = async (
             data.audioUrl = resolved.audioUrl;
             data.audioUrlFetchedAt = Date.now();
             if (resolved.audioUrl !== 'CACHED_IN_DB') {
+                // 壳里整首下载是切歌延迟的大头：URL 一解析出来就让壳提前取，别等按下播放才开始。
+                prefetchShellAudio(resolved.audioUrl);
                 data.audioUrlQuality = audioQuality;
                 data.replayGain = resolved.replayGain
                     ? { ...data.replayGain, ...resolved.replayGain }
@@ -512,23 +518,19 @@ export const prefetchNearbySongs = async (
         if (signal.aborted || index >= songs.length) return;
 
         const song = songs[index];
+        const run = async () => {
+            if (signal.aborted) return;
+            await prefetchSong(song, audioQuality, signal, userId);
+            prefetchWithIdle(songs, index + 1);
+        };
 
+        // 立刻开始会与正在播放的那首抢带宽：实测快速连切时反而从 ~0.6s 掉到 5–10s，
+        // 所以仍交给空闲回调，只是把超时收短，空下来就尽早开始。
         if ('requestIdleCallback' in window) {
-            requestIdleCallback(
-                async () => {
-                    if (signal.aborted) return;
-                    await prefetchSong(song, audioQuality, signal, userId);
-                    prefetchWithIdle(songs, index + 1);
-                },
-                { timeout: 5000 }
-            );
+            requestIdleCallback(run, { timeout: 1200 });
         } else {
             // Fallback for browsers without requestIdleCallback
-            setTimeout(async () => {
-                if (signal.aborted) return;
-                await prefetchSong(song, audioQuality, signal, userId);
-                prefetchWithIdle(songs, index + 1);
-            }, 100);
+            setTimeout(run, 100);
         }
     };
 

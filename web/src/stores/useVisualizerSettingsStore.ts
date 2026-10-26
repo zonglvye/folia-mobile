@@ -18,10 +18,19 @@ import { buildStoredMonetBackgroundImage, clearMonetBackgroundImage, isSupported
 import { buildStoredMonetPortraitImage, clearMonetPortraitImage, isSupportedMonetPortraitFile, saveMonetPortraitImage } from '../services/monetPortraitImage';
 import { setStatusMessage } from './useStatusMessageStore';
 import { LUMIERE_TUNING_STORAGE_KEY, VISUALIZER_OPACITY_STORAGE_KEY, clampCladdaghEllipseTiltDeg, clampCladdaghFocusScaleRatio, clampCladdaghLetterSpacingOffset, clampCladdaghRadiusScale, clampClassicBreathingFloatMultiplier, clampClassicWordSpacing, clampFumeBackgroundObjectOpacity, clampFumeCameraSpeed, clampFumeGlowIntensity, clampFumeHeroScale, clampFumeTextHoldRatio, clampPartitaStagger, clampUnit, readStoredBackgroundOpacity, readStoredCadenzaTuning, readStoredCappellaTuning, readStoredCladdaghTuning, readStoredClassicTuning, readStoredDioramaTuning, readStoredFumeTuning, readStoredLatentBackgroundTuning, readStoredLumiereTuning, readStoredMonetBackgroundTuning, readStoredMonetTuning, readStoredNomandBackgroundTuning, readStoredPartitaTuning, readStoredPendoloTuning, readStoredSonnetTuning, readStoredSoraBackgroundTuning, readStoredTemperaTuning, readStoredTiltTuning, readStoredUrlBackgroundList, readStoredUrlBackgroundSelectedId, readStoredVisualizerBackgroundMode, readStoredVisualizerFrameRate, readStoredVisualizerMode, readStoredVisualizerOpacity, resolveCappellaAvatarSource, resolveFumeCameraTrackingMode, resolvePendoloNumber, resolveStoredDioramaTuning, resolveStoredLatentBackgroundTuning, resolveStoredMonetBackgroundTuning, resolveStoredMonetTuning, resolveStoredNomandBackgroundTuning, resolveStoredSoraBackgroundTuning, sanitizeTemperaLayerImages } from './visualizerSettingsPersistence';
-import { getStoredBoolean, setStoredBoolean } from './storagePrimitives';
+import { getStoredBoolean, setStoredBoolean, setStoredString } from './storagePrimitives';
 import { isAndroidShell } from '../utils/platform';
 import { useVisualizerAssetStore } from './useVisualizerAssetStore';
 import { normalizeLumiereTuning } from '../utils/lumiereTuning';
+import { RANDOM_VISUALIZER_MODES_STORAGE_KEY, readStoredRandomVisualizerModes } from './visualizerSettingsPersistence';
+import { normalizeRandomVisualizerModes, type RandomVisualizerMode } from '../utils/randomVisualizerModes';
+
+/**
+ * 切样式时可以带的两件事：
+ * - `notify`：是否弹「已切换」提示（随机抽签时不弹）。
+ * - `preserveRandom`：保住「每首歌随机」开关（随机抽签自己切样式时必须带，否则一次抽签就把随机关掉了）。
+ */
+export type SetVisualizerModeOptions = { notify?: boolean; preserveRandom?: boolean };
 
 export type VisualizerSettingsState = {
     disableVisualizerVignette: boolean;
@@ -34,6 +43,8 @@ export type VisualizerSettingsState = {
     visualizerFrameRate: VisualizerFrameRate;
     visualizerMode: VisualizerMode;
     randomVisualizerModePerSong: boolean;
+    /** 「每首歌随机」的抽签池：只有这里面的样式会被抽到。 */
+    randomVisualizerModes: RandomVisualizerMode[];
     /** Snap animated glow blur radii to a bounded set. See components/visualizer/wordGlow.ts. */
     glowBlurQuantize: boolean;
     classicTuning: ClassicTuning;
@@ -65,8 +76,9 @@ export type VisualizerSettingsState = {
     handleSetUrlBackgroundSelectedId: (id: string | null) => void;
     handleSetUrlBackgroundList: (items: UrlBackgroundItem[]) => void;
     handleSetVisualizerFrameRate: (frameRate: VisualizerFrameRate) => void;
-    handleSetVisualizerMode: (mode: VisualizerMode, options?: { notify?: boolean }) => void;
-    handleToggleRandomVisualizerModePerSong: (enable: boolean) => void;
+    handleSetVisualizerMode: (mode: VisualizerMode, options?: SetVisualizerModeOptions) => void;
+    handleToggleRandomVisualizerModePerSong: (enable: boolean, options?: { notify?: boolean }) => void;
+    handleSetRandomVisualizerModes: (modes: readonly VisualizerMode[]) => void;
     handleToggleGlowBlurQuantize: (enable: boolean) => void;
     handleSetClassicTuning: (patch: Partial<ClassicTuning>) => void;
     handleResetClassicTuning: () => void;
@@ -126,6 +138,7 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set, 
     visualizerFrameRate: readStoredVisualizerFrameRate(),
     visualizerMode: readStoredVisualizerMode(),
     randomVisualizerModePerSong: getStoredBoolean('random_visualizer_mode_per_song', false),
+    randomVisualizerModes: readStoredRandomVisualizerModes(),
     glowBlurQuantize: readStoredGlowBlurQuantize(),
     classicTuning: readStoredClassicTuning(),
     cadenzaTuning: readStoredCadenzaTuning(),
@@ -258,7 +271,13 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set, 
         if (typeof window !== 'undefined') {
             localStorage.setItem('visualizer_mode', mode);
         }
-        set({ visualizerMode: mode });
+        // 手动挑了一种样式，就等于放弃了「每首歌随机」——除非这次切换本身就是随机抽签发起的。
+        if (!options?.preserveRandom && get().randomVisualizerModePerSong) {
+            setStoredBoolean('random_visualizer_mode_per_song', false);
+            set({ visualizerMode: mode, randomVisualizerModePerSong: false });
+        } else {
+            set({ visualizerMode: mode });
+        }
         if (options?.notify !== false) {
             setStatusMessage({
                 type: 'info',
@@ -268,13 +287,21 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set, 
             });
         }
     },
-    handleToggleRandomVisualizerModePerSong: (enable) => {
+    handleToggleRandomVisualizerModePerSong: (enable, options) => {
         setStoredBoolean('random_visualizer_mode_per_song', enable);
         set({ randomVisualizerModePerSong: enable });
-        setStatusMessage({
-            type: 'info',
-            text: i18n.t(`status.randomVisualizerModePerSong${enable ? 'On' : 'Off'}`),
-        });
+        if (options?.notify !== false) {
+            setStatusMessage({
+                type: 'info',
+                text: i18n.t(`status.randomVisualizerModePerSong${enable ? 'On' : 'Off'}`),
+            });
+        }
+    },
+    handleSetRandomVisualizerModes: (modes) => {
+        // 一律过一遍归一化：去重、剔掉模组样式、按内置顺序排，池空了退回全部内置样式。
+        const next = normalizeRandomVisualizerModes(modes);
+        setStoredString(RANDOM_VISUALIZER_MODES_STORAGE_KEY, JSON.stringify(next));
+        set({ randomVisualizerModes: next });
     },
     handleToggleGlowBlurQuantize: (enable) => {
         if (typeof window !== 'undefined') {
@@ -898,6 +925,7 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
     handleToggleDisableVisualizerGeometricBackground: state.handleToggleDisableVisualizerGeometricBackground,
     handleToggleDisableVisualizerVignette: state.handleToggleDisableVisualizerVignette,
     handleToggleRandomVisualizerModePerSong: state.handleToggleRandomVisualizerModePerSong,
+    handleSetRandomVisualizerModes: state.handleSetRandomVisualizerModes,
     handleUpdateUrlBackgroundItem: state.handleUpdateUrlBackgroundItem,
     handleUploadMonetBackgroundImage: state.handleUploadMonetBackgroundImage,
     handleUploadMonetPortraitImage: state.handleUploadMonetPortraitImage,
@@ -909,6 +937,7 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
     partitaTuning: state.partitaTuning,
     pendoloTuning: state.pendoloTuning,
     randomVisualizerModePerSong: state.randomVisualizerModePerSong,
+    randomVisualizerModes: state.randomVisualizerModes,
     sonnetTuning: state.sonnetTuning,
     soraBackgroundTuning: state.soraBackgroundTuning,
     temperaTuning: state.temperaTuning,
@@ -922,6 +951,6 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
 });
 
 // Module-level handle for the assembly layer; an action needs no subscription.
-export const handleSetVisualizerMode = (mode: VisualizerMode, options?: { notify?: boolean }) => (
+export const handleSetVisualizerMode = (mode: VisualizerMode, options?: SetVisualizerModeOptions) => (
     useVisualizerSettingsStore.getState().handleSetVisualizerMode(mode, options)
 );

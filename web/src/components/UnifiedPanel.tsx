@@ -7,6 +7,7 @@ import { Album, Artist, SongResult, Theme, PlayerState, ReplayGainMode, ThemeMod
 import type { ProviderUser } from '../types/onlineMusic';
 import type { LibraryAccountController } from '../library/core/contracts/account';
 import CoverTab from './panelTab/CoverTab';
+import PanelTabDock from './panelTab/shell/PanelTabDock';
 import ControlsTab from './panelTab/ControlsTab';
 import QueueTab from './panelTab/QueueTab';
 import AccountTab from './panelTab/AccountTab';
@@ -313,8 +314,6 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
     const trackFillRef = React.useRef<HTMLDivElement | null>(null);
     const glassBg = isDaylight ? 'bg-white/60' : 'bg-black/40';
     const placeholderBg = isDaylight ? 'bg-stone-200' : 'bg-zinc-900';
-    const activeTabBg = isDaylight ? 'bg-black/10' : 'bg-white/10';
-    const tabSwitcherBg = isDaylight ? 'bg-black/5' : 'bg-white/5';
     const canSlideOpenCommandPalette = !isOpen && Boolean(onOpenCommandPalette);
     const isGuideLineVisible = canSlideOpenCommandPalette && (showGuideLine || isPanelGuideHotspotActive);
     const toggleButtonMotionClass = (isOpen || isGuideLineVisible || isDragging)
@@ -638,9 +637,11 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.9 }}
                             data-testid="unified-panel-surface"
-                            className={`pointer-events-auto w-80 ${glassBg} backdrop-blur-3xl rounded-3xl shadow-2xl flex flex-col mb-16 md:mb-2 overflow-y-auto hide-scrollbar`}
+                            className={`pointer-events-auto w-80 ${glassBg} backdrop-blur-3xl rounded-3xl shadow-2xl flex flex-col mb-20 md:mb-2 overflow-hidden`}
                             style={{ color: theme.primaryColor, maxHeight: panelMaxHeight }}
                         >
+                            {/* 面板本身不再滚：页签沉在底边（PanelTabDock），只有中间这块内容滚。 */}
+                            <div className="flex-1 min-h-0 overflow-y-auto hide-scrollbar">
                             <div className="p-5 flex flex-col">
                                 {/* Top: Cover Art */}
                                 {/* 四个角上的按钮平时完全看不见，所以整块封面是思索的落点：
@@ -760,25 +761,6 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
                                             </button>
                                         </div>
                                     )}
-                                </div>
-
-                                {/* Tab Switcher */}
-                                <div className={`flex ${tabSwitcherBg} p-1 rounded-xl mb-4`}>
-                                    {tabs.map((tab) => (
-                                        <button
-                                            key={tab.id}
-                                            onClick={() => onTabChange(tab.id)}
-                                            aria-pressed={currentTab === tab.id}
-                                            // 每一格各自是一个思索目标：停在哪一格，讲的就是那一页。
-                                            data-ponder-panel-tab-button={tab.id}
-                                            className={`flex-1 py-2 flex items-center justify-center transition-all rounded-lg
-                                                ${currentTab === tab.id ? `${activeTabBg} shadow-sm` : 'opacity-40 hover:opacity-100'}`}
-                                            title={tab.label}
-                                            style={{ color: 'var(--text-primary)' }}
-                                        >
-                                            <tab.icon size={16} />
-                                        </button>
-                                    ))}
                                 </div>
 
                                 {/* Tab Content */}
@@ -955,6 +937,13 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
                                     )}
                                 </div>
                             </div>
+                            </div>
+                            <PanelTabDock
+                                tabs={tabs}
+                                currentTab={currentTab}
+                                onTabChange={onTabChange}
+                                isDaylight={isDaylight}
+                            />
                         </motion.div>
                     )}
                 </AnimatePresence>

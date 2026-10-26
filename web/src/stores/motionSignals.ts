@@ -58,3 +58,13 @@ export const playerBottomBarLiveOffset = motionValue(PLAYER_BOTTOM_BAR_BASE_OFFS
  */
 export const ponderPointerX = motionValue(0);
 export const ponderPointerY = motionValue(0);
+
+/*
+ * 智能动感的包络信号（随花火样式从上游 0.7.22 带进来）。
+ *
+ * 上游由 services/beatFx/ 的实时钟在每一拍推进这两条；我们底子上没有节拍分析服务，
+ * 所以它们恒为 0 —— 读它的样式（花火的随拍开花 / 随拍推镜）就自然不生效，
+ * 画面与「关掉智能动感」一致。将来补上分析服务，只要有人在拍点写入，读取端不用改。
+ */
+export const beatImpact = motionValue(0);
+export const downbeatImpact = motionValue(0);

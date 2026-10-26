@@ -15,9 +15,9 @@
 //   2. 回退：按 1 MiB 分块经 `/api/lyric-proxy` 取回、拼成 Blob。慢（一次 1.4MB base64 字符串×N），
 //      只在壳不支持新桥方法时才会走到。
 //
-// 只在鸿蒙壳里生效：浏览器部署形态不需要它（那台机器上的音频地址本来就带 CORS）。
+// 只在打包壳里生效：浏览器部署形态不需要它（那台机器上的音频地址本来就带 CORS）。
+// 两个壳（鸿蒙 / 安卓）实现的是同一组桥方法，页面这边只有一份实现。
 
-import { isShellNowPlayingSupported } from './shellNowPlaying';
 import { retireBlobUrl } from './playbackBlobUrls';
 
 /** 同源代理路径：与壳里 HttpProxy 的路线一致（回退通道用）。 */
@@ -40,41 +40,200 @@ const BLOB_URL_CACHE_LIMIT = 2;
 type ShellMediaBridge = {
     mediaPrepare?: (url: string) => number;
     mediaStatus?: (token: number) => string;
+    mediaProgress?: (token: number) => number;
 };
 
 const shellBridge = (): ShellMediaBridge | undefined => (
     typeof window === 'undefined' ? undefined : (window as { foliaAndroid?: ShellMediaBridge }).foliaAndroid
 );
 
+/** 这个壳有没有「把音频取进内存再同源交出」的能力（鸿蒙壳与安卓壳是同一组桥方法）。 */
+const hasShellMediaCache = (): boolean => {
+    const bridge = shellBridge();
+    return typeof bridge?.mediaPrepare === 'function' && typeof bridge?.mediaStatus === 'function';
+};
+
 /** 这个地址要不要经过壳：远程 http(s) 才需要，blob:/data: 本来就没有跨域问题。 */
 export const needsShellAudioRelay = (url: string | null | undefined): boolean => {
     if (!url) return false;
     if (!/^https?:/i.test(url)) return false;
-    return isShellNowPlayingSupported();
+    // 判据是「壳能不能中转」，不是「壳是不是鸿蒙」：锁屏那套（isShellNowPlayingSupported）只有
+    // 鸿蒙壳开通了，但两个壳的媒体缓存是一样的，而签名音频地址对谁都不发 CORS 头。
+    // 桌面与 PWA 形态没有 foliaAndroid，于是照旧把远程地址直接交给 <audio>。
+    return hasShellMediaCache();
 };
 
 const sleep = (ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); });
+
+/** 流式播放的块大小：一次取这么多字节丢给 MediaSource。 */
+const MSE_CHUNK_BYTES = 256 * 1024;
+/** 够不够开始放：第一块到齐就起播，不等整首。 */
+const MSE_START_BYTES = 64 * 1024;
+/** MediaSource 只支持 audio/mpeg（真机实测：mp4/flac/webm 都是 false）。 */
+const MSE_TYPE = 'audio/mpeg';
+
+/** 拿到 token（不等待下载完成）。 */
+const startToken = (url: string, bridge: ShellMediaBridge): number | null => {
+    const prepare = bridge.mediaPrepare;
+    if (!prepare) return null;
+
+    const existing = tokenByRemoteUrl.get(url);
+    if (existing !== undefined) return existing;
+
+    const created = prepare.call(bridge, url);
+    if (typeof created !== 'number' || created < 0) return null;
+    tokenByRemoteUrl.set(url, created);
+    if (tokenByRemoteUrl.size > 4) {
+        const oldest = tokenByRemoteUrl.keys().next();
+        if (!oldest.done) tokenByRemoteUrl.delete(oldest.value);
+    }
+    return created;
+};
+
+/** 取壳里 `[start, end]` 这一段。
+ *
+ * 不用 Range 头：真机上拦截器确实回了 206 + 262144 字节，页面这边 `fetch` 却拿到失败
+ * （ArkWeb 对拦截器 206 的处理不可靠）。改成查询参数，壳回一个干净的 200。 */
+const fetchShellRange = async (token: number, start: number, end: number): Promise<ArrayBuffer | null> => {
+    const response = await fetch(`${MEDIA_PATH}?token=${token}&from=${start}&to=${end}`, {
+        cache: 'no-store',
+    });
+    if (!response.ok) {
+        console.warn(`[ShellAudio] slice ${start}-${end} -> HTTP ${response.status}`);
+        return null;
+    }
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength === 0) {
+        console.warn(`[ShellAudio] slice ${start}-${end} -> empty body (HTTP ${response.status})`);
+        return null;
+    }
+    return buffer;
+};
+
+/** 是不是 mp3 码流（ID3 头或帧同步字）。不是就走 blob 老路。 */
+const looksLikeMp3 = (buffer: ArrayBuffer): boolean => {
+    if (buffer.byteLength < 3) return false;
+    const bytes = new Uint8Array(buffer, 0, 3);
+    if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true;
+    return bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
+};
+
+/**
+ * 流式播放：边下边放。
+ *
+ * 以前要等整首 8–10 MB 下完（约 4 秒）才能出声；现在壳一下载，页面就把已到达的部分按 Range
+ * 取进 MediaSource，64 KB 就能起播。第一块不是 mp3（比如无损首发的 flac）直接返回 null，
+ * 交给原来的 blob 路径——MSE 在 ArkWeb 上只认 audio/mpeg。
+ */
+const streamViaMse = async (
+    url: string,
+    bridge: ShellMediaBridge,
+): Promise<{ audioSrc: string; blobUrl?: string } | null> => {
+    if (typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported(MSE_TYPE)) return null;
+    const progress = bridge.mediaProgress;
+    const status = bridge.mediaStatus;
+    if (!progress || !status) return null;
+
+    const token = startToken(url, bridge);
+    if (token === null) return null;
+
+    const waitingSince = Date.now();
+    let available = 0;
+    while (Date.now() - waitingSince < 8000) {
+        available = progress.call(bridge, token);
+        const state = status.call(bridge, token);
+        if (state === 'failed' || state === 'missing') {
+            tokenByRemoteUrl.delete(url);
+            return null;
+        }
+        if (available >= MSE_START_BYTES || (state === 'ready' && available > 0)) break;
+        await sleep(40);
+    }
+    if (available === 0) return null;
+
+    const head = await fetchShellRange(token, 0, Math.min(available, MSE_CHUNK_BYTES) - 1);
+    if (!head) {
+        console.warn('[ShellAudio] mse: head fetch failed');
+        return null;
+    }
+    const magic = Array.from(new Uint8Array(head, 0, Math.min(4, head.byteLength)))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join(' ');
+    if (!looksLikeMp3(head)) {
+        console.warn(`[ShellAudio] mse: not mp3 (first bytes ${magic}), falling back`);
+        return null;
+    }
+    console.log(`[ShellAudio] mse: head ${head.byteLength} bytes, magic ${magic}`);
+
+    const mediaSource = new MediaSource();
+    const objectUrl = URL.createObjectURL(mediaSource);
+
+    // MediaSource 只有在被挂到 `<audio src>` 之后才会 open，而挂 src 的是调用方（播放器）。
+    // 所以这里先把地址交出去，起播准备放到后台等 open。
+    void (async () => {
+        try {
+            const openedAt = Date.now();
+            while (mediaSource.readyState !== 'open') {
+                if (Date.now() - openedAt > 8000) throw new Error('sourceopen timeout');
+                await sleep(20);
+            }
+            const sourceBuffer = mediaSource.addSourceBuffer(MSE_TYPE);
+            sourceBuffer.mode = 'sequence';
+
+            const append = (chunk: ArrayBuffer) => new Promise<void>((resolve, reject) => {
+                const onEnd = () => {
+                    sourceBuffer.removeEventListener('updateend', onEnd);
+                    sourceBuffer.removeEventListener('error', onError);
+                    resolve();
+                };
+                const onError = () => {
+                    sourceBuffer.removeEventListener('updateend', onEnd);
+                    sourceBuffer.removeEventListener('error', onError);
+                    reject(new Error('sourcebuffer error'));
+                };
+                sourceBuffer.addEventListener('updateend', onEnd);
+                sourceBuffer.addEventListener('error', onError);
+                sourceBuffer.appendBuffer(chunk);
+            });
+
+            await append(head);
+            let position = head.byteLength;
+
+            for (;;) {
+                const state = status.call(bridge, token);
+                const received = progress.call(bridge, token);
+                while (position < received) {
+                    const end = Math.min(received, position + MSE_CHUNK_BYTES);
+                    const chunk = await fetchShellRange(token, position, end - 1);
+                    if (!chunk) break;
+                    await append(chunk);
+                    position += chunk.byteLength;
+                }
+                if (state === 'ready' && position >= progress.call(bridge, token)) {
+                    if (mediaSource.readyState === 'open') mediaSource.endOfStream();
+                    return;
+                }
+                if (state === 'failed' || state === 'missing') return;
+                await sleep(120);
+            }
+        } catch (error) {
+            console.warn('[ShellAudio] streaming append failed', error);
+        }
+    })();
+
+    console.log('[ShellAudio] streaming via MediaSource');
+    return { audioSrc: objectUrl, blobUrl: objectUrl };
+};
 
 /**
  * 等壳把整首取进内存，返回 token；不可用（壳没有新桥方法 / 取失败 / 超时）返回 null。
  */
 const prepareToken = async (url: string, bridge: ShellMediaBridge): Promise<number | null> => {
-    const prepare = bridge.mediaPrepare;
     const status = bridge.mediaStatus;
-    if (!prepare || !status) return null;
+    if (!status) return null;
 
-    let token = tokenByRemoteUrl.get(url);
-    if (token === undefined) {
-        const created = prepare.call(bridge, url);
-        if (typeof created !== 'number' || created < 0) return null;
-        token = created;
-        tokenByRemoteUrl.set(url, token);
-        if (tokenByRemoteUrl.size > 4) {
-            // 壳内部只留最近两条，这里只管别让映射表无限长。
-            const oldest = tokenByRemoteUrl.keys().next();
-            if (!oldest.done) tokenByRemoteUrl.delete(oldest.value);
-        }
-    }
+    const token = startToken(url, bridge);
+    if (token === null) return null;
 
     const deadline = Date.now() + BRIDGE_WAIT_MS;
     while (Date.now() < deadline) {
@@ -167,6 +326,36 @@ const shellChunkedSource = async (url: string): Promise<{ audioSrc: string; blob
 };
 
 /**
+ * 让壳**提前**把某一首取进内存，不等它真的被播放。
+ *
+ * 切歌慢的根因是整首下载：壳要先把 ~10 MB 取完，页面才拿得到 blob。预取下一首能把这
+ * 几秒挪到上一首播放期间——真正切过去时只剩 200 ms 左右的本地 blob 拷贝。
+ * 失败一律吞掉：预取是加速手段，不能影响任何播放路径。
+ */
+export const prefetchShellAudio = (url: string | null | undefined): void => {
+    if (!url || !needsShellAudioRelay(url)) return;
+    if (tokenByRemoteUrl.has(url)) return;
+
+    const bridge = shellBridge();
+    const prepare = bridge?.mediaPrepare;
+    if (!bridge || !prepare) return;
+
+    try {
+        const token = prepare.call(bridge, url);
+        if (typeof token === 'number' && token >= 0) {
+            tokenByRemoteUrl.set(url, token);
+            if (tokenByRemoteUrl.size > 4) {
+                const oldest = tokenByRemoteUrl.keys().next();
+                if (!oldest.done) tokenByRemoteUrl.delete(oldest.value);
+            }
+            console.log('[ShellAudio] prefetching the next track into shell memory');
+        }
+    } catch (error) {
+        console.warn('[ShellAudio] prefetch failed, ignored', error);
+    }
+};
+
+/**
  * 把远程音频地址变成同源地址。
  *
  * 失败时**回退到原地址**：让原有播放链路自己报错，比在这里伪装成功更好排查。
@@ -180,6 +369,17 @@ export const materializeShellAudioSource = async (
 
     const bridge = shellBridge();
     if (bridge) {
+        // 先试流式：mp3 边下边放，首声只等第一块（~64 KB）。
+        // flac 之类 MSE 放不了的，会在这里返回 null，落到下面的 blob 路径。
+        try {
+            const streamed = await streamViaMse(url, bridge);
+            if (streamed) {
+                return { audioSrc: streamed.audioSrc, ...(streamed.blobUrl ? { blobUrl: streamed.blobUrl } : {}) };
+            }
+        } catch (error) {
+            console.warn('[ShellAudio] streaming path failed, trying the blob path', error);
+        }
+
         try {
             const viaBlob = await shellBlobSource(url, bridge);
             if (viaBlob) {

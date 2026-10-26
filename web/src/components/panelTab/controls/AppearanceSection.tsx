@@ -16,6 +16,7 @@ import { openCommandPaletteCommand } from '../../../stores/useAppViewStore';
 import { useLyricSegmentationStore } from '../../../stores/useLyricSegmentationStore';
 import { LYRIC_SEGMENTATION_COMMAND_ID } from '../../command-palette/commands/lyricSegmentationCommand';
 import ModeStepperRow from './ModeStepperRow';
+import RandomLyricStylePool from './RandomLyricStylePool';
 import ThemeSourceRow from './ThemeSourceRow';
 import { BackgroundModeGlyph, VisualizerModeGlyph } from '../../visualizer/modeGlyphs';
 import { useVisualizerSettingsStore } from '../../../stores/useVisualizerSettingsStore';
@@ -197,6 +198,8 @@ const AppearanceSection: React.FC<AppearanceSectionProps> = ({
                     trailing={backgroundQuickControls}
                 />
             </div>
+
+            <RandomLyricStylePool t={t} isDaylight={isDaylight} theme={theme} />
 
             <div className="pt-1">
                 <ThemeSourceRow

@@ -25,6 +25,9 @@ interface ProgressBarProps {
 
 
 const formatTime = (time: number) => {
+    // 流式播放（MediaSource）在收完之前 duration 是 Infinity，直接算会得到
+    // "Infinity:NaN"。长度未知时留空——比在播放器上挂一串乱码好，长度一到就自己补上。
+    if (!Number.isFinite(time)) return '';
     if (isNaN(time)) return "00:00";
     const minutes = Math.floor(time / 60);
     const seconds = Math.floor(time % 60);

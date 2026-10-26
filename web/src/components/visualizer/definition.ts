@@ -25,10 +25,21 @@ import {
 } from '../../types';
 import type { VisualizerTuningBundle } from './tuningRegistry';
 import type { VisualizerBackgroundConfig } from './backgrounds/definition';
+import type { BeatEffectDef } from '../../services/beatFx/beatEffects';
 
 // src/components/visualizer/definition.ts
 // Shared contracts for discoverable visualizer modes.
-export type VisualizerTuningKind = 'none' | 'classic' | 'cadenza' | 'partita' | 'fume' | 'claddagh' | 'cappella' | 'tilt' | 'monet' | 'diorama' | 'pendolo' | 'sonnet' | 'tempera' | 'lumiere';
+export type VisualizerTuningKind = 'none' | 'classic' | 'cadenza' | 'partita' | 'fume' | 'claddagh' | 'cappella' | 'tilt' | 'monet' | 'diorama' | 'pendolo' | 'sonnet' | 'tempera' | 'lumiere' | 'hanabi';
+
+/**
+ * 播放面板上的快捷开关拿到的上下文（上游 v0.7.22 的契约，花火用它在面板上放两个开关）。
+ * `tuning` 的具体类型由各样式自己在 entry 里指定。
+ */
+export interface VisualizerQuickControlsProps<T = unknown> {
+    tuning: T;
+    onTuningChange: (patch: Partial<T>) => void;
+    t: (key: string) => string;
+}
 
 export interface VisualizerSharedProps {
     currentTime: MotionValue<number>;
@@ -178,6 +189,16 @@ export interface VisualizerRegistryEntry {
     previewSeed: string;
     previewStartOffset: number;
     tuningKind: VisualizerTuningKind;
+    /*
+     * 下面几个字段是随花火从上游 v0.7.22 带进来的可选契约：
+     * 图标、命令面板条目、智能动感效果声明、播放面板快捷开关、独立的字号提示。
+     * 都是可选的，现有 13 个样式不填也照旧工作；读取方按需取。
+     */
+    glyph?: React.ReactNode;
+    command?: { title: string; description?: string; keywords?: string[]; };
+    beatEffects?: readonly BeatEffectDef[];
+    renderQuickControls?: (props: VisualizerQuickControlsProps<never>) => React.ReactNode;
+    ownFontSizeNoticeKey?: string;
     /*
      * 各模式的 entry.tsx 把真正的 renderer 包成 React.lazy —— registry 用 eager glob 发现
      * entry，如果 entry 静态 import renderer，任何碰 visualizer 设置的模块都会连带拉进 13 个

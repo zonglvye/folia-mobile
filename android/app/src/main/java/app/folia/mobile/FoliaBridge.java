@@ -107,6 +107,38 @@ public class FoliaBridge {
         activity.requestAudioPermission();
     }
 
+    // ---- same-origin audio relay ---------------------------------------------------------
+    //
+    // The signed audio URLs a provider hands out carry no CORS header, while the page's <audio>
+    // element is crossOrigin="anonymous" because the visualiser analyses it with WebAudio. So the
+    // shell pulls the track into its own memory and the page reads it back from
+    // `/api/media-proxy?token=…` (MediaProxyHandler). Same three methods as the HarmonyOS shell,
+    // deliberately: the page must not need one implementation per platform.
+
+    /** Starts pulling one track in; returns its token at once. The page polls the two below. */
+    @JavascriptInterface
+    public int mediaPrepare(String url) {
+        return MediaCache.prepare(activity.getApplicationContext(), url);
+    }
+
+    /** `pending` | `preparing` | `ready` | `failed` | `missing`. */
+    @JavascriptInterface
+    public String mediaStatus(int token) {
+        return MediaCache.status(token);
+    }
+
+    /** Bytes arrived so far; the page decides which slice it can ask for from this. */
+    @JavascriptInterface
+    public long mediaProgress(int token) {
+        return MediaCache.progress(token);
+    }
+
+    /** Drops a track the page has moved on from, instead of waiting for the eviction pass. */
+    @JavascriptInterface
+    public void mediaRelease(int token) {
+        MediaCache.release(token);
+    }
+
     // Reserved for the next milestone, deliberately absent rather than stubbed so the page's
     // per-method capability probing stays truthful:
     //   pickAudioFolder / listAudioFolderEntries / readAudioChunk  - SAF folder import

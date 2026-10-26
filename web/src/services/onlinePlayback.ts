@@ -69,7 +69,7 @@ export async function loadOnlineSongAudioSource(
     }
 
     if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt) && !isNetworkOffline()) {
-        // 鸿蒙壳里远程地址要先换成同源 blob（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
+        // 打包壳里远程地址要先换成同源地址（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
         // 离线时跳过这条：预取到的签名地址这时也取不回来，交给下面的 provider 失败路径（文案与自动重连都按网络处理）。
         const playable = await materializeShellAudioSource(prefetched.audioUrl);
         return {
