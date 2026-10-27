@@ -1,7 +1,7 @@
 From 17fc9bac485aeba45758d1a41ff6286f0e8c90b8 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 15:03:44 +0800
-Subject: [PATCH 19/29] fix(debug): measure jank against the session's own
+Subject: [PATCH 19/90] fix(debug): measure jank against the session's own
  frame time
 
 A reading off the phone showed `p50 33.3 / p90 33.5 / p99 33.5 / jank 19.2 %`:

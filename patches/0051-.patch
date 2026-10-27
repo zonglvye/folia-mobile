@@ -1,0 +1,183 @@
+From 739e618de3522ee252dfa910fd6929e951a78448 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 21:56:36 +0800
+Subject: [PATCH 51/90] =?UTF-8?q?=E4=BF=AE=E6=89=8B=E6=9C=BA=E5=A3=B3?=
+ =?UTF-8?q?=E9=87=8C=E7=9A=84=E4=B8=89=E5=A4=84=EF=BC=9A=E8=BF=9B=E5=BA=A6?=
+ =?UTF-8?q?=E6=9D=A1=E7=82=B9=E4=B8=8D=E4=B8=AD=E3=80=81=E5=88=87=E6=AD=8C?=
+ =?UTF-8?q?=E7=AE=AD=E5=A4=B4=E9=9A=90=E5=BD=A2=E3=80=81=E4=B8=93=E8=BE=91?=
+ =?UTF-8?q?=E9=A1=B5=E6=B2=A1=E6=AD=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+三条都是真机（HarmonyOS 壳，823×374 CSS px，无 hover）上量出来的，不是猜的。
+
+1) 进度条点不开。可见轨道是 h-1.5（6px），透明 input 又是 `inset-0` 跟着轨道走，
+   实测命中框只有 134×6 —— 手指根本点不中，略偏一点就落到胶囊本身上（播放页里那是空动作）。
+   把 input 单独撑到 30px 高（轨道 6 + 上下各 12，仍在胶囊内部），视觉上还是那条细轨道。
+   实测：点在轨道上方 7px 也能 seek（21s → 196s），老版本这里必落空。
+
+2) 切歌箭头看不见但盲点能切。箭头写的是 `opacity-0 group-hover/title:opacity-70`，
+   而壳里 `(hover: hover) and (pointer: fine)` 为 false：CSS 悬停永不触发，箭头永远透明，
+   命中区还在。改成不能悬停时直接画出来（opacity-70），命中区从 24px 放到 32px。
+
+3) 播放中整条控制栏只剩 6px 进度、没有暂停/切歌按钮。`showExpanded` 依赖 `isHovered`，
+   而壳把每次点击合成成一次 mouseenter（真机日志：点击后 15ms isHovered 变 true 并一直挂着），
+   于是「点一下收起」会被立刻顶回展开。现在：
+   - `isHovered` 只在真的能悬停时才参与判断；
+   - 播放页 + 无 hover 时点胶囊切换展开/收起，默认展开（按钮随手可及）。
+
+4) 专辑页加载不出歌曲。`services/netease.ts` 的 getAlbum 打 `/album`，路由表里没这条，
+   requestLocalNetease 直落 404 分支（本地就返回，所以壳日志里连一条网络请求都没有）。
+   补 `/album`（`/api/v1/album/{id}`）、`/artist/songs`（`/api/v1/artist/songs`）、
+   `/album/detail/dynamic`。真机验证：点进专辑后 `weapi/v1/album/16945 -> 200`，曲目正常显示。
+---
+ src/components/FloatingPlayerControls.tsx     | 25 +++++++++++++++-
+ src/components/ProgressBar.tsx                |  6 +++-
+ .../floating-player/TrackTitleNavigator.tsx   | 12 ++++++--
+ src/services/onlineMusic/neteaseLocalApi.ts   | 29 +++++++++++++++++++
+ 4 files changed, 68 insertions(+), 4 deletions(-)
+
+diff --git a/src/components/FloatingPlayerControls.tsx b/src/components/FloatingPlayerControls.tsx
+index c9ca340..2a855c5 100644
+--- a/src/components/FloatingPlayerControls.tsx
++++ b/src/components/FloatingPlayerControls.tsx
+@@ -16,6 +16,7 @@ import { usePlayerChromeSettingsStore } from '../stores/usePlayerChromeSettingsS
+ import { PLAYER_BOTTOM_BAR_BASE_OFFSET_PX, clampPlayerBottomBarOffset, resolvePlayerBottomBarMaxOffset } from '../utils/playerBottomBarLayout';
+ import type { PlayerControlSlotActionId, PlayerControlSlotContext } from './floating-player/playerControlSlotActions';
+ import { usePlayerOverlayObstacle } from '../hooks/usePlayerOverlayLayout';
++import { useSupportsFinePointer } from '../hooks/useSupportsFinePointer';
+ 
+ export interface TrackNavigation {
+     /** 当前曲目的稳定身份，用于识别「确实换歌了」；相邻两首同名时标题字符串不变，不能拿标题判断 */
+@@ -151,8 +152,24 @@ const FloatingPlayerControls: React.FC<FloatingPlayerControlsProps> = ({
+     ));
+ 
+     const canAutoExpand = canTogglePlay && duration > 0;
++    /*
++     * 触摸设备没有 hover，`isHovered` 永远为真不了，于是「播放中 → 折叠」这条规则在手机上
++     * 会变成永久折叠：胶囊里只剩一条 6px 的进度，暂停和切歌按钮根本没被渲染（实测折叠态下
++     * CollapsedView 只有 ProgressBar）。所以没有可悬停指针时，播放页改为点胶囊切换展开/收起，
++     * 默认展开——手机上要的就是按钮随手可及。
++     */
++    const canHover = useSupportsFinePointer();
++    const [touchExpanded, setTouchExpanded] = useState(true);
++    const touchExpandable = !canHover && currentView === 'player';
+     // 定位模式强制展开：用户要看到的是最终形态的胶囊，而不是一条细进度条。
+-    const showExpanded = isPositioning || isHovered || (canAutoExpand && playerState !== PlayerState.PLAYING && currentView !== 'home');
++    //
++    // `isHovered` 只在真的有可悬停指针时才算数：手机壳会把每次点击合成成一次 mouseenter
++    // （真机日志：点击后 15ms `isHovered` 变 true 并一直挂着），于是「点一下收起」会被立刻顶回展开，
++    // 表现成点了没反应。不能悬停的设备走下面的 touchExpanded 分支。
++    const showExpanded = isPositioning
++        || (canHover && isHovered)
++        || (canAutoExpand && playerState !== PlayerState.PLAYING && currentView !== 'home')
++        || (touchExpandable && touchExpanded);
+ 
+     // 上限依赖视口高度，窗口变矮时要跟着收，否则虚线框会画到屏幕外。
+     useEffect(() => {
+@@ -310,6 +327,12 @@ const FloatingPlayerControls: React.FC<FloatingPlayerControlsProps> = ({
+         if (isPositioning) {
+             return;
+         }
++        // 播放页 + 没有 hover：点胶囊就是展开/收起控制条。这里本来点是「导航到播放页」，
++        // 而人已经在播放页上了，等于空动作 —— 正好腾给展开。
++        if (touchExpandable) {
++            setTouchExpanded(value => !value);
++            return;
++        }
+         if (currentView !== 'lattice') {
+             onNavigateToPlayer();
+         } else {
+diff --git a/src/components/ProgressBar.tsx b/src/components/ProgressBar.tsx
+index 490b40d..1cc36e3 100644
+--- a/src/components/ProgressBar.tsx
++++ b/src/components/ProgressBar.tsx
+@@ -202,7 +202,11 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
+                     onInput={handleInput}
+                     onChange={() => { }} // React requires this
+                     onClick={(e) => e.stopPropagation()}
+-                    className={`absolute inset-0 w-full h-full opacity-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
++                    // 命中区要跟可见轨道分开算。轨道只有 h-1.5（6px），手机上实测出来的命中框就是
++                    // 134×6 —— 一根手指基本点不中，稍微偏一点就落到胶囊本身上（在播放页那是空动作），
++                    // 于是整条进度条读起来就是「点不开」。这里把 input 这个透明层加高到 30px
++                    // （轨道 6 + 上下各 12，仍落在胶囊内部），视觉上依旧是那条细轨道。
++                    className={`absolute left-0 right-0 -top-3 h-[30px] w-full opacity-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                 />
+                 <FoliumProgressLayers ctx={foliumCtx} />
+             </div>
+diff --git a/src/components/floating-player/TrackTitleNavigator.tsx b/src/components/floating-player/TrackTitleNavigator.tsx
+index 4f1d97c..cb643b2 100644
+--- a/src/components/floating-player/TrackTitleNavigator.tsx
++++ b/src/components/floating-player/TrackTitleNavigator.tsx
+@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
+ import { ChevronLeft, ChevronRight } from 'lucide-react';
+ import { useTrackTitlePreview, type TrackNavSide } from '../../hooks/useTrackTitlePreview';
+ import { usePlayerChromeSettingsStore } from '../../stores/usePlayerChromeSettingsStore';
++import { useSupportsFinePointer } from '../../hooks/useSupportsFinePointer';
+ // src/components/floating-player/TrackTitleNavigator.tsx
+ 
+ const PREVIEW_OPACITY = 0.55;
+@@ -58,13 +59,20 @@ const TrackTitleNavigator: React.FC<TrackTitleNavigatorProps> = ({
+         beginSwitch,
+     } = useTrackTitlePreview({ title, trackKey, prevTitle, nextTitle, disabled });
+     const alwaysShowArrows = usePlayerChromeSettingsStore(state => state.alwaysShowTrackSwitchButtons);
++    // 没有可悬停的指针时（手机壳、平板），`group-hover/title:opacity-70` 永远不会触发：
++    // 箭头留在原位、点得到，却彻底隐形 —— 真机实测 `(hover: hover) and (pointer: fine)` 为 false，
++    // 表现就是「切歌按钮看不见了，但盲点能切歌」。所以不能悬停就直接把箭头画出来，
++    // 顺便把命中区从 24px 放大到 32px（手指够得着）。
++    const canHover = useSupportsFinePointer();
++    const arrowsAlwaysVisible = alwaysShowArrows || !canHover;
+ 
+     const isPreview = previewTitle !== null;
+     const zoneClass = 'absolute inset-y-0 flex items-center';
+     const arrowClass = [
+-        'pointer-events-auto flex h-6 w-6 items-center justify-center rounded-full',
++        'pointer-events-auto flex items-center justify-center rounded-full',
++        canHover ? 'h-6 w-6' : 'h-8 w-8',
+         'transition-opacity duration-200 hover:opacity-100!',
+-        alwaysShowArrows ? 'opacity-70' : 'opacity-0 group-hover/title:opacity-70',
++        arrowsAlwaysVisible ? 'opacity-70' : 'opacity-0 group-hover/title:opacity-70',
+         isDaylight ? 'hover:bg-black/10' : 'hover:bg-white/15',
+     ].join(' ');
+     const textClass = 'w-full truncate text-center text-sm font-bold';
+diff --git a/src/services/onlineMusic/neteaseLocalApi.ts b/src/services/onlineMusic/neteaseLocalApi.ts
+index 74327b6..fea5e43 100644
+--- a/src/services/onlineMusic/neteaseLocalApi.ts
++++ b/src/services/onlineMusic/neteaseLocalApi.ts
+@@ -375,6 +375,35 @@ const ROUTES: Record<string, NeteaseRoute> = {
+         uri: '/api/artist/top/song',
+         payload: query => ({ id: query.get('id') }),
+     },
++    // 歌手的“全部歌曲”页（`artist/songs`），与上面三条同一批，参考实现 module/artist_songs.js。
++    '/artist/songs': {
++        mode: 'weapi',
++        uri: '/api/v1/artist/songs',
++        payload: query => ({
++            id: query.get('id'),
++            order: query.get('order') || 'hot',
++            limit: readNumber(query.get('limit'), 100),
++            offset: readOffset(query.get('offset')),
++        }),
++    },
++
++    // --- 专辑页 ------------------------------------------------------------------
++    // 参考实现 module/album.js：专辑 id 同样在路径里，`/api/v1/album/{id}`。
++    //
++    // 缺了这条，从歌手页点进任何一张专辑都是空的：`services/netease.ts` 的 `getAlbum` 打 `/album`，
++    // 路由表里没有就直落 404 分支，页面拿到 `{code:404}` —— 表现为「专辑页加载不出歌曲」，
++    // 而且壳日志里一条网络请求都不会出现（404 在本地就返回了），很容易被误判成网络问题。
++    '/album': {
++        mode: 'weapi',
++        uri: query => `/api/v1/album/${query.get('id') ?? ''}`,
++        payload: () => ({}),
++    },
++    // 专辑页顶部的动态信息（是否已收藏、评论数）。缺它只是少一行状态，不影响歌曲列表。
++    '/album/detail/dynamic': {
++        mode: 'weapi',
++        uri: '/api/album/detail/dynamic',
++        payload: query => ({ id: query.get('id') }),
++    },
+ };
+ 
+ /**

@@ -1,0 +1,166 @@
+From 54cd1fdb64fc19711fb6f065ede397a55581158f Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:20:01 +0800
+Subject: [PATCH 65/90] =?UTF-8?q?test(kugou):=20=E6=89=8B=E6=9C=BA?=
+ =?UTF-8?q?=E5=8F=B7=E7=99=BB=E5=BD=95=E7=9A=84=20controller=20=E7=94=A8?=
+ =?UTF-8?q?=E4=BE=8B=EF=BC=8C=E9=A1=BA=E6=89=8B=E4=BF=AE=E6=8E=89=E7=99=BB?=
+ =?UTF-8?q?=E5=BD=95=E5=90=8E=E5=8D=A1=E4=BD=8F=E7=9A=84=E9=97=AE=E9=A2=98?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 5 个用例：开表单而不建扫码会话、发码成功记时间/失败记原文、登录成功后刷新并发起
+  激活确认、验证码被拒时保留表单、关闭表单不发请求。
+- confirmPhoneLogin 原来 await 了激活确认，用户不点确认时登录动作就一直挂着（测试里直接超时）。
+  改成发起后不等待，结局仍写进 lastLoginCompletion。
+- 发码/登录的错误只把上游那句人话抛给界面（「手机格式不正确」「验证码过期」），技术前缀进日志。
+---
+ .../services/providerAccountController.ts     | 18 ++--
+ src/services/onlineMusic/kugouWebAuth.ts      |  7 +-
+ .../core/providerAccountController.test.ts    | 82 +++++++++++++++++++
+ 3 files changed, 98 insertions(+), 9 deletions(-)
+
+diff --git a/src/library/core/services/providerAccountController.ts b/src/library/core/services/providerAccountController.ts
+index c5ef9c8..b06bf37 100644
+--- a/src/library/core/services/providerAccountController.ts
++++ b/src/library/core/services/providerAccountController.ts
+@@ -480,13 +480,17 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+             });
+             return { status: 'ok' };
+         }
+-        const result = await openSwitchRequest(current.providerId, 'activate-after-login');
+-        batch(() => {
+-            lastLoginCompletion = {
+-                sessionId: completionId,
+-                providerId: current.providerId,
+-                outcome: result.status === 'switched' ? 'completed' : 'activation-declined',
+-            };
++        // 发起激活确认但不在这里等用户答复：确认框是 UI 的事，登录动作不能挂着它。
++        // 结局照样写进 lastLoginCompletion，与扫码登录的收尾一致。
++        void openSwitchRequest(current.providerId, 'activate-after-login').then(result => {
++            if (disposed) return;
++            batch(() => {
++                lastLoginCompletion = {
++                    sessionId: completionId,
++                    providerId: current.providerId,
++                    outcome: result.status === 'switched' ? 'completed' : 'activation-declined',
++                };
++            });
+         });
+         return { status: 'ok' };
+     };
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index d3ec56c..4b22637 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -240,7 +240,9 @@ export const sendKugouLoginCode = async (mobile: string): Promise<void> => {
+         headers: clientHeaders({ 'Content-Type': 'application/json', 'User-Agent': LOGIN_UA }),
+     });
+     if (Number(json?.status) !== 1) {
+-        throw new Error(`KuGou code request failed: ${errorTextOf(json)}`);
++        // 只把上游那句人话抛给界面（「手机格式不正确」「验证码过期」），技术前缀留在日志里。
++        console.warn('[KugouAuth] send code rejected', errorTextOf(json));
++        throw new Error(errorTextOf(json));
+     }
+ };
+ 
+@@ -296,7 +298,8 @@ export const loginKugouWithCode = async (mobile: string, code: string): Promise<
+         headers: clientHeaders({ 'Content-Type': 'application/json', 'support-calm': '1', 'User-Agent': LOGIN_UA }),
+     });
+     if (Number(json?.status) !== 1) {
+-        throw new Error(`KuGou login failed: ${errorTextOf(json)}`);
++        console.warn('[KugouAuth] login rejected', errorTextOf(json));
++        throw new Error(errorTextOf(json));
+     }
+ 
+     let session: KugouWebSession | null = null;
+diff --git a/test/unit/library/core/providerAccountController.test.ts b/test/unit/library/core/providerAccountController.test.ts
+index d4fbed1..49e018f 100644
+--- a/test/unit/library/core/providerAccountController.test.ts
++++ b/test/unit/library/core/providerAccountController.test.ts
+@@ -972,3 +972,85 @@ describe('providerAccountController · failures are logged in full for every pro
+         expect(text).toContain('"failureReason":"local-backoff"');
+     });
+ });
++
++describe('providerAccountController · phone login', () => {
++    // 手机号验证码登录（酷狗在没有后端实例时）：不进扫码会话，只有一个表单。
++    beforeEach(() => {
++        auth.canLoginWithCode = vi.fn((providerId: OnlineProviderId) => providerId === 'gamma');
++        auth.sendLoginCode = vi.fn(async (providerId: OnlineProviderId, mobile: string) => {
++            ops.push(['send-code', providerId, mobile]);
++            if (mobile === '10000000000') throw new Error('手机格式不正确');
++        });
++        auth.loginWithCode = vi.fn(async (providerId: OnlineProviderId, mobile: string, code: string) => {
++            ops.push(['login-code', providerId, mobile, code]);
++            return { id: 'kg-1', nickname: '酷狗用户' };
++        });
++    });
++
++    it('opens the phone sheet instead of a QR session', async () => {
++        const controller = createController();
++
++        await expect(controller.startLogin('gamma')).resolves.toMatchObject({ status: 'started', step: 'phone' });
++
++        expect(controller.getSnapshot().login).toBeNull();
++        expect(controller.getSnapshot().phoneLogin).toEqual({
++            providerId: 'gamma',
++            pending: null,
++            error: null,
++            codeSentAt: null,
++        });
++        expect(auth.createQrLogin).not.toHaveBeenCalled();
++    });
++
++    it('records the send time on success and the upstream text on failure', async () => {
++        const controller = createController();
++        await controller.startLogin('gamma');
++
++        await expect(controller.sendPhoneCode('13800138000')).resolves.toEqual({ status: 'ok' });
++        expect(controller.getSnapshot().phoneLogin?.codeSentAt).toBe(manual.clock.now());
++
++        await expect(controller.sendPhoneCode('10000000000')).resolves.toEqual({
++            status: 'failed',
++            message: '手机格式不正确',
++        });
++        expect(controller.getSnapshot().phoneLogin).toMatchObject({ pending: null, error: '手机格式不正确' });
++    });
++
++    it('refreshes the account and asks to activate after a successful login', async () => {
++        const controller = createController();
++        await controller.startLogin('gamma');
++
++        await expect(controller.confirmPhoneLogin('13800138000', '123456')).resolves.toEqual({ status: 'ok' });
++        await manual.flush();
++
++        expect(refresh).toHaveBeenCalledWith('gamma');
++        expect(controller.getSnapshot().phoneLogin).toBeNull();
++        // gamma 不是当前平台（alpha）：登录成功后走 activate-after-login 确认。
++        expect(controller.getSnapshot().pendingSwitch?.to).toBe('gamma');
++    });
++
++    it('keeps the sheet open when the code is rejected', async () => {
++        const controller = createController();
++        await controller.startLogin('gamma');
++        (auth.loginWithCode as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('验证码过期'));
++
++        await expect(controller.confirmPhoneLogin('13800138000', '000000')).resolves.toEqual({
++            status: 'failed',
++            message: '验证码过期',
++        });
++
++        expect(controller.getSnapshot().phoneLogin).toMatchObject({ pending: null, error: '验证码过期' });
++        expect(controller.getSnapshot().pendingSwitch).toBeNull();
++        expect(refresh).not.toHaveBeenCalled();
++    });
++
++    it('closes the sheet without calling the backend', async () => {
++        const controller = createController();
++        await controller.startLogin('gamma');
++
++        expect(controller.closePhoneLogin()).toEqual({ status: 'closed', sessionId: expect.any(Number) });
++        expect(controller.getSnapshot().phoneLogin).toBeNull();
++        expect(auth.sendLoginCode).not.toHaveBeenCalled();
++        expect(auth.loginWithCode).not.toHaveBeenCalled();
++    });
++});

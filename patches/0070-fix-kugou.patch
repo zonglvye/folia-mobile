@@ -1,0 +1,103 @@
+From 1a8caa63b43e7b6945ee12c6812bf899ebdcb5e5 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:44:45 +0800
+Subject: [PATCH 70/90] =?UTF-8?q?fix(kugou):=20=E5=88=9A=E7=99=BB=E5=BD=95?=
+ =?UTF-8?q?=E7=9A=84=E4=BC=9A=E8=AF=9D=E4=B8=8D=E5=86=8D=E8=A2=AB=E4=B8=80?=
+ =?UTF-8?q?=E6=AC=A1=E8=B5=84=E6=96=99=E5=A4=B1=E8=B4=A5=E5=88=A0=E6=8E=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+16:36 的真机日志：两次 `login ok` 后紧跟 `auth-state-cleared`——token 刚存下就被资料
+接口的 20018 判成掉登录。上一轮加了 800ms 重试，这一轮补上兜底：
+
+- 登录成功时记下时间（`login_at`）。
+- 五分钟内登录的会话，重试后仍查不到资料也不清，先用 userid 占位（昵称「酷狗」）保持已登录，
+  下一次刷新补昵称头像；超过五分钟才按原有逻辑清。
+- 这样「登录成功但无事发生」不可能再出现：要么拿到真资料，要么至少是已登录状态。
+---
+ src/hooks/useKugouLibrary.ts             | 21 ++++++++++++++++++++-
+ src/services/onlineMusic/kugouWebAuth.ts | 10 ++++++++++
+ 2 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/src/hooks/useKugouLibrary.ts b/src/hooks/useKugouLibrary.ts
+index fa9b14f..cc7f623 100644
+--- a/src/hooks/useKugouLibrary.ts
++++ b/src/hooks/useKugouLibrary.ts
+@@ -5,7 +5,7 @@ import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccoun
+ import type { MediaId, ProviderCollection, ProviderUser } from '../types/onlineMusic';
+ import { ANONYMOUS_PUBLIC_MODE } from '../types/onlineMusic';
+ import { handleLoginStatusFailure } from '../services/onlineMusic/loginStatusFailure';
+-import { hasKugouWebSession } from '../services/onlineMusic/kugouWebAuth';
++import { hasKugouWebSession, kugouWebSessionAgeMs, readKugouWebSession } from '../services/onlineMusic/kugouWebAuth';
+ import {
+     clearProviderAccountSnapshot,
+     loadProviderAccountSnapshot,
+@@ -64,6 +64,9 @@ export const resolveRefreshedLikedState = (
+     return isSameUser ? previous.state : { likedSongIds: [], likedSongFileIds: {} };
+ };
+ 
++/** 刚登录的会话在这么久之内，即使资料查不到也保留（详见 checkLoginStatus 里的说明）。 */
++const FRESH_SESSION_GRACE_MS = 5 * 60_000;
++
+ export const useKugouLibrary = () => {
+     const updateAccount = useOnlineProviderAccountStore(state => state.updateAccount);
+     const clearAccount = useOnlineProviderAccountStore(state => state.clearAccount);
+@@ -103,6 +106,22 @@ export const useKugouLibrary = () => {
+                 if (!user) console.warn('[KugouLibrary] login-status confirmed missing after retry');
+             }
+             if (!user) {
++                // 刚登录的会话不因为「一次查不到资料」就丢掉：token 是酷狗刚发的，资料接口偶发不认它，
++                // 丢掉等于让用户重新收一次验证码。保留会话、先用 id 占位，下一次刷新会补上昵称头像。
++                const session = readKugouWebSession();
++                const age = kugouWebSessionAgeMs();
++                if (session && age !== null && age < FRESH_SESSION_GRACE_MS) {
++                    const placeholder: ProviderUser = { id: session.userid, nickname: '酷狗', avatarUrl: '' };
++                    console.warn('[KugouLibrary] login-status:profile-unavailable-but-fresh', { age });
++                    updateAccount('kugou', {
++                        status: 'authenticated',
++                        user: placeholder,
++                        hydration: 'ready',
++                        freshness: 'error',
++                        error: 'kugou_profile_unavailable',
++                    });
++                    return placeholder;
++                }
+                 await clearAuthState(cachedAccount?.user ? 'auth-required' : undefined);
+                 console.info('[KugouLibrary] login-status:anonymous', {
+                     previousAccountExpired: Boolean(cachedAccount?.user),
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index b998dde..3d5a127 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -45,6 +45,8 @@ const GUID_KEY = 'web_guid';const DEV_KEY = 'web_dev';
+ const TOKEN_KEY = 'token';
+ const USERID_KEY = 'userid';
+ const DFID_KEY = 'dfid';
++/** 登录成功的时间：用来区分「刚登录」与「登录了很久」的会话，见 kugouWebSessionAgeMs。 */
++const LOGIN_AT_KEY = 'login_at';
+ 
+ /** 酷狗「未登录 / token 无效」的错误码。只有它代表登录态真的失效，别的错误码都算「这次没查成」。 */
+ const KUGOU_AUTH_ERROR_CODE = 20018;
+@@ -258,6 +260,13 @@ export const readKugouWebSession = (): KugouWebSession | null => {
+ 
+ export const hasKugouWebSession = (): boolean => readKugouWebSession() !== null;
+ 
++/** 这次登录存下来的时间戳；没有记录（旧版本存的会话）时返回 null。 */
++export const kugouWebSessionAgeMs = (): number | null => {
++    const stored = readProviderSessionValue('kugou', LOGIN_AT_KEY);
++    const at = stored ? Number(stored) : NaN;
++    return Number.isFinite(at) && at > 0 ? Date.now() - at : null;
++};
++
+ /**
+  * 手机号 + 验证码登录：成功后把 token/userid 写进 provider 存储，交给账户层像其它平台一样持久化。
+  *
+@@ -332,6 +341,7 @@ export const loginKugouWithCode = async (mobile: string, code: string): Promise<
+     writeProviderSessionValue('kugou', TOKEN_KEY, session.token);
+     writeProviderSessionValue('kugou', USERID_KEY, session.userid);
+     writeProviderSessionValue('kugou', DFID_KEY, dfid);
++    writeProviderSessionValue('kugou', LOGIN_AT_KEY, String(Date.now()));
+     // 只记结论，不记 token 本体（日志会进诊断报告）。
+     console.info('[KugouAuth] login ok', {
+         userid: session.userid,

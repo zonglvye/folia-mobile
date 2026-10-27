@@ -1,27 +1,15 @@
 // Copyright (c) 2026 chthollyphile
-import { defineVisualizerTuning, type StoredTuningFields } from '../tuningDefinition';
-import { normalizeHanabiTuning } from './hanabiTuning';
-import { DEFAULT_HANABI_TUNING, type HanabiTuning } from './types';
+import { defineVisualizerTuning } from '../tuningRegistry';
 
 // src/components/visualizer/hanabi/tuning.ts
-// 花火's tuning: its defaults, the settings store fields it lives in, and where it is stored. The
-// renderer reads it from the tuning bundle with read() (entry.tsx), so there is no named prop.
-
-declare module '../tuningDefinition' {
-    interface VisualizerTuningSettings extends StoredTuningFields<'hanabiTuning', 'handleSetHanabiTuning', 'handleResetHanabiTuning', HanabiTuning> {}
-}
-
-export default defineVisualizerTuning<HanabiTuning>({
+// 把花火的参数接进本仓库的 tuning 注册表：store 里那一份（`hanabiTuning`）在渲染边界被注入成
+// `props.hanabiTuning`，与其它 13 个样式走同一条路。
+//
+// 上游 v0.7.22 用的是另一套 tuningDefinition（泛型 StoredTuning + 模块增强）；我们这条分支上
+// 等价物是 tuningRegistry，所以这里只声明「读哪个字段、用哪个 setter、注入成什么 prop」。
+export default defineVisualizerTuning({
     mode: 'hanabi',
-    defaults: DEFAULT_HANABI_TUNING,
     settingsKey: 'hanabiTuning',
     settingsSetterKey: 'handleSetHanabiTuning',
-    settingsResetterKey: 'handleResetHanabiTuning',
-    storage: {
-        key: 'hanabi_tuning',
-        read: normalizeHanabiTuning,
-        // Merge then normalize: the same clamp runs for slider drags, imports, sync and Folium.
-        merge: (held, patch) => normalizeHanabiTuning({ ...held, ...patch }),
-        resetNotice: 'notifications.hanabiReset',
-    },
+    apply: (props, tuning) => ({ ...props, hanabiTuning: tuning }),
 });

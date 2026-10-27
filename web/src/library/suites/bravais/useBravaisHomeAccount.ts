@@ -33,6 +33,10 @@ export const useBravaisHomeAccount = (account: LibraryAccountController, online:
         if (!row || !canRunLogout(row)) return;
         void latest.current.account.logout(providerId);
     }, []);
+    // 游客可用的平台（汽水）切过去之后选它不会再拦登录，所以登录要从这里主动发起。
+    const onLogin = useCallback((providerId: string) => {
+        void latest.current.account.startLogin(providerId);
+    }, []);
 
     const currentRow = rows.find(row => row.current);
     const detail = currentRow?.detail ?? '';
@@ -52,5 +56,6 @@ export const useBravaisHomeAccount = (account: LibraryAccountController, online:
         rows,
         onSelect,
         onLogout,
-    }), [avatarUrl, detail, guest, nickname, onLogout, onSelect, online.providerId, online.providerLabel, rows, t]);
+        onLogin,
+    }), [avatarUrl, detail, guest, nickname, onLogin, onLogout, onSelect, online.providerId, online.providerLabel, rows, t]);
 };

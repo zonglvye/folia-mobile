@@ -27,7 +27,10 @@ export const resolveOnlineProviderAccountView = ({
     return 'guest';
 };
 
-/** Whether picking the provider switches to it now (signed in, or nothing to sign in to) rather than starting a login. */
+/**
+ * Whether picking the provider switches to it now (signed in, nothing to sign in to, or usable as a guest)
+ * rather than starting a login. 游客可用（`guestAccess`）的平台先切过去，需要账号的页签自己显示登录入口。
+ */
 export const canSwitchToProviderDirectly = (provider: ProviderAccountSummary): boolean => (
-    provider.status === 'authenticated' || isAccountless(provider)
+    provider.status === 'authenticated' || isAccountless(provider) || provider.guestAccess === true
 );

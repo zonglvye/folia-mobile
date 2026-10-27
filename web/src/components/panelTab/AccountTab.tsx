@@ -57,6 +57,11 @@ const AccountTab: React.FC<AccountTabProps> = ({
     const logoutPending = useLibraryAccountSelector(accountController, selectLogoutPending);
     const canLogout = !logoutPending
         && canLogoutProvider(providers.find(provider => provider.providerId === activeProviderId), activeProviderId);
+    // 只列当前平台真能给的档位（汽水游客只有标准，摆出「无损」只会让人点了个假的）。
+    const qualityLevels = omni.getProviderAudioQualityLevels(activeProviderId);
+    const qualityOptions = qualityLevels
+        ? AUDIO_QUALITY_OPTIONS.filter(option => qualityLevels.includes(option.value))
+        : AUDIO_QUALITY_OPTIONS;
 
     // 网易与其它平台同一条路径：controller 调宿主注入的 per-provider 登出（网易的会清登录态并提示已登出）。
     const handleLogout = async () => {
@@ -121,7 +126,7 @@ const AccountTab: React.FC<AccountTabProps> = ({
                     </span>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                    {AUDIO_QUALITY_OPTIONS.map(option => (
+                    {qualityOptions.map(option => (
                         <button
                             key={option.value}
                             type="button"

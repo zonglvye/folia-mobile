@@ -1,0 +1,89 @@
+From af477933fc55e8f902474b56928e59b93b0ce489 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:23:25 +0800
+Subject: [PATCH 66/90] =?UTF-8?q?fix(kugou):=20=E5=8F=AA=E6=9C=89=2020018?=
+ =?UTF-8?q?=20=E6=89=8D=E5=BD=93=E6=8E=89=E7=99=BB=E5=BD=95=EF=BC=8C?=
+ =?UTF-8?q?=E5=85=B6=E5=AE=83=E9=94=99=E8=AF=AF=E7=A0=81=E4=BF=9D=E7=95=99?=
+ =?UTF-8?q?=20token?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+取账号资料原来把任何非零错误码都当成「未登录」返回 null，而 useKugouLibrary 见到 null
+就会 omni.logout + 删快照。一次限流或服务端抖动就足以把已经保存的登录态清掉——正是
+「切平台就退登」的那类路径。
+
+现在 20018（实测：无 token / 假 token 都是它）才返回 null；其它错误码抛错，走
+handleLoginStatusFailure，只标 freshness=error，token 与快照都留着。
+
+顺带：登录成功但取资料失败时不再把整次登录判失败——token 已经落盘，先给一个只带 id 的
+占位用户，刷新会补昵称头像。
+---
+ src/services/onlineMusic/kugouProvider.ts | 12 ++++++++----
+ src/services/onlineMusic/kugouWebAuth.ts  | 18 ++++++++++++++----
+ 2 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/src/services/onlineMusic/kugouProvider.ts b/src/services/onlineMusic/kugouProvider.ts
+index 4259eac..be33978 100644
+--- a/src/services/onlineMusic/kugouProvider.ts
++++ b/src/services/onlineMusic/kugouProvider.ts
+@@ -1370,10 +1370,14 @@ export const kugouProvider: OnlineMusicProvider = {
+             if (getKugouTransportMode() !== ANONYMOUS_PUBLIC_MODE) {
+                 throw new OnlineProviderError('unsupported', 'KuGou phone login is only used without a backend', 'kugou');
+             }
+-            await loginKugouWithCode(mobile, code);
+-            const user = await fetchKugouWebUser();
+-            if (!user) throw new OnlineProviderError('invalid-response', 'KuGou login returned no profile', 'kugou');
+-            return user;
++            const session = await loginKugouWithCode(mobile, code);
++            // 登录已经成功、token 已经落盘：资料这一步失败不该把登录判成失败（否则用户会以为没登进去，
++            // token 却留在存储里）。先给一个只带 id 的占位用户，账户刷新会补上昵称头像。
++            const user = await fetchKugouWebUser().catch(error => {
++                console.warn('[KugouProvider] profile after login failed', error);
++                return null;
++            });
++            return user ?? { id: session.userid, nickname: '酷狗', avatarUrl: '' };
+         },
+         async getQrKey() {
+             const response = await requestKugou('login_qr_key');
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index 4b22637..4988d3d 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -41,12 +41,14 @@ const T2_IV = '17a20ae7adae7020';
+ /** 登录请求的 UA：登录服务按客户端类型分辨行为。 */
+ const LOGIN_UA = 'Android16-1070-11440-130-0-LOGIN-wifi';
+ 
+-const GUID_KEY = 'web_guid';
+-const DEV_KEY = 'web_dev';
++const GUID_KEY = 'web_guid';const DEV_KEY = 'web_dev';
+ const TOKEN_KEY = 'token';
+ const USERID_KEY = 'userid';
+ const DFID_KEY = 'dfid';
+ 
++/** 酷狗「未登录 / token 无效」的错误码。只有它代表登录态真的失效，别的错误码都算「这次没查成」。 */
++const KUGOU_AUTH_ERROR_CODE = 20018;
++
+ const randomString = (length: number): string => {
+     const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+     let text = '';
+@@ -355,9 +357,17 @@ export const fetchKugouWebUser = async (): Promise<ProviderUser | null> => {
+             'User-Agent': 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi',
+         }),
+     });
++    const status = Number(json?.status);
++    const errorCode = Number(json?.error_code ?? 0);
++    if (status === 0 || errorCode !== 0) {
++        // 20018 = 没登录 / token 无效：返回 null，让账户层按「未登录」处理。
++        // 其它错误码（限流、参数、服务端抖动）必须抛出去：账户层只认 auth-required 才清凭据，
++        // 这里若也返回 null，一次瞬时失败就会被当成掉登录，把已保存的 token 删掉。
++        if (errorCode === KUGOU_AUTH_ERROR_CODE) return null;
++        const detail = typeof json?.data === 'string' ? ` ${json.data}` : '';
++        throw new Error(`KuGou profile request failed: error_code ${errorCode}${detail}`);
++    }
+     const data = dataOf(json) ?? {};
+-    // 没登录时服务端回的是错误码而不是 data：这里返回 null，让账户层走「未登录」而不是报错。
+-    if (Number(json?.status) === 0 || Number(json?.error_code)) return null;
+     const userid = String(data.userid ?? data.user_id ?? session.userid ?? '');
+     if (!userid) return null;
+     return {

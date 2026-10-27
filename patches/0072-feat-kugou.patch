@@ -1,0 +1,279 @@
+From 84066400bb71d0bb7926911a5cc333abc5c316a1 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 17:03:28 +0800
+Subject: [PATCH 72/90] =?UTF-8?q?feat(kugou):=20=E7=99=BB=E5=BD=95?=
+ =?UTF-8?q?=E5=90=8E=E6=8E=A5=E4=B8=8A=E3=80=8C=E6=88=91=E7=9A=84=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=E3=80=8D=E4=B8=8E=E3=80=8C=E6=88=91=E5=96=9C=E6=AC=A2?=
+ =?UTF-8?q?=E3=80=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+登录态已经在页面里，但账号接口之前只有资料一条，首页永远是「暂未提供推荐内容」。
+现在补上两个账号接口（都用登录拿到的 token/userid/dfid，走同一条同源代理）：
+
+- 我的歌单：POST /v7/get_all_list（x-router: cloudlist.service.kugou.com）
+- 歌单歌曲：GET /pubsongs/v2/get_other_list_file_nofilt；「我喜欢」也是一张歌单，
+  红心列表走同一条。
+
+provider 里加了一个分发器：有页面登录态时走页面，否则走实例。匿名公开模式的能力表
+在登录后补上 userLibrary/playlists/likes（其余仍是 anonymous 那一套）。
+
+真机结果：2 张歌单、246 首红心，首页墙面出现「默认收藏」「我喜欢」两张卡。
+---
+ src/hooks/useKugouLibrary.ts              | 12 ++--
+ src/services/onlineMusic/kugouProvider.ts | 51 ++++++++++++---
+ src/services/onlineMusic/kugouWebAuth.ts  | 75 ++++++++++++++++++++++-
+ 3 files changed, 121 insertions(+), 17 deletions(-)
+
+diff --git a/src/hooks/useKugouLibrary.ts b/src/hooks/useKugouLibrary.ts
+index 7bb1315..e533675 100644
+--- a/src/hooks/useKugouLibrary.ts
++++ b/src/hooks/useKugouLibrary.ts
+@@ -210,10 +210,10 @@ export const useKugouLibrary = () => {
+                     }
+                     likedSongsResolved = true;
+                 } catch (error) {
+-                    console.warn('[KugouLibrary] liked-songs:error', {
++                    console.warn(`[KugouLibrary] liked-songs:error ${JSON.stringify({
+                         name: error instanceof Error ? error.name : 'Error',
+                         message: error instanceof Error ? error.message : String(error),
+-                    });
++                    })}`);
+                 }
+             }
+             if (omni.getProviderCapabilities('kugou').userLibrary) {
+@@ -222,11 +222,11 @@ export const useKugouLibrary = () => {
+                 while (hasMore && offset < 1000) {
+                     const page = await omni.getProviderUserPlaylists('kugou', user.id, { limit: PAGE_SIZE, offset });
+                     collections.push(...page.items);
+-                    console.info('[KugouLibrary] playlists:page', {
++                    console.info(`[KugouLibrary] playlists:page ${JSON.stringify({
+                         offset,
+                         itemCount: page.items.length,
+                         hasMore: page.hasMore,
+-                    });
++                    })}`);
+                     hasMore = page.hasMore && page.nextOffset > offset;
+                     offset = page.nextOffset;
+                 }
+@@ -279,12 +279,12 @@ export const useKugouLibrary = () => {
+                 freshness: 'fresh',
+                 lastUpdatedAt: snapshot.savedAt,
+             });
+-            console.info('[KugouLibrary] refresh:complete', {
++            console.info(`[KugouLibrary] refresh:complete ${JSON.stringify({
+                 collectionCount: collections.length,
+                 likedSongCount: nextLikedSongIds.length,
+                 likedSongFileIdCount: Object.keys(nextLikedSongFileIds).length,
+                 likedSongsResolved,
+-            });
++            })}`);
+         } catch (error) {
+             const message = error instanceof Error ? error.message : 'kugou_library_failed';
+             updateAccount('kugou', {
+diff --git a/src/services/onlineMusic/kugouProvider.ts b/src/services/onlineMusic/kugouProvider.ts
+index 6d9c7ff..10eb473 100644
+--- a/src/services/onlineMusic/kugouProvider.ts
++++ b/src/services/onlineMusic/kugouProvider.ts
+@@ -30,7 +30,10 @@ import {
+ import { removeProviderSessionValue, readProviderSessionValue } from './providerStorage';
+ import {
+     clearKugouWebSession,
++    fetchKugouWebPlaylists,
++    fetchKugouWebPlaylistTracks,
+     fetchKugouWebUser,
++    hasKugouWebSession,
+     loginKugouWithCode,
+     sendKugouLoginCode,
+ } from './kugouWebAuth';
+@@ -825,8 +828,26 @@ const getKugouLyrics = async (song: SongResult) => {
+     };
+ };
+ 
++/**
++ * 账号类请求的分发：有页面直连登录态时走页面（kugouWebAuth 里的两个账号接口），否则走实例。
++ * 目前页面只实现了歌单列表与歌单歌曲——正好是「我的歌单」和「我喜欢」需要的那两条。
++ */
++const requestKugouAccount = async (
++    operation: 'user_playlist' | 'playlist_track_all',
++    params: Record<string, string | number>,
++): Promise<any> => {
++    if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE && hasKugouWebSession()) {
++        if (operation === 'user_playlist') {
++            const userid = String(params.userid ?? readProviderSessionValue('kugou', 'userid') ?? '');
++            return fetchKugouWebPlaylists(userid, Number(params.page ?? 1), Number(params.pagesize ?? 100));
++        }
++        return fetchKugouWebPlaylistTracks(String(params.id ?? ''), Number(params.page ?? 1), Number(params.pagesize ?? 100));
++    }
++    return requestKugou(operation, params);
++};
++
+ const getKugouUserPlaylistItems = async (userId: MediaId): Promise<any[]> => {
+-    const response = await requestKugou('user_playlist', {
++    const response = await requestKugouAccount('user_playlist', {
+         userid: String(userId),
+         page: 1,
+         pagesize: 100,
+@@ -903,7 +924,7 @@ const getKugouPlaylistFallbackCover = async (rawPlaylist: any): Promise<string |
+     const globalCollectionId = valueOf(rawPlaylist, 'global_collection_id', 'globalCollectionId');
+     if (globalCollectionId === undefined || globalCollectionId === null) return undefined;
+ 
+-    const response = await requestKugou('playlist_track_all', {
++    const response = await requestKugouAccount('playlist_track_all', {
+         id: String(globalCollectionId),
+         page: 1,
+         pagesize: 1,
+@@ -956,7 +977,7 @@ const getKugouPlaylistTrackSongs = async (
+     const songs: UnifiedSong[] = [];
+     let completed = false;
+     for (let page = 1; page <= KUGOU_LIKED_TRACK_MAX_PAGES; page += 1) {
+-        const response = await requestKugou('playlist_track_all', {
++        const response = await requestKugouAccount('playlist_track_all', {
+             id: globalCollectionId,
+             page,
+             pagesize: KUGOU_MAX_PAGE_SIZE,
+@@ -1058,16 +1079,26 @@ const KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES: ProviderCapabilities = {
+     userAlbums: false,
+ };
+ 
++/**
++ * 已用页面直连账号登录的匿名公开模式：在匿名能力之上补上「我的歌单」和「我喜欢」。
++ * 账号接口只有两条（歌单列表 / 歌单歌曲），红心、歌单订阅、云盘、日推仍然没有实现。
++ */
++const KUGOU_WEB_SESSION_CAPABILITIES: ProviderCapabilities = {
++    ...KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES,
++    userLibrary: true,
++    playlists: true,
++    likes: true,
++};
++
+ export const kugouProvider: OnlineMusicProvider = {
+     id: 'kugou',
+     displayName: 'KuGou Music',
+     shortName: '酷狗',
+     getAvailability: getKugouTransportAvailability,
+-    // 能力随取数模式而变，理由见上面两个常量。
++    // 能力随取数模式而变，理由见上面几个常量；登录之后还会多出歌单与红心。
+     get capabilities(): ProviderCapabilities {
+-        return getKugouTransportMode() === 'anonymous-public'
+-            ? KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES
+-            : KUGOU_FULL_CAPABILITIES;
++        if (getKugouTransportMode() !== 'anonymous-public') return KUGOU_FULL_CAPABILITIES;
++        return hasKugouWebSession() ? KUGOU_WEB_SESSION_CAPABILITIES : KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES;
+     },
+     normalizeSong: normalizeKugouSong,
+     normalizeUser,
+@@ -1411,7 +1442,7 @@ export const kugouProvider: OnlineMusicProvider = {
+     library: {
+         async getUserPlaylists(userId, limit, offset) {
+             const requestLimit = Math.min(Math.max(1, limit), KUGOU_MAX_PAGE_SIZE);
+-            const response = await requestKugou('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
++            const response = await requestKugouAccount('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
+             const rawItems = listOf(response);
+             const playlistItems = rawItems
+                 .filter(item => getKugouUserCollectionType(item) === 'playlist')
+@@ -1426,7 +1457,7 @@ export const kugouProvider: OnlineMusicProvider = {
+         },
+         async getUserAlbums(userId, limit, offset) {
+             const requestLimit = Math.min(Math.max(1, limit), KUGOU_MAX_PAGE_SIZE);
+-            const response = await requestKugou('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
++            const response = await requestKugouAccount('user_playlist', { userid: String(userId), page: Math.floor(offset / requestLimit) + 1, pagesize: requestLimit });
+             const rawItems = listOf(response);
+             const items = rawItems
+                 .filter(item => getKugouUserCollectionType(item) === 'album')
+@@ -1453,7 +1484,7 @@ export const kugouProvider: OnlineMusicProvider = {
+             if (recommendationPage) return recommendationPage;
+ 
+             const requestLimit = Math.min(Math.max(1, limit), KUGOU_MAX_PAGE_SIZE);
+-            const response = await requestKugou('playlist_track_all', { id: String(id), pagesize: requestLimit, page: Math.floor(offset / requestLimit) + 1 });
++            const response = await requestKugouAccount('playlist_track_all', { id: String(id), pagesize: requestLimit, page: Math.floor(offset / requestLimit) + 1 });
+             return pageOf(listOf(response).map(normalizeKugouSong), response, requestLimit, offset);
+         },
+         async getCloudTracks(limit, offset) {
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index f63a2bb..daa7b50 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -417,7 +417,80 @@ export const fetchKugouWebUser = async (): Promise<ProviderUser | null> => {
+     };
+ };
+ 
++/**
++ * 账号接口的 UA：与官方客户端一致（登录服务与账号服务认不同的客户端类型）。
++ */
++const API_UA = 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi';
++
++/** 账号会话；没有就抛错——账号接口不像资料那样「没有就返回 null」，调用方都是已登录路径。 */
++const requireSession = (): KugouWebSession => {
++    const session = readKugouWebSession();
++    if (!session) throw new Error('KuGou account request needs a signed-in session');
++    return session;
++};
++
++/**
++ * 我的歌单（`/v7/get_all_list`，POST）。返回酷狗原始应答，归一化交给 provider。
++ */
++export const fetchKugouWebPlaylists = async (
++    userid: string,
++    page: number,
++    pagesize: number,
++): Promise<any> => {
++    const session = requireSession();
++    const accountId = Number(userid || session.userid) || 0;
++    const body = JSON.stringify({
++        userid: accountId,
++        token: session.token,
++        total_ver: 979,
++        type: 2,
++        page,
++        pagesize,
++    });
++    const params: Record<string, string | number> = {
++        ...commonParams(),
++        userid: String(accountId),
++        token: session.token,
++        plat: 1,
++    };
++    const target = `https://gateway.kugou.com/v7/get_all_list?${query({ ...params, signature: sign(params, body) })}`;
++    return proxyJson(target, {
++        method: 'POST',
++        body,
++        headers: clientHeaders({
++            'Content-Type': 'application/json',
++            'x-router': 'cloudlist.service.kugou.com',
++            'User-Agent': API_UA,
++        }),
++    });
++};
++
++/**
++ * 歌单里的歌曲（`/pubsongs/v2/get_other_list_file_nofilt`，GET）。
++ * 「我喜欢」也是一张歌单，所以红心列表走同一条。
++ */
++export const fetchKugouWebPlaylistTracks = async (
++    globalCollectionId: string,
++    page: number,
++    pagesize: number,
++): Promise<any> => {
++    const params: Record<string, string | number> = {
++        ...commonParams(),
++        area_code: 1,
++        begin_idx: Math.max(0, page - 1) * pagesize,
++        plat: 1,
++        type: 1,
++        mode: 1,
++        personal_switch: 1,
++        extend_fields: 'abtags,hot_cmt,popularization',
++        pagesize,
++        global_collection_id: globalCollectionId,
++    };
++    const target = `https://gateway.kugou.com/pubsongs/v2/get_other_list_file_nofilt?${query({ ...params, signature: sign(params) })}`;
++    return proxyJson(target, { headers: clientHeaders({ 'User-Agent': API_UA }) });
++};
++
+ /** 清掉本地登录态（服务端登出不重要：token 过期就自然失效）。 */
+ export const clearKugouWebSession = (): void => {
+-    [TOKEN_KEY, USERID_KEY, DFID_KEY].forEach(key => removeProviderSessionValue('kugou', key));
++    [TOKEN_KEY, USERID_KEY, DFID_KEY, LOGIN_AT_KEY].forEach(key => removeProviderSessionValue('kugou', key));
+ };

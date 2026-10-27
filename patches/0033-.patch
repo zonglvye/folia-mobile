@@ -1,0 +1,484 @@
+From ba1c79737405dedb2066e7ac6606f0760ee1450b Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 13:12:10 +0800
+Subject: [PATCH 33/90] =?UTF-8?q?=E6=89=8B=E6=9C=BA=E4=B8=8A=E3=80=8C?=
+ =?UTF-8?q?=E2=8B=AF=E3=80=8D=E8=8F=9C=E5=8D=95=E6=94=B9=E6=88=90=E4=BB=8E?=
+ =?UTF-8?q?=E5=B1=8F=E5=B9=95=E5=BA=95=E9=83=A8=E5=8D=87=E8=B5=B7=E7=9A=84?=
+ =?UTF-8?q?=E9=9D=A2=E6=9D=BF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户实测（816×377 手机横屏）：从首页点进歌单后，中央那张封面被「⋯」弹出的黑色菜单压住，叫「显示不全」。
+量出来的数：缝宽 300、墙只剩 516、最前排封面 517（本来就放不下），菜单 241×92、x 从 285 到 526 ——
+正好压在墙中央那张封面上。
+
+- 新增 BravaisSeamMenuSheet：「⋯」菜单（集合层与首页工具格共用）在窄视口改成底部面板——贴屏幕底 10px、
+  定宽 min(440, 100vw−24) 居中、行高收紧到一次放得下六项，上面铺一层遮罩，点遮罩收起；宽视口照旧从
+  按钮行上方弹出，行为不变。
+- 面板用 portal 挂到 stage 根节点（与账户的平台列表同一处）：缝的内容层带变换，position: fixed
+  会被那个变换当成包含块，留在缝里底部面板落不到屏幕底。面板样式只认 JS 加的 .is-sheet，不用媒体查询——
+  阈值只留 isNarrowViewport 一处（width < 900），max-width: 900px 会在正好 900 上命中，错开一次就会把
+  没挂 portal 的菜单固定到带变换的缝里、飞出屏幕。
+- 两个调用方的「点别处收起」补了 closest('[data-bravais-seam-menu]') 例外：菜单挂出去之后不在锚点里，
+  不然面板会在 pointerdown 阶段就被收掉、里面的项永远点不到。
+- 菜单的 DOM 标记（data-bravais-seam-menu / role / data-bravais-seam-action）保持不变；Esc 收起仍由缝上的
+  onKeyDown 处理（React 事件按树冒泡，portal 不影响）。
+
+用例：新增 bravaisSeamMenuSheet.spec.ts（2 条：手机档量贴底距离、居中、宽度上限、整块在视口内、点遮罩收起；
+桌面档量菜单底边仍在「⋯」按钮上方且没有遮罩）；bravaisHome 的「on the spine the tools are one column」跟着改——
+那个尺寸本来就是窄视口，菜单现在挂在 stage 上，从页面级找它。
+---
+ .../suites/bravais/BravaisSeamCollection.tsx  |  71 ++++++------
+ .../suites/bravais/BravaisSeamHomeTools.tsx   |  17 ++-
+ .../suites/bravais/BravaisSeamMenuSheet.tsx   |  88 +++++++++++++++
+ .../suites/bravais/bravaisCollection.css      |  41 +++++++
+ test/component/bravaisHome.spec.ts            |  12 ++-
+ test/component/bravaisSeamMenuSheet.spec.ts   | 101 ++++++++++++++++++
+ 6 files changed, 282 insertions(+), 48 deletions(-)
+ create mode 100644 src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+ create mode 100644 test/component/bravaisSeamMenuSheet.spec.ts
+
+diff --git a/src/library/suites/bravais/BravaisSeamCollection.tsx b/src/library/suites/bravais/BravaisSeamCollection.tsx
+index 3ff6fa2..2116fe1 100644
+--- a/src/library/suites/bravais/BravaisSeamCollection.tsx
++++ b/src/library/suites/bravais/BravaisSeamCollection.tsx
+@@ -11,6 +11,7 @@ import type {
+ import { BravaisSeamFlipText } from './BravaisSeamFlip';
+ import { useBravaisReducedTransitions } from './bravaisMotion';
+ import { bravaisPopMotion, bravaisRevealMotion } from './bravaisSeamMotion';
++import { BravaisSeamMenu } from './BravaisSeamMenuSheet';
+ import './bravaisCollection.css';
+ 
+ // src/library/suites/bravais/BravaisSeamCollection.tsx
+@@ -124,11 +125,13 @@ export const BravaisSeamCollectionMenu: React.FC<{
+     const items = collection?.menu ?? [];
+     const hasMenu = items.length > 0 || Boolean(fold);
+ 
+-    // 菜单开着时点别处收起（缝里、墙上都算）。
++    // 菜单开着时点别处收起（缝里、墙上都算）。窄视口下面板被 portal 挂到 stage 根节点上，不再在锚点里，
++    // 所以点菜单内部的那一下要放行，否则面板在 pointerdown 阶段就被收掉、里面的按钮永远点不到。
+     useEffect(() => {
+         if (!isOpen) return undefined;
+         const onPointerDown = (event: PointerEvent) => {
+             if (event.target instanceof Node && anchorRef.current?.contains(event.target)) return;
++            if (event.target instanceof Element && event.target.closest('[data-bravais-seam-menu]')) return;
+             setIsOpen(false);
+         };
+         document.addEventListener('pointerdown', onPointerDown, true);
+@@ -158,42 +161,38 @@ export const BravaisSeamCollectionMenu: React.FC<{
+                     </button>
+                 )}
+             </div>
+-            <AnimatePresence>
+-                {isOpen && (
+-                    <motion.div key="menu" className="bravais-seam-menu" role="menu" data-bravais-seam-menu {...pop}>
+-                        {items.map(item => (
+-                            <button
+-                                key={item.id}
+-                                type="button"
+-                                role="menuitem"
+-                                className={item.danger ? 'is-danger' : undefined}
+-                                disabled={item.disabled}
+-                                data-bravais-seam-action={item.id}
+-                                onClick={() => {
+-                                    setIsOpen(false);
+-                                    item.run();
+-                                }}
+-                            >
+-                                {item.label}
+-                            </button>
+-                        ))}
+-                        {fold && items.length > 0 && <div className="bravais-seam-menu-rule" role="separator" />}
+-                        {fold && (
+-                            <button
+-                                type="button"
+-                                role="menuitem"
+-                                data-bravais-seam-action="hide"
+-                                onClick={() => {
+-                                    setIsOpen(false);
+-                                    fold.run();
+-                                }}
+-                            >
+-                                {fold.label}
+-                            </button>
+-                        )}
+-                    </motion.div>
++            <BravaisSeamMenu open={isOpen} pop={pop} reduced={reduced}>
++                {items.map(item => (
++                    <button
++                        key={item.id}
++                        type="button"
++                        role="menuitem"
++                        className={item.danger ? 'is-danger' : undefined}
++                        disabled={item.disabled}
++                        data-bravais-seam-action={item.id}
++                        onClick={() => {
++                            setIsOpen(false);
++                            item.run();
++                        }}
++                    >
++                        {item.label}
++                    </button>
++                ))}
++                {fold && items.length > 0 && <div className="bravais-seam-menu-rule" role="separator" />}
++                {fold && (
++                    <button
++                        type="button"
++                        role="menuitem"
++                        data-bravais-seam-action="hide"
++                        onClick={() => {
++                            setIsOpen(false);
++                            fold.run();
++                        }}
++                    >
++                        {fold.label}
++                    </button>
+                 )}
+-            </AnimatePresence>
++            </BravaisSeamMenu>
+             </div>
+             <AnimatePresence initial={false}>
+                 {collection?.notice && (
+diff --git a/src/library/suites/bravais/BravaisSeamHomeTools.tsx b/src/library/suites/bravais/BravaisSeamHomeTools.tsx
+index 6bc046a..21521d6 100644
+--- a/src/library/suites/bravais/BravaisSeamHomeTools.tsx
++++ b/src/library/suites/bravais/BravaisSeamHomeTools.tsx
+@@ -1,5 +1,4 @@
+ import React, { useEffect, useRef, type KeyboardEvent } from 'react';
+-import { AnimatePresence, motion } from 'framer-motion';
+ import {
+     Disc3,
+     EyeOff,
+@@ -17,6 +16,7 @@ import { BRAVAIS_SPECIAL_ICONS } from './bravaisSpecialIcons';
+ import { closeBravaisHomePopover, setBravaisHomeOpenRequest, setBravaisHomePopover, useBravaisHomeUiStore } from './bravaisHomeUiStore';
+ import { useBravaisReducedTransitions } from './bravaisMotion';
+ import { bravaisPopMotion } from './bravaisSeamMotion';
++import { BravaisSeamMenu } from './BravaisSeamMenuSheet';
+ 
+ // src/library/suites/bravais/BravaisSeamHomeTools.tsx
+ // 首页窄缝底部的工具格。
+@@ -85,7 +85,8 @@ const BravaisSeamHomeTools: React.FC<{
+     const jumps = menuShortcuts ?? [];
+     const hasMenu = jumps.length > 0 || page.length > 0 || local.length > 0 || app.length > 0;
+     const open = menuOpen && hasMenu && !compact;
+-    const pop = bravaisPopMotion('above', useBravaisReducedTransitions());
++    const reduced = useBravaisReducedTransitions();
++    const pop = bravaisPopMotion('above', reduced);
+ 
+     // 书脊上点了「⋯」：缝展开成窄缝后在这里把菜单打开。
+     useEffect(() => {
+@@ -102,11 +103,13 @@ const BravaisSeamHomeTools: React.FC<{
+         if (shownRef.current) closeBravaisHomePopover('menu');
+     }, []);
+ 
+-    // 菜单开着时点别处收起（缝里、墙上都算）。
++    // 菜单开着时点别处收起（缝里、墙上都算）。窄视口下面板被 portal 挂到 stage 根节点上，不再在 dock 里，
++    // 所以点菜单内部的那一下要放行。
+     useEffect(() => {
+         if (!open) return undefined;
+         const onPointerDown = (event: PointerEvent) => {
+             if (event.target instanceof Node && dockRef.current?.contains(event.target)) return;
++            if (event.target instanceof Element && event.target.closest('[data-bravais-seam-menu]')) return;
+             closeBravaisHomePopover('menu');
+         };
+         document.addEventListener('pointerdown', onPointerDown, true);
+@@ -150,9 +153,7 @@ const BravaisSeamHomeTools: React.FC<{
+ 
+     return (
+         <div ref={dockRef} className="bravais-seam-dock" onKeyDown={onKeyDown}>
+-            <AnimatePresence>
+-                {open && (
+-                    <motion.div key="menu" className="bravais-seam-menu is-home" role="menu" aria-label={home.menuLabel} data-bravais-seam-menu {...pop}>
++            <BravaisSeamMenu open={open} isHome pop={pop} reduced={reduced} ariaLabel={home.menuLabel}>
+                         {jumps.map(shortcut => {
+                             const Icon = BRAVAIS_SPECIAL_ICONS[shortcut.special];
+                             return (
+@@ -173,9 +174,7 @@ const BravaisSeamHomeTools: React.FC<{
+                         ))}
+                         {(page.length > 0 || local.length > 0) && app.length > 0 && <div className="bravais-seam-menu-rule" role="separator" />}
+                         {app.map(menuTool)}
+-                    </motion.div>
+-                )}
+-            </AnimatePresence>
++            </BravaisSeamMenu>
+             <div className="bravais-seam-tools">
+                 {dock.map((tool) => {
+                     const Icon = TOOL_ICONS[tool.id];
+diff --git a/src/library/suites/bravais/BravaisSeamMenuSheet.tsx b/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+new file mode 100644
+index 0000000..5a937b8
+--- /dev/null
++++ b/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+@@ -0,0 +1,88 @@
++import React, { useEffect, useState } from 'react';
++import { createPortal } from 'react-dom';
++import { AnimatePresence, motion } from 'framer-motion';
++import { isNarrowViewport } from './bravaisSeamLevel';
++import type { bravaisPopMotion } from './bravaisSeamMotion';
++
++// src/library/suites/bravais/BravaisSeamMenuSheet.tsx
++// 缝里的「⋯」菜单（集合层的「⋯ 更多」与首页工具格共用）。
++//
++// 宽视口照旧从按钮行上方弹出；**手机横屏（窄视口）改成从屏幕底部升起的面板**。
++// 为什么：窄视口上缝本身只有 300px（BRAVAIS_SEAM_FULL_WIDTH），从缝里弹出的菜单会往墙上伸出两百多像素。
++// 用户实测「点进歌单后封面显示不全」——量出来的菜单是 241×92、x 从 285 到 526，正好压在墙中央那张封面上。
++//
++// 面板用 portal 挂到 stage 根节点（账户的平台列表挂的也是这里），不留在缝里：缝的内容层带着变换，
++// `position: fixed` 会被那个变换当成包含块，底部面板就落不到屏幕底。窄视口下再铺一层遮罩，点它收起。
++//
++// 两条约束：菜单的 DOM 标记（data-bravais-seam-menu / role / data-bravais-seam-action）保持不变，用例按它找；
++// 事件照旧按 React 树冒泡（portal 不改变这一点），所以缝上的 onKeyDown（Esc 收起）仍然收得到菜单里的按键。
++// 但文档级的「点别处收起」是 DOM 监听，挂出去之后菜单不再在锚点里——两个调用方都补了一条
++// `closest('[data-bravais-seam-menu]')` 的例外。
++
++type BravaisSeamMenuProps = {
++    open: boolean;
++    /** 首页工具格的菜单另有样式（is-home）。 */
++    isHome?: boolean;
++    /** 宽视口的弹出动画（bravaisPopMotion 的返回值）。 */
++    pop: ReturnType<typeof bravaisPopMotion>;
++    /** 窄视口上面板自己的进场动画参数。 */
++    reduced?: boolean;
++    ariaLabel?: string;
++    children: React.ReactNode;
++};
++
++/** 与 bravaisConstants 的 BRAVAIS_NARROW_VIEWPORT_PX 同一个门槛（窄视口默认收成书脊那条）。 */
++const isNarrowNow = () => typeof window !== 'undefined' && isNarrowViewport(window.innerWidth);
++
++/** 视口宽度是否落在窄视口那档；跟着窗口尺寸变。 */
++const useNarrowViewport = (): boolean => {
++    const [narrow, setNarrow] = useState(isNarrowNow);
++    useEffect(() => {
++        const update = () => setNarrow(isNarrowNow());
++        update();
++        window.addEventListener('resize', update);
++        return () => window.removeEventListener('resize', update);
++    }, []);
++    return narrow;
++};
++
++/** 面板的挂载点：bravais 的 stage 根节点（拿不到时退回 body）。 */
++const useSheetHost = (active: boolean): HTMLElement | null => {
++    const [host, setHost] = useState<HTMLElement | null>(null);
++    useEffect(() => {
++        if (!active) return;
++        setHost(document.querySelector<HTMLElement>('[data-library-stage="bravais"]') ?? document.body);
++    }, [active]);
++    return host;
++};
++
++export const BravaisSeamMenu: React.FC<BravaisSeamMenuProps> = ({ open, isHome, pop, reduced = false, ariaLabel, children }) => {
++    const narrow = useNarrowViewport();
++    const host = useSheetHost(narrow && open);
++    const className = `bravais-seam-menu${isHome ? ' is-home' : ''}${narrow ? ' is-sheet' : ''}`;
++    // 窄视口从底部升起：位移小、时长与宽视口的弹出同一档（bravaisPopMotion 的量级）。
++    const sheetMotion = narrow ? {
++        initial: reduced ? { opacity: 0 } : { opacity: 0, y: 24 },
++        animate: { opacity: 1, y: 0, pointerEvents: 'auto' as const },
++        exit: reduced ? { opacity: 0 } : { opacity: 0, y: 24 },
++        transition: { duration: reduced ? 0 : 0.18 },
++    } : pop;
++    const menu = (
++        <AnimatePresence>
++            {open && (
++                <motion.div key="menu" className={className} role="menu" aria-label={ariaLabel}
++                    data-bravais-seam-menu data-bravais-seam-menu-sheet={narrow ? 'true' : undefined} {...sheetMotion}>
++                    {children}
++                </motion.div>
++            )}
++        </AnimatePresence>
++    );
++    if (!host) return menu;
++    return createPortal(
++        <>
++            {open && <div className="bravais-seam-menu-scrim" data-bravais-seam-menu-scrim aria-hidden />}
++            {menu}
++        </>,
++        host,
++    );
++};
+diff --git a/src/library/suites/bravais/bravaisCollection.css b/src/library/suites/bravais/bravaisCollection.css
+index a89f78b..52e4f87 100644
+--- a/src/library/suites/bravais/bravaisCollection.css
++++ b/src/library/suites/bravais/bravaisCollection.css
+@@ -231,6 +231,47 @@
+ 
+ .bravais-seam-notice.is-error { color: color-mix(in srgb, #f87171 80%, var(--text-primary, #fff)); }
+ 
++/* 窄视口（手机横屏）的底部面板。判定只认 JS 加上的 `.is-sheet`（BravaisSeamMenuSheet 按 isNarrowViewport 决定，
++   阈值只有 BRAVAIS_NARROW_VIEWPORT_PX 一处）——这里不用媒体查询：`max-width: 900px` 会在正好 900px 上命中，
++   而 JS 那一档是 `width < 900`，两边错开一次就会把没挂 portal 的菜单固定到带变换的缝里、飞出屏幕。
++   缝在这一档只有 300px 宽，从缝里弹出的菜单会往墙上伸出两百多像素，正好压住墙中央那张封面
++   （用户实测：「点进歌单后封面被黑菜单盖住，显示不全」）。 */
++.bravais-seam-menu.is-sheet {
++    position: fixed;
++    left: 0;
++    right: 0;
++    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
++    top: auto;
++    z-index: 61;
++    width: min(440px, calc(100vw - 24px));
++    max-height: 62vh;
++    margin-inline: auto;
++    padding: 8px;
++    gap: 0;
++    overflow-y: auto;
++    border-radius: 16px;
++    /* 面板自己带不透明底与阴影：手机上面板离内容更近，半透明会让下面的封面透上来。 */
++    background: color-mix(in srgb, var(--bg-color, #070707) 96%, var(--text-primary, #f7f4ee));
++    box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 14%, transparent), 0 -8px 32px rgb(0 0 0 / 44%);
++}
++
++/* 行高收紧：手机横屏视口只有 377px 高，六项菜单要一次放得下。 */
++.bravais-seam-menu.is-sheet button {
++    padding: 7px 10px;
++}
++
++.bravais-seam-menu.is-sheet > .bravais-seam-menu-rule {
++    margin: 4px 6px;
++}
++
++/* 遮罩：把墙压暗，点它收起（缝自己的「点别处收起」监听会收到这一下）。只在底部面板那一档渲染。 */
++.bravais-seam-menu-scrim {
++    position: fixed;
++    inset: 0;
++    z-index: 60;
++    background: rgb(0 0 0 / 42%);
++}
++
+ /* ---------- 表单态 ---------- */
+ 
+ .bravais-seam-form {
+diff --git a/test/component/bravaisHome.spec.ts b/test/component/bravaisHome.spec.ts
+index d62869f..0209780 100644
+--- a/test/component/bravaisHome.spec.ts
++++ b/test/component/bravaisHome.spec.ts
+@@ -933,10 +933,16 @@ test.describe('[bravais-only] the narrow home seam layout', () => {
+         await seam(page).locator('.bravais-seam-tools [data-bravais-seam-action="more"]').click();
+         await expect(seam(page)).toHaveAttribute('data-bravais-seam', 'home');
+         await expect.poll(async () => Math.round((await seam(page).boundingBox())?.width ?? 0)).toBe(120);
+-        await expect(seam(page).locator('[data-bravais-seam-menu]')).toBeVisible();
+-        expect(await menuItems(page)).toEqual(['filter', 'manage-hidden']);
++        // 这个宽度已经是窄视口（窗口 900 减去滚动条）：菜单按 BravaisSeamMenuSheet 走底部面板，挂在 stage 根节点上
++        // 而不在缝里，所以从页面级找它。宽视口那一档仍在缝里，见 bravaisSeamMenuSheet.spec.ts。
++        const sheetMenu = page.locator('[data-bravais-seam-menu]');
++        await expect(sheetMenu).toBeVisible();
++        await expect(sheetMenu).toHaveAttribute('data-bravais-seam-menu-sheet', 'true');
++        expect(await sheetMenu.locator('> *').evaluateAll(elements => elements.map(
++            element => (element as HTMLElement).dataset.bravaisSeamAction ?? (element.getAttribute('role') === 'separator' ? 'rule' : '?'),
++        ))).toEqual(['filter', 'manage-hidden']);
+         await page.keyboard.press('Escape');
+-        await expect(seam(page).locator('[data-bravais-seam-menu]')).toHaveCount(0);
++        await expect(sheetMenu).toHaveCount(0);
+         await expect(seam(page)).toHaveAttribute('data-bravais-seam', 'home');
+     });
+ 
+diff --git a/test/component/bravaisSeamMenuSheet.spec.ts b/test/component/bravaisSeamMenuSheet.spec.ts
+new file mode 100644
+index 0000000..0c071c3
+--- /dev/null
++++ b/test/component/bravaisSeamMenuSheet.spec.ts
+@@ -0,0 +1,101 @@
++import type { Page } from '@playwright/test';
++import { expect, test } from './fixtures';
++import { buildServiceStubModule, LOCAL_MUSIC_SERVICE_ROUTE } from '../../dev/probes/homeBehavior/serviceStubModule';
++import '../../dev/probes/homeBehavior/probeApi';
++
++// test/component/bravaisSeamMenuSheet.spec.ts
++// 「⋯」菜单在两种视口下的开法（2026-10 用户实测：手机上点进歌单后，从缝里弹出的菜单压住了墙中央那张封面，
++// 叫「显示不全」）。量的结果是菜单 241×92、x 从 285 到 526，而缝只有 300px、墙只有 516px。
++//
++// 窄视口（≤ 900，与 BRAVAIS_NARROW_VIEWPORT_PX 同一个门槛）：菜单是挂在 stage 根节点上的底部面板 ——
++// 贴屏幕底、定宽居中、压一层遮罩，点遮罩收起。宽视口照旧从按钮行上方弹出，不挂 portal、不铺遮罩。
++
++const PHONE = { width: 816, height: 377 } as const;
++const DESKTOP = { width: 1440, height: 1100 } as const;
++
++const stage = (page: Page) => page.locator('[data-library-stage="bravais"]');
++const seam = (page: Page) => page.locator('[data-bravais-seam]');
++const menu = (page: Page) => page.locator('[data-bravais-seam-menu]');
++const settled = (page: Page) => expect(stage(page)).not.toHaveAttribute('data-bravais-settling', /.*/, { timeout: 10_000 });
++
++/** 一张此刻完整在视口里、没被缝盖住的首页卡片（窄矮视口上不能沿用「屏幕中部」那套判断）。 */
++const visibleCardSlot = (page: Page) => page.evaluate(() => {
++    const seamRect = document.querySelector('[data-bravais-seam]')?.getBoundingClientRect();
++    const fits = (rect: DOMRect) => rect.width > 40 && rect.height > 40
++        && rect.left >= 0 && rect.top >= 0
++        && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight
++        && (!seamRect || seamRect.width < 1 || rect.right < seamRect.left - 4 || rect.left > seamRect.right + 4);
++    const tile = [...document.querySelectorAll<HTMLElement>('.bravais-tile[data-library-card]')]
++        .find(element => fits(element.getBoundingClientRect()));
++    return tile?.dataset.bravaisSlot ?? null;
++});
++
++/** 首页 → 点开一张卡片进集合 → 打开「⋯」菜单。 */
++const openCollectionMenu = async (
++    mount: (id: string) => Promise<unknown>,
++    page: Page,
++    viewport: { width: number; height: number },
++) => {
++    await page.setViewportSize(viewport);
++    await page.route(LOCAL_MUSIC_SERVICE_ROUTE, route => route.fulfill({ contentType: 'text/javascript', body: buildServiceStubModule() }));
++    await mount('homeBehavior');
++    await expect.poll(() => page.evaluate(() => window.__homeProbe?.ready() ?? false), { timeout: 30_000 }).toBe(true);
++    await page.evaluate(() => window.__homeProbe!.setSuite('bravais'));
++    await expect(stage(page)).toHaveAttribute('data-bravais-layer', 'home:playlist', { timeout: 15_000 });
++    await expect(page.locator('[data-library-card]').first()).toBeAttached();
++    await settled(page);
++    await page.evaluate(() => window.__homeProbe!.setNowPlaying('online:probe:loaded'));
++
++    const slot = await visibleCardSlot(page);
++    expect(slot).not.toBeNull();
++    await page.locator(`[data-bravais-slot="${slot}"]`).locator('article').click();
++    await expect(page.locator('.bravais-tile[data-library-card]')).toHaveCount(0, { timeout: 10_000 });
++    await settled(page);
++
++    await seam(page).locator('[data-bravais-seam-action="more"]').click();
++    await expect(menu(page)).toBeVisible();
++    // 出场动画放完再量：面板初始带 y 位移。
++    await page.waitForTimeout(400);
++};
++
++test.describe('[bravais-only] the 「⋯」 menu', () => {
++    test('on a phone it rises from the bottom of the screen, with a scrim, outside the seam', async ({ mount, page }) => {
++        await openCollectionMenu(mount, page, PHONE);
++
++        await expect(menu(page)).toHaveAttribute('data-bravais-seam-menu-sheet', 'true');
++        // 挂在 stage 根节点上，不在缝里（缝的内容层带变换，留在里面 fixed 会相对缝定位）。
++        await expect(seam(page).locator('[data-bravais-seam-menu]')).toHaveCount(0);
++        await expect(stage(page).locator('[data-bravais-seam-menu]')).toHaveCount(1);
++        await expect(page.locator('[data-bravais-seam-menu-scrim]')).toHaveCount(1);
++
++        const box = (await menu(page).boundingBox())!;
++        // 贴底：面板底边离屏幕底 10px 上下（留一点行差给圆角与安全区）。
++        expect(Math.abs((box.y + box.height) - (PHONE.height - 10))).toBeLessThanOrEqual(3);
++        // 定宽居中：不超过 440，且左右留白相等。
++        expect(box.width).toBeLessThanOrEqual(440);
++        expect(Math.abs((box.x + box.width / 2) - PHONE.width / 2)).toBeLessThanOrEqual(2);
++        // 面板整个在视口里（不再往墙上伸出屏幕）。
++        expect(box.y).toBeGreaterThanOrEqual(0);
++        expect(box.x).toBeGreaterThanOrEqual(0);
++        expect(box.x + box.width).toBeLessThanOrEqual(PHONE.width);
++
++        // 点遮罩收起：菜单消失，且没有触发菜单里的任何一项。
++        await page.locator('[data-bravais-seam-menu-scrim]').click({ position: { x: 8, y: 8 } });
++        await expect(menu(page)).toHaveCount(0);
++        await expect(page.locator('[data-bravais-seam-menu-scrim]')).toHaveCount(0);
++    });
++
++    test('on a desktop it keeps popping up above the button row, with no scrim', async ({ mount, page }) => {
++        await openCollectionMenu(mount, page, DESKTOP);
++
++        await expect(menu(page)).not.toHaveAttribute('data-bravais-seam-menu-sheet', 'true');
++        await expect(page.locator('[data-bravais-seam-menu-scrim]')).toHaveCount(0);
++        // 仍在缝里（原地弹出，不挂 portal）。
++        await expect(seam(page).locator('[data-bravais-seam-menu]')).toHaveCount(1);
++
++        const box = (await menu(page).boundingBox())!;
++        const moreButton = (await seam(page).locator('[data-bravais-seam-action="more"]').boundingBox())!;
++        // 菜单底边在「⋯」按钮上方（悬浮，不推挤按钮行）。
++        expect(box.y + box.height).toBeLessThanOrEqual(moreButton.y + 1);
++    });
++});

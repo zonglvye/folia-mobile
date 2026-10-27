@@ -1,0 +1,85 @@
+From 66b96170e2175f42f7e8126dcec36bb4f7559ac1 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:47:50 +0800
+Subject: [PATCH 71/90] =?UTF-8?q?chore(kugou):=20=E7=99=BB=E5=BD=95?=
+ =?UTF-8?q?=E7=9B=B8=E5=85=B3=E6=97=A5=E5=BF=97=E6=94=B9=E6=88=90=E5=AD=97?=
+ =?UTF-8?q?=E7=AC=A6=E4=B8=B2=EF=BC=8CArkWeb=20=E9=87=8C=E5=AF=B9=E8=B1=A1?=
+ =?UTF-8?q?=E5=8F=AA=E6=98=BE=E7=A4=BA=20[object=20Object]?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+壳日志里 console.info('...', { obj }) 输出的是 [object Object]，上一轮加的
+dataKeys / decryptedKeys / userId 在真机日志里根本看不见，等于没加。
+改成显式 JSON.stringify 拼进消息；token 本体仍然不记。
+---
+ src/hooks/useKugouLibrary.ts              |  2 +-
+ src/services/onlineMusic/kugouProvider.ts |  5 +++--
+ src/services/onlineMusic/kugouWebAuth.ts  | 11 +++++------
+ 3 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/src/hooks/useKugouLibrary.ts b/src/hooks/useKugouLibrary.ts
+index cc7f623..7bb1315 100644
+--- a/src/hooks/useKugouLibrary.ts
++++ b/src/hooks/useKugouLibrary.ts
+@@ -112,7 +112,7 @@ export const useKugouLibrary = () => {
+                 const age = kugouWebSessionAgeMs();
+                 if (session && age !== null && age < FRESH_SESSION_GRACE_MS) {
+                     const placeholder: ProviderUser = { id: session.userid, nickname: '酷狗', avatarUrl: '' };
+-                    console.warn('[KugouLibrary] login-status:profile-unavailable-but-fresh', { age });
++                    console.warn(`[KugouLibrary] login-status:profile-unavailable-but-fresh ${JSON.stringify({ age })}`);
+                     updateAccount('kugou', {
+                         status: 'authenticated',
+                         user: placeholder,
+diff --git a/src/services/onlineMusic/kugouProvider.ts b/src/services/onlineMusic/kugouProvider.ts
+index c750c36..6d9c7ff 100644
+--- a/src/services/onlineMusic/kugouProvider.ts
++++ b/src/services/onlineMusic/kugouProvider.ts
+@@ -1305,11 +1305,12 @@ export const kugouProvider: OnlineMusicProvider = {
+             if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
+                 // 登录态与资料都在这条通道里，日志只记「有没有」和 id，不记 token。
+                 const webUser = await fetchKugouWebUser();
+-                console.info('[KugouProvider] web login status', {
++                console.info(`[KugouProvider] web login status ${JSON.stringify({
+                     hasUser: Boolean(webUser),
++                    userId: webUser ? String(webUser.id) : null,
+                     hasNickname: Boolean(webUser?.nickname),
+                     hasAvatar: Boolean(webUser?.avatarUrl),
+-                });
++                })}`);
+                 return webUser;
+             }
+             const userId = readProviderSessionValue('kugou', 'userid');
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index 3d5a127..f63a2bb 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -342,13 +342,14 @@ export const loginKugouWithCode = async (mobile: string, code: string): Promise<
+     writeProviderSessionValue('kugou', USERID_KEY, session.userid);
+     writeProviderSessionValue('kugou', DFID_KEY, dfid);
+     writeProviderSessionValue('kugou', LOGIN_AT_KEY, String(Date.now()));
+-    // 只记结论，不记 token 本体（日志会进诊断报告）。
+-    console.info('[KugouAuth] login ok', {
++    // 只记结论，不记 token 本体（日志会进诊断报告）。ArkWeb 把对象打成 [object Object]，
++    // 所以这里显式序列化成字符串，否则日志里看不到任何字段。
++    console.info(`[KugouAuth] login ok ${JSON.stringify({
+         userid: session.userid,
+         hasToken: session.token.length > 0,
+         dataKeys: Object.keys(json?.data ?? {}).slice(0, 12),
+         decryptedKeys,
+-    });
++    })}`);
+     return session;
+ };
+ 
+@@ -402,9 +403,7 @@ export const fetchKugouWebUser = async (): Promise<ProviderUser | null> => {
+     });
+     const outcome = classifyKugouProfileResponse(json);
+     if (outcome.kind === 'signed-out') {
+-        console.warn('[KugouAuth] profile signed-out; the stored session will be dropped', {
+-            userid: session.userid,
+-        });
++        console.warn(`[KugouAuth] profile signed-out ${JSON.stringify({ userid: session.userid })}`);
+         return null;
+     }
+     if (outcome.kind === 'error') throw new Error(outcome.message);

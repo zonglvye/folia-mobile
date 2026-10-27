@@ -33,6 +33,15 @@ export interface ProxyResult {
   charset: string;
   /** 响应体的 base64。 */
   body: string;
+  /**
+   * 上游响应头的 JSON（`{"bd-ticket-guard-server-data":"..."}`）。
+   *
+   * 为什么必须有：汽水（qishui）的登录是**票据握手**——服务端把 ticket 放在
+   * `bd-ticket-guard-server-data` 这个响应头里，body 里没有。只给 body 就永远登不上，
+   * 所以代理要把头也带回来。只透传正文相关的头（见 RESPONSE_HEADER_SKIP），
+   * content-length / content-encoding 之类由页面自己按实际 body 重新算。
+   */
+  headers: string;
 }
 
 const LYRIC_PATH: string = '/api/lyric-proxy';
@@ -139,7 +148,10 @@ export class HttpProxy {
     if (isPost) {
       HttpProxy.applyAllowedHeaders(headers, HttpProxy.queryParam(url, 'headers'));
       const body = HttpProxy.queryParam(url, 'body') ?? '';
-      if (body.length > 0 && headers['Content-Type'] === undefined) {
+      // 判「页面是否已经给了 content-type」必须忽略大小写：页面的 Headers 一律小写，
+      // 只查 'Content-Type' 会以为没给、再补一个 application/json，表单请求（汽水换 ticket 那条）
+      // 就同时带着两种 content-type，上游按 JSON 解表单 → 参数错误。
+      if (body.length > 0 && !HttpProxy.hasHeader(headers, 'content-type')) {
         headers['Content-Type'] = 'application/json';
       }
       const posted = await HttpProxy.perform(target, headers, body, true);
@@ -148,6 +160,9 @@ export class HttpProxy {
     if (host === QQ_LYRIC_HOST) {
       headers['Cookie'] = 'tmeLoginType=-1;';
       headers['User-Agent'] = 'okhttp/3.14.9';
+    } else {
+      // GET 也吃这套头白名单：汽水有的 GET（播放地址二次解析、场景详情）要带客户端自己的 UA / token。
+      HttpProxy.applyAllowedHeaders(headers, HttpProxy.queryParam(url, 'headers'));
     }
 
     return HttpProxy.perform(target, headers, '', false);
@@ -160,7 +175,11 @@ export class HttpProxy {
   private static applyAllowedHeaders(headers: Record<string, string>, raw: string | null): void {
     if (raw === null || raw.length === 0) return;
     const allowed: string[] = ['user-agent', 'support-calm', 'content-type', 'x-router',
-      'kg-rc', 'kg-thash', 'kg-rec', 'kg-rf', 'dfid', 'mid', 'clienttime'];
+      'kg-rc', 'kg-thash', 'kg-rec', 'kg-rf', 'dfid', 'mid', 'clienttime',
+      // 汽水（qishui）：客户端令牌与「票据守卫」握手用的四个头。
+      // bd-ticket-guard-client-csr 只在换取 ticket 时出现一次，其余三个是每次带身份请求都要的。
+      'access-token', 'bd-ticket-guard-version', 'bd-ticket-guard-client-data',
+      'bd-ticket-guard-client-cert', 'bd-ticket-guard-client-csr', 'bd-ticket-guard-server-data'];
     let parsed: Record<string, string> = {};
     try {
       parsed = JSON.parse(raw) as Record<string, string>;
@@ -173,8 +192,17 @@ export class HttpProxy {
       const name = names[index];
       const lower = name.toLowerCase();
       if (allowed.indexOf(lower) < 0) continue;
-      headers[name] = String(parsed[name]);
+      headers[lower] = String(parsed[name]);
     }
+  }
+
+  /** headers 里有没有这个头（名字忽略大小写）。 */
+  private static hasHeader(headers: Record<string, string>, name: string): boolean {
+    const names = Object.keys(headers);
+    for (let index = 0; index < names.length; index++) {
+      if (names[index].toLowerCase() === name) return true;
+    }
+    return false;
   }
 
   /** 真正发一次请求（GET / POST 共用）。 */
@@ -202,6 +230,7 @@ export class HttpProxy {
         mime: HttpProxy.mimeOf(contentType),
         charset: HttpProxy.charsetOf(contentType) ?? '',
         body: new util.Base64Helper().encodeToStringSync(bytes),
+        headers: HttpProxy.headersToJson(response.header as Object),
       };
     } catch (error) {
       const failure = error as BusinessError;
@@ -218,7 +247,13 @@ export class HttpProxy {
       || host === 'kugou.com' || host.endsWith('.kugou.com')
       // 网易音频 CDN：签名地址不带 CORS 头，页面里的 <audio> 只能经由同源代理取字节。
       || host === 'music.126.net' || host.endsWith('.music.126.net')
-      || host === 'music.127.net' || host.endsWith('.music.127.net');
+      || host === 'music.127.net' || host.endsWith('.music.127.net')
+      // 汽水音乐：接口在 open.qishui.com / open.douyin.com / open-client.douyin.com（不带 CORS 头），
+      // 场景封面在 douyinpic.com。音频 CDN（365yg.com 等）不走这里——真机实测 <audio> 能直接播，
+      // 交给媒体栈自己取，省一次中继。
+      || host === 'qishui.com' || host.endsWith('.qishui.com')
+      || host === 'douyin.com' || host.endsWith('.douyin.com')
+      || host === 'douyinpic.com' || host.endsWith('.douyinpic.com');
   }
 
   // ---- /api/netease-proxy ------------------------------------------------------------
@@ -432,7 +467,26 @@ export class HttpProxy {
       mime: mime,
       charset: 'utf-8',
       body: new util.Base64Helper().encodeToStringSync(new util.TextEncoder().encodeInto(text)),
+      headers: '{}',
     };
+  }
+
+  /** 这些响应头不进透传表：长度与编码要按**实际拿到的 body** 重建，转述上游的只会让页面解析出错。 */
+  private static readonly RESPONSE_HEADER_SKIP: string[] = ['content-length', 'content-encoding',
+    'transfer-encoding', 'connection', 'keep-alive', 'set-cookie'];
+
+  /** 把上游响应头收成一行 JSON，交给页面。set-cookie 单独走信封的 cookie 字段（网易），这里不重复。 */
+  private static headersToJson(header: Object): string {
+    if (header === null || header === undefined) return '{}';
+    const table = header as Record<string, string>;
+    const picked: Record<string, string> = {};
+    const names = Object.keys(table);
+    for (let index = 0; index < names.length; index++) {
+      const name = names[index];
+      if (HttpProxy.RESPONSE_HEADER_SKIP.indexOf(name.toLowerCase()) >= 0) continue;
+      picked[name] = String(table[name]);
+    }
+    return JSON.stringify(picked);
   }
 
   // ---- 小工具 -------------------------------------------------------------------------

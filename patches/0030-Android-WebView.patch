@@ -1,0 +1,192 @@
+From cd3d34b28712bf620d4b4c3c41f9113cdfea50d6 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Sun, 18 Oct 2026 23:54:18 +0800
+Subject: [PATCH 30/90] =?UTF-8?q?=E4=BF=AE=E5=A4=8D=E6=9C=AC=E5=9C=B0?=
+ =?UTF-8?q?=E9=A1=B5=E7=AD=BE=E5=9C=A8=E6=B5=8F=E8=A7=88=E5=99=A8=20/=20An?=
+ =?UTF-8?q?droid=20WebView=20=E9=87=8C=E4=B8=A2=E6=8E=89=E3=80=8C=E5=AF=BC?=
+ =?UTF-8?q?=E5=85=A5=E3=80=8D=E5=85=A5=E5=8F=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+resolveLocalHomeActions 按 canImportFiles 换入口 id：有目录选择器（Electron）发 import-folder，
+没有的（任何 https 页面，含 Android WebView 的 appassets 源）发 import-files。bravais 与 TUI 的
+LOCAL_ACTION_IDS 只映射了前者，于是 .filter(declaredActions.includes(...)) 把 undefined 当成「没声明」
+把整条入口过滤掉：手机上本地页签的「⋯」里没有导入，点也点不到。grid 一直有 import-files 分支，所以只有
+这两套界面坏。
+
+- bravais / TUI：import-files 映射到同一个 home-import-folder，runAction 补 importFiles() 分支；
+- 探针：接管 importLocalFilesViaInput（真实现会弹系统文件选择器），替身与 importFolder 给同一个可观察结果；
+- 用例：入口 id 由环境决定（本地读取探针的 actions），跟着实际入口核对服务函数，
+  顺带把这两处从「Electron 才跑得过」变成两种环境都能跑。
+
+修前 bravaisHome 2 条、homeBehavior 的 [grid]/[tui]/[bravais] imports 3 条共 5 条失败，修后全绿。
+---
+ dev/probes/homeBehavior/serviceStubModule.ts      |  3 +++
+ dev/probes/homeBehavior/serviceStubs.ts           |  6 ++++++
+ src/library/suites/bravais/BravaisHomeSources.tsx |  7 ++++++-
+ src/library/suites/tui/LibraryTuiHomeLists.tsx    |  6 +++++-
+ test/component/bravaisHome.spec.ts                | 15 +++++++++++----
+ test/component/homeBehavior.spec.ts               | 14 +++++++++++---
+ 6 files changed, 42 insertions(+), 9 deletions(-)
+
+diff --git a/dev/probes/homeBehavior/serviceStubModule.ts b/dev/probes/homeBehavior/serviceStubModule.ts
+index 34b6bbc..0b5fb85 100644
+--- a/dev/probes/homeBehavior/serviceStubModule.ts
++++ b/dev/probes/homeBehavior/serviceStubModule.ts
+@@ -13,6 +13,9 @@ export const LOCAL_MUSIC_SERVICE_PATH = '/src/services/localMusicService.ts';
+ /** 经过钩子的函数（其余导出原样转出）。 */
+ export const HOOKED_LOCAL_MUSIC_SERVICE_FUNCTIONS = [
+     'importFolder',
++    // 浏览器与 Android WebView 的导入入口走的是它（无目录选择器时模型发的是 import-files）：
++    // 真实现会弹系统文件选择器，用例里必须由替身接管，否则点一下就会停在对话框上。
++    'importLocalFilesViaInput',
+     'resyncAllFolders',
+     'resyncFolder',
+     'clearFolderIgnore',
+diff --git a/dev/probes/homeBehavior/serviceStubs.ts b/dev/probes/homeBehavior/serviceStubs.ts
+index bc6e679..c630871 100644
+--- a/dev/probes/homeBehavior/serviceStubs.ts
++++ b/dev/probes/homeBehavior/serviceStubs.ts
+@@ -24,6 +24,12 @@ const FAKES: Partial<Record<HookedLocalMusicServiceFunction, (...args: unknown[]
+         await saveLocalSongs([HOME_IMPORTED_LOCAL_SONG]);
+         return [HOME_IMPORTED_LOCAL_SONG];
+     },
++    // 与 importFolder 同一个替身：浏览器环境里本地页签的导入入口是「导入文件」，点它会弹系统文件选择器。
++    // 用例要断言的是「点了入口之后真的走导入、并刷新曲库」，所以两条入口路径给同一个可观察结果。
++    importLocalFilesViaInput: async (): Promise<LocalSong[]> => {
++        await saveLocalSongs([HOME_IMPORTED_LOCAL_SONG]);
++        return [HOME_IMPORTED_LOCAL_SONG];
++    },
+     resyncAllFolders: async (): Promise<LocalSong[]> => getLocalSongs(),
+     resyncFolder: async () => null,
+     clearFolderIgnore: async () => undefined,
+diff --git a/src/library/suites/bravais/BravaisHomeSources.tsx b/src/library/suites/bravais/BravaisHomeSources.tsx
+index d42a2b3..56f2d0d 100644
+--- a/src/library/suites/bravais/BravaisHomeSources.tsx
++++ b/src/library/suites/bravais/BravaisHomeSources.tsx
+@@ -49,8 +49,12 @@ type BravaisHomeSourceCommonProps = {
+     onOpenGridView: (collection: LibraryCollectionDescriptor) => void;
+ };
+ 
++// 导入入口有两个 id：有目录选择器的环境（Electron）是 import-folder，没有的（浏览器、Android Chrome / WebView）
++// 是 import-files，两者声明的是同一个能力。只映射前者会把后者的入口整个过滤掉——手机上的本地页签就是这么丢过
++// 导入入口的（模型只按 canImportFiles 换 id，见 core/model/localHomeModel 的 resolveLocalHomeActions）。
+ const LOCAL_ACTION_IDS: Record<string, LibraryHomeActionId> = {
+     'import-folder': 'home-import-folder',
++    'import-files': 'home-import-folder',
+     'refresh-folders': 'home-refresh-folders',
+     'import-playlist': 'home-import-playlist',
+ };
+@@ -138,6 +142,7 @@ export const BravaisHomeLocal: React.FC<BravaisHomeSourceCommonProps & {
+         .filter(action => common.declaredActions.actions.includes(LOCAL_ACTION_IDS[action.id]));
+     const runAction = (id: string) => {
+         if (id === 'import-folder') void homeActions.importFolder();
++        else if (id === 'import-files') void homeActions.importFiles();
+         else if (id === 'refresh-folders') void homeActions.refreshFolders();
+         else if (id === 'import-playlist') playlistFileInputRef.current?.click();
+     };
+@@ -175,7 +180,7 @@ export const BravaisHomeLocal: React.FC<BravaisHomeSourceCommonProps & {
+             : undefined,
+     });
+ 
+-    // 缝：四行是二级切换（整面翻牌，不换层）；「⋯」里是导入文件夹、刷新、导入歌单文件。
++    // 缝：四行是二级切换（整面翻牌，不换层）；「⋯」里是导入（文件夹或文件）、刷新、导入歌单文件。
+     const sections = useMemo(() => local.sections.map(section => ({
+         key: section.key,
+         label: section.label,
+diff --git a/src/library/suites/tui/LibraryTuiHomeLists.tsx b/src/library/suites/tui/LibraryTuiHomeLists.tsx
+index a1fe99c..8ffb257 100644
+--- a/src/library/suites/tui/LibraryTuiHomeLists.tsx
++++ b/src/library/suites/tui/LibraryTuiHomeLists.tsx
+@@ -47,8 +47,11 @@ type LibraryTuiListCommonProps = {
+     onPromptChange: (prompt: LibraryTuiPromptRequest | null) => void;
+ };
+ 
++// 导入入口有两个 id：有目录选择器的环境（Electron）是 import-folder，没有的（浏览器、Android Chrome / WebView）
++// 是 import-files，两者声明的是同一个能力。只映射前者会把后者的入口整个过滤掉。
+ const LOCAL_ACTION_IDS: Record<string, LibraryHomeActionId> = {
+     'import-folder': 'home-import-folder',
++    'import-files': 'home-import-folder',
+     'refresh-folders': 'home-refresh-folders',
+     'import-playlist': 'home-import-playlist',
+ };
+@@ -192,11 +195,12 @@ export const LibraryTuiLocalList: React.FC<LibraryTuiListCommonProps & {
+     });
+     const activeSection = local.activeSection;
+ 
+-    // 三个导入动作都不需要网格的界面：导入文件夹与刷新直接交给首页动作控制器，歌单文件用一个隐藏的文件选择框。
++    // 三个导入动作都不需要网格的界面：导入文件夹 / 导入文件与刷新直接交给首页动作控制器，歌单文件用一个隐藏的选择框。
+     const localActions = resolveLocalHomeActions(actionState)
+         .filter(action => common.declaredActions.actions.includes(LOCAL_ACTION_IDS[action.id]));
+     const runAction = (id: string) => {
+         if (id === 'import-folder') void homeActions.importFolder();
++        else if (id === 'import-files') void homeActions.importFiles();
+         else if (id === 'refresh-folders') void homeActions.refreshFolders();
+         else if (id === 'import-playlist') playlistFileInputRef.current?.click();
+     };
+diff --git a/test/component/bravaisHome.spec.ts b/test/component/bravaisHome.spec.ts
+index 3f41950..d62869f 100644
+--- a/test/component/bravaisHome.spec.ts
++++ b/test/component/bravaisHome.spec.ts
+@@ -337,12 +337,17 @@ test.describe('[bravais-only] home', () => {
+         await expect(filterInput(page)).toHaveValue('beta');
+     });
+ 
+-    test('the local seam menu imports a folder; the Navidrome seam refreshes the overview', async ({ page }) => {
++    test('the local seam menu runs the import entry; the Navidrome seam refreshes the overview', async ({ page }) => {
+         await showLocal(page);
+         await page.evaluate(() => window.__homeProbe!.clearLog());
+         await seam(page).locator('[data-bravais-seam-action="more"]').click();
+-        await seam(page).locator('[data-bravais-seam-action="home-import-folder"]').click();
+-        await expect.poll(async () => (await calls(page, 'service')).map(call => call.key)).toEqual(['importFolder']);
++        // 导入入口的 id 随环境变（Electron 是 …-folder，浏览器是 …-files），跑的是哪个就核对哪个服务函数。
++        const importEntry = seam(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="home-import-folder"], [data-bravais-seam-menu] [data-bravais-seam-action="home-import-files"]').first();
++        const importService = await importEntry.getAttribute('data-bravais-seam-action') === 'home-import-files'
++            ? 'importLocalFilesViaInput'
++            : 'importFolder';
++        await importEntry.click();
++        await expect.poll(async () => (await calls(page, 'service')).map(call => call.key)).toEqual([importService]);
+ 
+         await seam(page).locator('[data-bravais-tab="navidrome"]').click();
+         await expect(stage(page)).toHaveAttribute('data-bravais-layer', 'home:navidrome');
+@@ -911,7 +916,9 @@ test.describe('[bravais-only] the narrow home seam layout', () => {
+         await seam(page).locator('.bravais-seam-tools [data-bravais-seam-action="more"]').click();
+         const items = await menuItems(page);
+         expect(items.indexOf('directory')).toBeGreaterThanOrEqual(0);
+-        expect(items.indexOf('home-import-folder')).toBeGreaterThan(items.indexOf('directory'));
++        // 导入入口的 id 随环境变（Electron 是 …-folder，浏览器与 Android WebView 是 …-files），两者都算本页签的入口。
++        const importIndex = items.findIndex(id => id === 'home-import-folder' || id === 'home-import-files');
++        expect(importIndex).toBeGreaterThan(items.indexOf('directory'));
+         expect(items.slice(items.indexOf('rule'))).toEqual(['rule', 'player']);
+         await expect(seam(page).locator('[data-bravais-seam-menu] [data-bravais-seam-action="directory"]')).toHaveAttribute('role', 'menuitemcheckbox');
+     });
+diff --git a/test/component/homeBehavior.spec.ts b/test/component/homeBehavior.spec.ts
+index 3465723..9d57d5b 100644
+--- a/test/component/homeBehavior.spec.ts
++++ b/test/component/homeBehavior.spec.ts
+@@ -1011,13 +1011,21 @@ test.describe(`[${suite}] hidden items`, () => {
+ });
+ 
+ test.describe(`[${suite}] imports`, () => {
+-    test('folder import calls the import service and refreshes the library', async ({ mount, page }) => {
++    // 导入入口的 id 随环境变：有目录选择器（Electron）时模型发 import-folder，浏览器与 Android WebView 没有目录
++    // 选择器，发的是 import-files（core/model/localHomeModel 的 resolveLocalHomeActions 按 canImportFiles 选）。
++    // 两条路径都该真的走导入并刷新曲库——探针把两者的服务函数都换成了同一个替身。
++    test('the local import entry calls the import service and refreshes the library', async ({ mount, page }) => {
+         await mountHome(mount, page, suite);
+         await showList(page, 'local');
+         await clearLog(page);
+ 
+-        expect(await page.evaluate(() => window.__homeProbe!.runAction('import-folder'))).toBe(true);
+-        await expect.poll(() => serviceCalls(page)).toEqual([{ name: 'importFolder', args: [] }]);
++        const importAction = await page.evaluate(() => window.__homeProbe!.actions()
++            .find(action => action.id === 'import-folder' || action.id === 'import-files')?.id ?? null);
++        expect(importAction).not.toBeNull();
++        expect(await page.evaluate(id => window.__homeProbe!.runAction(id), importAction!)).toBe(true);
++        await expect.poll(() => serviceCalls(page)).toEqual([
++            { name: importAction === 'import-files' ? 'importLocalFilesViaInput' : 'importFolder', args: [] },
++        ]);
+         await expect.poll(() => calls(page, 'refreshLocalSongs')).toHaveLength(1);
+         await expect.poll(() => itemIds(page)).toContain(homeFolderId('Imported'));
+     });

@@ -1,0 +1,156 @@
+From 22dd699a19046aad38a81c86ee70d9513439c4ae Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 23:16:53 +0800
+Subject: [PATCH 56/90] =?UTF-8?q?=E9=94=81=E5=B1=8F=E5=B0=81=E9=9D=A2?=
+ =?UTF-8?q?=E4=BA=A4=E7=BB=99=E5=A3=B3=E4=B8=8B=E8=BD=BD=EF=BC=9B=E6=AD=8C?=
+ =?UTF-8?q?=E8=AF=8D=E9=A1=B5=E9=BB=98=E8=AE=A4=E6=94=B9=E6=9E=81=E7=AE=80?=
+ =?UTF-8?q?=EF=BC=88`still`=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+两件事，都改在这几个文件上，所以合成一次提交。
+
+1) 锁屏封面（配合壳侧 NowPlayingArtwork）
+   AVMetadata.mediaImage 要的是 PixelMap（或壳能打开的文件路径），而页面推上来的只有 URL，
+   所以壳自己去下载解码。页面这边新增 resolveShellArtworkUrl：只能推远端 http(s) —— 页面缓存的
+   封面常常是 blob:（coverCache 会 createObjectUrl），同源 /api/lyric-proxy 包装的壳也取不到，
+   这类一律换成远端原图地址，两者都没有就推空串（锁屏就没封面）。
+   真机锁屏实拍已验证：封面彩色图案 + 「Go Again (feat. ELY…)」「King CAAN, Elysa」。
+
+2) 歌词页极简（选定的外观：墙面纸感拼贴 + 歌词页极简文字）
+   用内建可视化器 `still` 做壳里的默认：它本来就不挂背景渲染器
+   （见 components/visualizer/still/VisualizerStill.tsx 的文件头），屏幕上只剩静态歌词。
+   压暗网点与几何背景的默认值在壳里也改成关。桌面版默认值不变，用户在设置里选过别的模式
+   就按用户的选择 —— 这里只动默认值。
+
+注意：`still` 连封面也不画，播放页是纯黑 + 静态歌词，标题在底部胶囊里。
+---
+ src/hooks/useShellNowPlayingBridge.ts       |  4 +++-
+ src/services/shellNowPlaying.ts             | 19 +++++++++++++++++++
+ src/stores/useVisualizerSettingsStore.ts    |  8 ++++++--
+ src/stores/visualizerSettingsPersistence.ts | 16 ++++++++++++++--
+ 4 files changed, 42 insertions(+), 5 deletions(-)
+
+diff --git a/src/hooks/useShellNowPlayingBridge.ts b/src/hooks/useShellNowPlayingBridge.ts
+index a2ff495..05b651a 100644
+--- a/src/hooks/useShellNowPlayingBridge.ts
++++ b/src/hooks/useShellNowPlayingBridge.ts
+@@ -20,6 +20,7 @@ import { getSongAlbumLabel, getSongArtistLabel, getSongCoverUrl } from '../servi
+ import {
+     isShellNowPlayingSupported,
+     publishShellNowPlaying,
++    resolveShellArtworkUrl,
+     subscribeShellMediaCommands,
+ } from '../services/shellNowPlaying';
+ 
+@@ -126,7 +127,8 @@ export const useShellNowPlayingBridge = ({
+                 album: getSongAlbumLabel(currentSong),
+                 durationSec: Math.max(0, Math.round(duration)),
+                 positionSec: Math.max(0, Math.round(position)),
+-                artworkUrl: cachedCoverUrl || getSongCoverUrl(currentSong) || '',
++                // 壳自己去下载这张图，所以只能给远端地址（blob: 之类它取不到，见 resolveShellArtworkUrl）。
++                artworkUrl: resolveShellArtworkUrl(cachedCoverUrl, getSongCoverUrl(currentSong) || null),
+             });
+         };
+ 
+diff --git a/src/services/shellNowPlaying.ts b/src/services/shellNowPlaying.ts
+index 9fe33f6..c4b9de7 100644
+--- a/src/services/shellNowPlaying.ts
++++ b/src/services/shellNowPlaying.ts
+@@ -49,6 +49,25 @@ export const isShellNowPlayingSupported = (): boolean => {
+     }
+ };
+ 
++/**
++ * Which cover URL the shell should mirror onto the lock screen.
++ *
++ * The shell downloads the image itself (its `AVMetadata.mediaImage` needs a `PixelMap`), so it can
++ * only fetch something reachable from outside the page. `blob:` URLs (what `coverCache` hands back),
++ * `data:` URLs and the same-origin `/api/lyric-proxy?...` wrappers are all page-local or shell-local
++ * and would silently fail, so only a remote http(s) URL is passed through; anything else becomes an
++ * empty string and the lock screen simply has no artwork.
++ */
++export const resolveShellArtworkUrl = (cachedCover: string | null, remoteCover: string | null): string => {
++    const candidates: Array<string | null> = [cachedCover, remoteCover];
++    for (const candidate of candidates) {
++        if (typeof candidate === 'string' && /^https?:\/\//i.test(candidate)) {
++            return candidate;
++        }
++    }
++    return '';
++};
++
+ /** Pushes one snapshot. Failures are swallowed: mirroring a track is never load-bearing. */
+ export const publishShellNowPlaying = (snapshot: ShellNowPlaying): void => {
+     if (typeof window === 'undefined') return;
+diff --git a/src/stores/useVisualizerSettingsStore.ts b/src/stores/useVisualizerSettingsStore.ts
+index 5bb0baa..bb94158 100644
+--- a/src/stores/useVisualizerSettingsStore.ts
++++ b/src/stores/useVisualizerSettingsStore.ts
+@@ -19,6 +19,7 @@ import { buildStoredMonetPortraitImage, clearMonetPortraitImage, isSupportedMone
+ import { setStatusMessage } from './useStatusMessageStore';
+ import { LUMIERE_TUNING_STORAGE_KEY, VISUALIZER_OPACITY_STORAGE_KEY, clampCladdaghEllipseTiltDeg, clampCladdaghFocusScaleRatio, clampCladdaghLetterSpacingOffset, clampCladdaghRadiusScale, clampClassicBreathingFloatMultiplier, clampClassicWordSpacing, clampFumeBackgroundObjectOpacity, clampFumeCameraSpeed, clampFumeGlowIntensity, clampFumeHeroScale, clampFumeTextHoldRatio, clampPartitaStagger, clampUnit, readStoredBackgroundOpacity, readStoredCadenzaTuning, readStoredCappellaTuning, readStoredCladdaghTuning, readStoredClassicTuning, readStoredDioramaTuning, readStoredFumeTuning, readStoredLatentBackgroundTuning, readStoredLumiereTuning, readStoredMonetBackgroundTuning, readStoredMonetTuning, readStoredNomandBackgroundTuning, readStoredPartitaTuning, readStoredPendoloTuning, readStoredSonnetTuning, readStoredSoraBackgroundTuning, readStoredTemperaTuning, readStoredTiltTuning, readStoredUrlBackgroundList, readStoredUrlBackgroundSelectedId, readStoredVisualizerBackgroundMode, readStoredVisualizerFrameRate, readStoredVisualizerMode, readStoredVisualizerOpacity, resolveCappellaAvatarSource, resolveFumeCameraTrackingMode, resolvePendoloNumber, resolveStoredDioramaTuning, resolveStoredLatentBackgroundTuning, resolveStoredMonetBackgroundTuning, resolveStoredMonetTuning, resolveStoredNomandBackgroundTuning, resolveStoredSoraBackgroundTuning, sanitizeTemperaLayerImages } from './visualizerSettingsPersistence';
+ import { getStoredBoolean, setStoredBoolean } from './storagePrimitives';
++import { isAndroidShell } from '../utils/platform';
+ import { useVisualizerAssetStore } from './useVisualizerAssetStore';
+ import { normalizeLumiereTuning } from '../utils/lumiereTuning';
+ 
+@@ -111,9 +112,12 @@ export type VisualizerSettingsState = {
+     handleClearCustomCappellaAvatar: () => Promise<void>;
+ };
+ 
++// 手机壳的默认外观是「极简歌词页」：压暗的网点（vignette）与几何背景默认关掉，
++// 与 visualizerSettingsPersistence 里把默认模式设成 `still` 是同一条决定。
++// 桌面上这两个默认值不变，仍是开着的。
+ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set, get) => ({
+-    disableVisualizerVignette: getStoredBoolean('disable_visualizer_vignette', false),
+-    disableVisualizerGeometricBackground: getStoredBoolean('disable_visualizer_geometric_background', false),
++    disableVisualizerVignette: getStoredBoolean('disable_visualizer_vignette', isAndroidShell()),
++    disableVisualizerGeometricBackground: getStoredBoolean('disable_visualizer_geometric_background', isAndroidShell()),
+     backgroundOpacity: readStoredBackgroundOpacity(),
+     visualizerOpacity: readStoredVisualizerOpacity(),
+     visualizerBackgroundMode: readStoredVisualizerBackgroundMode(),
+diff --git a/src/stores/visualizerSettingsPersistence.ts b/src/stores/visualizerSettingsPersistence.ts
+index 7fcc42b..89b49f2 100644
+--- a/src/stores/visualizerSettingsPersistence.ts
++++ b/src/stores/visualizerSettingsPersistence.ts
+@@ -11,6 +11,7 @@ import {
+ } from '../types/visualizerModes';
+ import { resolveDioramaMoteCircumference, resolveDioramaMoteRadial } from '../components/visualizer/diorama/dioramaMoteField';
+ import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../utils/frameRateLimiter';
++import { isAndroidShell } from '../utils/platform';
+ import { sanitizeUrlBackgroundList } from '../utils/urlBackground';
+ import { normalizeLumiereTuning } from '../utils/lumiereTuning';
+ 
+@@ -43,9 +44,20 @@ export const readStoredVisualizerOpacity = () => {
+     return Number.isFinite(parsed) ? Math.min(1, Math.max(0.2, parsed)) : 1;
+ };
+ 
++/**
++ * 手机壳里播放页的默认外观：`still`。
++ *
++ * 这个内建可视化器本来就不挂背景渲染器（见 components/visualizer/still/VisualizerStill.tsx 的文件头），
++ * 屏幕上只剩静态歌词 —— 也就是这台机器要的「极简歌词页」。墙面的纸感拼贴走的是另一套（bravais），不受影响。
++ * 桌面版仍是 DEFAULT_VISUALIZER_MODE；用户在设置里选过别的模式就按用户的选择。
++ */
++const resolveDefaultVisualizerMode = (): VisualizerMode => (
++    isAndroidShell() ? 'still' : DEFAULT_VISUALIZER_MODE
++);
++
+ export const readStoredVisualizerMode = (): VisualizerMode => {
+     if (typeof window === 'undefined') {
+-        return DEFAULT_VISUALIZER_MODE;
++        return resolveDefaultVisualizerMode();
+     }
+ 
+     const saved = localStorage.getItem('visualizer_mode');
+@@ -53,7 +65,7 @@ export const readStoredVisualizerMode = (): VisualizerMode => {
+         return 'cadenza';
+     }
+ 
+-    return isBuiltinVisualizerMode(saved) ? saved : DEFAULT_VISUALIZER_MODE;
++    return isBuiltinVisualizerMode(saved) ? saved : resolveDefaultVisualizerMode();
+ };
+ 
+ export const readStoredVisualizerFrameRate = (): VisualizerFrameRate => {

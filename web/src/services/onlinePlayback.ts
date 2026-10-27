@@ -5,8 +5,7 @@ import { isPureMusicLyricText } from '../utils/lyrics/pureMusic';
 import { migrateLyricDataRenderHints } from '../utils/lyrics/renderHints';
 import { loadOnlineLyricsState, markOnlineLyricsPureMusic, resolveOnlineLyrics, resolveOnlineLyricsPureMusic, saveOnlineLyricsState } from '../utils/onlineLyricsState';
 import { autoMatchBestLyric } from '../utils/lyrics/autoMatchBestLyric';
-import { createSafeObjectUrl } from '../utils/blobGuards';
-import type { AudioQualityPreference, MediaId, OmniAudioSource } from '../types/onlineMusic';
+import { createSafeObjectUrl } from '../utils/blobGuards';import type { AudioQualityPreference, MediaId, OmniAudioSource } from '../types/onlineMusic';
 import type { OnlineAudioSourceResult, PlaybackFailure } from '../types/playbackFailure';
 import { omni } from './onlineMusic/omni';
 import { getSongResourceCacheKey } from './onlineMusic/resourceKeys';
@@ -23,6 +22,14 @@ import { getProviderPlaybackCooldown, noteProviderFailure } from './playbackReco
 import { isCachedSongAudioDistrusted } from './playbackRecovery/mediaCacheGuard';
 import { isNetworkOffline } from './playbackRecovery/networkReconnect';
 import { materializeShellAudioSource } from './shellOnlineAudio';
+
+// 曲目自带时长（毫秒）→ 秒。流式播放要靠它把 MediaSource 的 duration 提前定下来，
+// 否则浏览器要等到整首追加完才报得出长度，中间进度条和锁屏页都是「未知」。
+const knownDurationSeconds = (song: SongResult): number | undefined => {
+    const ms = song.durationMs;
+    return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms / 1000 : undefined;
+};
+
 
 export interface LoadOnlineAudioSourceOptions {
     stage?: 'resolve-url' | 'refresh' | 'restore';
@@ -71,7 +78,7 @@ export async function loadOnlineSongAudioSource(
     if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt) && !isNetworkOffline()) {
         // 打包壳里远程地址要先换成同源地址（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
         // 离线时跳过这条：预取到的签名地址这时也取不回来，交给下面的 provider 失败路径（文案与自动重连都按网络处理）。
-        const playable = await materializeShellAudioSource(prefetched.audioUrl);
+        const playable = await materializeShellAudioSource(prefetched.audioUrl, knownDurationSeconds(song));
         return {
             kind: 'ok',
             audioSrc: playable.audioSrc,
@@ -116,7 +123,7 @@ export async function loadOnlineSongAudioSource(
                 const replayGain = applyOnlineAudioSourceMetadata(song, source?.replayGain).replayGain;
                 // 预取条目只在成功时更新；失败永不回写。预取里存的是**远程**地址（缓存给下次用）。
                 updatePrefetchedAudioUrl(song, url, audioQuality, replayGain);
-                const playable = await materializeShellAudioSource(url);
+                const playable = await materializeShellAudioSource(url, knownDurationSeconds(song));
                 return {
                     kind: 'ok',
                     audioSrc: playable.audioSrc,

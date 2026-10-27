@@ -1,0 +1,122 @@
+From a1f4839bd7194b0ceaeba9dcf897ee4339d00ddd Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 27 Oct 2026 21:44:25 +0800
+Subject: [PATCH 89/90] fix(qishui): keep the like button off while signed out
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+汽水游客能播不能收藏：`canLikeSong` 只看 provider 声明（mutations + likes + likeSong），
+所以按钮是亮的，点下去只会拿到 auth-required。
+
+- omni.allowsAccountMutation / needsSignInForAccountMutation：游客可用的平台要求
+  账号已登录才允许收藏与「不喜欢」；其它平台维持原样（它们本来就没有游客态）。
+- playerLikeAvailability：没登录时用 status.providerLikeNeedsSignIn（「登录 X 后可以
+  喜欢歌曲」），不是「X 暂不支持喜欢歌曲」——两件事不一样。
+
+真机验证（SCA-AL00）：汽水游客播着歌打开面板「控制」页，收藏按钮的 title 是
+「登录 汽水 后可以喜欢歌曲。」且不可点。单测：utils + onlineMusic 1065 条全过。
+---
+ src/i18n/locales/en.ts              |  1 +
+ src/i18n/locales/in.ts              |  1 +
+ src/i18n/locales/zh-CN.ts           |  1 +
+ src/services/onlineMusic/omni.ts    | 19 +++++++++++++++++++
+ src/utils/playerLikeAvailability.ts |  4 +++-
+ 5 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index e4a815a..9ac936b 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -409,6 +409,7 @@ export default {
+     "unliked": "Removed from Liked",
+     "playlistUpdated": "Playlist updated",
+     "providerLikeUnavailable": "{{provider}} does not support liking songs.",
++    "providerLikeNeedsSignIn": "Sign in to {{provider}} to like songs.",
+     "providerPlaylistMutationUnavailable": "{{provider}} does not support adding songs to playlists.",
+     "providerRecommendationsUnavailable": "{{provider}} does not provide recommendation content.",
+     "providerUserAlbumsUnavailable": "{{provider}} does not provide the user's album library.",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index 94efb7b..9f22d77 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -407,6 +407,7 @@ export default {
+     "unliked": "Dihapus dari Disukai",
+     "playlistUpdated": "Playlist diperbarui",
+     "providerLikeUnavailable": "{{provider}} tidak mendukung fitur menyukai lagu.",
++    "providerLikeNeedsSignIn": "Masuk ke {{provider}} untuk menyukai lagu.",
+     "providerPlaylistMutationUnavailable": "{{provider}} tidak mendukung penambahan lagu ke playlist.",
+     "providerRecommendationsUnavailable": "{{provider}} tidak menyediakan rekomendasi konten.",
+     "providerUserAlbumsUnavailable": "{{provider}} tidak menyediakan koleksi album pengguna.",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index e0ca93b..98e4027 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -409,6 +409,7 @@ export default {
+     "unliked": "已取消喜欢",
+     "playlistUpdated": "歌单已更新",
+     "providerLikeUnavailable": "{{provider}} 暂不支持喜欢歌曲。",
++    "providerLikeNeedsSignIn": "登录 {{provider}} 后可以喜欢歌曲。",
+     "providerPlaylistMutationUnavailable": "{{provider}} 暂不支持将歌曲添加到歌单。",
+     "providerRecommendationsUnavailable": "{{provider}} 暂未提供推荐内容。",
+     "providerUserAlbumsUnavailable": "{{provider}} 暂未提供用户专辑库。",
+diff --git a/src/services/onlineMusic/omni.ts b/src/services/onlineMusic/omni.ts
+index 0c1bc72..84ab033 100644
+--- a/src/services/onlineMusic/omni.ts
++++ b/src/services/onlineMusic/omni.ts
+@@ -392,11 +392,29 @@ export const omni = {
+         const source = getPlaybackSourceRef(song);
+         if (source.kind !== 'online') return false;
+         const provider = getOnlineMusicProvider(source.providerId);
++        if (!this.allowsAccountMutation(provider, source.providerId)) return false;
+         return providerSupports(provider, 'mutations')
+             && providerSupports(provider, 'likes')
+             && Boolean(provider?.mutations?.likeSong);
+     },
+ 
++    /**
++     * 账号相关的写入（收藏 / 不喜欢）现在能不能做。游客可用的平台（汽水）能播不能收藏：
++     * 没登录就别让按钮点亮，点了只会拿到 auth-required。其它平台维持原样（它们本来就没有游客态）。
++     */
++    allowsAccountMutation(
++        provider: OnlineMusicProvider | null,
++        providerId: OmniProviderId,
++    ): boolean {
++        if (!provider?.capabilities.guestAccess) return true;
++        return useOnlineProviderAccountStore.getState().accounts[providerId]?.status === 'authenticated';
++    },
++
++    /** 上面那条为 false 时的另一种说法：不是「不支持」，是「登录后才能用」（给文案挑 key 用）。 */
++    needsSignInForAccountMutation(providerId: OmniProviderId): boolean {
++        return !this.allowsAccountMutation(getOnlineMusicProvider(providerId), providerId);
++    },
++
+     canEditCollectionTracks(collection: OmniCollection): boolean {
+         const provider = getOnlineMusicProvider(collection.providerId);
+         if (!providerSupports(provider, 'mutations')) return false;
+@@ -412,6 +430,7 @@ export const omni = {
+         const source = getPlaybackSourceRef(song);
+         if (source.kind !== 'online') return false;
+         const provider = getOnlineMusicProvider(source.providerId);
++        if (!this.allowsAccountMutation(provider, source.providerId)) return false;
+         return providerSupports(provider, 'recommendations')
+             && Boolean(provider?.recommendations?.dislikeSong);
+     },
+diff --git a/src/utils/playerLikeAvailability.ts b/src/utils/playerLikeAvailability.ts
+index 5b06d22..50b2274 100644
+--- a/src/utils/playerLikeAvailability.ts
++++ b/src/utils/playerLikeAvailability.ts
+@@ -32,10 +32,12 @@ export const resolveLikeAvailability = (
+ 
+     const sourceRef = getPlaybackSourceRef(currentSong);
+     if (sourceRef.kind === 'online' && !omni.canLikeSong(currentSong)) {
++        // 平台支持收藏、只是还没登录（汽水游客）：说的不是「不支持」，而是「登录后可以」。
++        const needsSignIn = omni.needsSignInForAccountMutation(sourceRef.providerId);
+         return {
+             disabled: true,
+             reason: {
+-                key: 'status.providerLikeUnavailable',
++                key: needsSignIn ? 'status.providerLikeNeedsSignIn' : 'status.providerLikeUnavailable',
+                 params: { provider: omni.getProviderLabel(sourceRef.providerId) },
+             },
+         };

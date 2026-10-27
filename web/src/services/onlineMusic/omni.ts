@@ -138,6 +138,7 @@ export const omni = {
                 shortName: provider.shortName || provider.displayName,
                 availability: provider.getAvailability?.() ?? { configured: true },
                 requiresAccount: provider.capabilities.auth,
+                guestAccess: provider.capabilities.guestAccess === true,
                 status: account?.status || 'unknown',
                 user: account?.user || null,
                 collections: account?.collections || [],
@@ -192,6 +193,11 @@ export const omni = {
 
     getProviderAvailability(providerId: OmniProviderId): OmniProviderAvailability {
         return requireOnlineMusicProvider(providerId).getAvailability?.() ?? { configured: true };
+    },
+
+    // 平台自己声明能给的音质档位；没声明就当它都能给（老 provider 都是这样，映射不了就降级）。
+    getProviderAudioQualityLevels(providerId: OmniProviderId): readonly AudioQualityPreference[] | null {
+        return getOnlineMusicProvider(providerId)?.playback?.audioQualityLevels ?? null;
     },
 
     getProviderLabel(providerId: OmniProviderId): string {
@@ -386,9 +392,27 @@ export const omni = {
         const source = getPlaybackSourceRef(song);
         if (source.kind !== 'online') return false;
         const provider = getOnlineMusicProvider(source.providerId);
+        if (!this.allowsAccountMutation(provider, source.providerId)) return false;
         return providerSupports(provider, 'mutations')
             && providerSupports(provider, 'likes')
             && Boolean(provider?.mutations?.likeSong);
+    },
+
+    /**
+     * 账号相关的写入（收藏 / 不喜欢）现在能不能做。游客可用的平台（汽水）能播不能收藏：
+     * 没登录就别让按钮点亮，点了只会拿到 auth-required。其它平台维持原样（它们本来就没有游客态）。
+     */
+    allowsAccountMutation(
+        provider: OnlineMusicProvider | null,
+        providerId: OmniProviderId,
+    ): boolean {
+        if (!provider?.capabilities.guestAccess) return true;
+        return useOnlineProviderAccountStore.getState().accounts[providerId]?.status === 'authenticated';
+    },
+
+    /** 上面那条为 false 时的另一种说法：不是「不支持」，是「登录后才能用」（给文案挑 key 用）。 */
+    needsSignInForAccountMutation(providerId: OmniProviderId): boolean {
+        return !this.allowsAccountMutation(getOnlineMusicProvider(providerId), providerId);
     },
 
     canEditCollectionTracks(collection: OmniCollection): boolean {
@@ -406,6 +430,7 @@ export const omni = {
         const source = getPlaybackSourceRef(song);
         if (source.kind !== 'online') return false;
         const provider = getOnlineMusicProvider(source.providerId);
+        if (!this.allowsAccountMutation(provider, source.providerId)) return false;
         return providerSupports(provider, 'recommendations')
             && Boolean(provider?.recommendations?.dislikeSong);
     },

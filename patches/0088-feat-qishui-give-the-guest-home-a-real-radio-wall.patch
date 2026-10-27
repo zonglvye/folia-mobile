@@ -1,0 +1,199 @@
+From 826d98d027d354c4f5ef23b3d89ce69087b7a577 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 27 Oct 2026 21:36:45 +0800
+Subject: [PATCH 88/90] feat(qishui): give the guest home a real radio wall
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+游客切到汽水之后墙是空的：首页资源按「provider + 账户 id」认领，没有账号就一直不读；
+而且 bravais 只在已登录时画在线列表。可汽水的私人 FM 与场景本来就不需要账号
+（真机实测 feed_modes 45 个场景、feed?queue=fm 与 feed?scene=N 都通）。
+
+- LibraryHomeOnlineSource.guestAccess：从 provider 摘要带过来。
+- attachOnlineHomeFeeds：电台那一份允许「游客归属」（GUEST_FEED_OWNER_ID）；
+  收藏专辑仍然要账号（那是真的需要）。
+- BravaisHomeOnline：游客平台在某一眼真读到卡片时也照常画（其余情况墙仍空着）。
+- qishuiCatalog：`scene-<id>` 的曲目按 `feed{queue:'fm', scene, limit, offset}` 取，
+  能翻页；详情直接用卡片自带的集合（场景没有更细的详情接口）。
+
+真机验证（SCA-AL00）：平台列表切到汽水（游客）→ 电台页出现「私人FM」+ 45 张场景卡
+（轻音乐 / 摇滚 / 助眠模式…）→ 点「沉浸0.8x」进集合页（12 首）→ 播放全部 →
+怪我曾爱你爱的太深(dj0.8x CC版) 直连 365yg 播放，00:05 / 02:42 与 metadata 一致。
+---
+ .../core/bindings/useLibraryHomeOnline.ts     |  2 ++
+ .../bindings/useLibraryHomeOnlineFeeds.ts     | 22 +++++++++++++++----
+ src/library/core/contracts/homeModel.ts       |  5 +++++
+ src/library/core/model/homeSources.ts         |  1 +
+ .../suites/bravais/BravaisHomeSources.tsx     |  4 +++-
+ .../onlineMusic/qishui/qishuiCatalog.ts       | 18 ++++++++++++++-
+ 6 files changed, 46 insertions(+), 6 deletions(-)
+
+diff --git a/src/library/core/bindings/useLibraryHomeOnline.ts b/src/library/core/bindings/useLibraryHomeOnline.ts
+index 845a556..0ce53b3 100644
+--- a/src/library/core/bindings/useLibraryHomeOnline.ts
++++ b/src/library/core/bindings/useLibraryHomeOnline.ts
+@@ -38,6 +38,8 @@ export const useLibraryHomeOnline = (
+         userId: online.user?.id ?? null,
+         canUseAlbums: online.canUseAlbums,
+         canUseRadio: online.canUseRadio,
++        // 汽水没登录也能拿私人 FM 与场景；不这样的话游客首页是一面空墙。
++        guestRadio: online.guestAccess && !online.user,
+     });
+ 
+     const playlistCards = useMemo(() => buildOnlinePlaylistCards(online.collections, t), [online.collections, t]);
+diff --git a/src/library/core/bindings/useLibraryHomeOnlineFeeds.ts b/src/library/core/bindings/useLibraryHomeOnlineFeeds.ts
+index f1c3e68..702456c 100644
+--- a/src/library/core/bindings/useLibraryHomeOnlineFeeds.ts
++++ b/src/library/core/bindings/useLibraryHomeOnlineFeeds.ts
+@@ -23,12 +23,20 @@ const ownerOf = (providerId: string, userId: MediaId | null | undefined, capable
+     capable && userId !== null && userId !== undefined ? { providerId, userId } : null
+ );
+ 
++/**
++ * 游客可用平台的电台归属用的假账户 id：这类平台的私人 FM / 场景不需要账号，
++ * 但首页资源是按「provider + 账户」认领的，没有 id 就一直不读。
++ */
++export const GUEST_FEED_OWNER_ID = 'guest';
++
+ type OnlineHomeFeedsAttachment = {
+     tab: HomeViewTab;
+     providerId: string;
+     userId: MediaId | null | undefined;
+     canUseAlbums: boolean;
+     canUseRadio: boolean;
++    /** 平台未登录也能用（汽水）：电台按游客身份去读。 */
++    guestRadio?: boolean;
+ };
+ 
+ /**
+@@ -37,10 +45,13 @@ type OnlineHomeFeedsAttachment = {
+  */
+ export const attachOnlineHomeFeeds = (
+     resources: Pick<LibraryHomeResources, 'favoriteAlbums' | 'radioFeed'>,
+-    { tab, providerId, userId, canUseAlbums, canUseRadio }: OnlineHomeFeedsAttachment,
++    { tab, providerId, userId, canUseAlbums, canUseRadio, guestRadio = false }: OnlineHomeFeedsAttachment,
+ ): void => {
+     resources.favoriteAlbums.setOwner(ownerOf(providerId, userId, canUseAlbums));
+-    resources.radioFeed.setOwner(ownerOf(providerId, userId, canUseRadio));
++    resources.radioFeed.setOwner(
++        ownerOf(providerId, userId, canUseRadio)
++        ?? (guestRadio ? { providerId, userId: GUEST_FEED_OWNER_ID } : null),
++    );
+     if (tab === 'albums') void resources.favoriteAlbums.ensure();
+     if (tab === 'radio') void resources.radioFeed.ensure();
+ };
+@@ -52,6 +63,7 @@ export const useLibraryHomeOnlineFeeds = ({
+     userId,
+     canUseAlbums,
+     canUseRadio,
++    guestRadio,
+ }: {
+     resources: Pick<LibraryHomeResources, 'favoriteAlbums' | 'radioFeed'>;
+     tab: HomeViewTab;
+@@ -60,11 +72,13 @@ export const useLibraryHomeOnlineFeeds = ({
+     userId: MediaId | null | undefined;
+     canUseAlbums: boolean;
+     canUseRadio: boolean;
++    /** 平台未登录也能用（汽水）：电台按游客身份去读（收藏专辑仍然要账号）。 */
++    guestRadio?: boolean;
+ }) => {
+     const { favoriteAlbums, radioFeed } = resources;
+     useEffect(() => {
+-        attachOnlineHomeFeeds({ favoriteAlbums, radioFeed }, { tab, providerId, userId, canUseAlbums, canUseRadio });
+-    }, [canUseAlbums, canUseRadio, favoriteAlbums, providerId, radioFeed, tab, userId]);
++        attachOnlineHomeFeeds({ favoriteAlbums, radioFeed }, { tab, providerId, userId, canUseAlbums, canUseRadio, guestRadio });
++    }, [canUseAlbums, canUseRadio, favoriteAlbums, guestRadio, providerId, radioFeed, tab, userId]);
+ 
+     return {
+         favoriteAlbums: useLibraryHomeFeed(favoriteAlbums),
+diff --git a/src/library/core/contracts/homeModel.ts b/src/library/core/contracts/homeModel.ts
+index c222ce2..d6bff3f 100644
+--- a/src/library/core/contracts/homeModel.ts
++++ b/src/library/core/contracts/homeModel.ts
+@@ -54,6 +54,11 @@ export type LibraryHomeOnlineSource = {
+     canUseRadio: boolean;
+     /** provider 支持私人 FM 模式（FM 卡的描述显示当前模式）。 */
+     hasPersonalFmModes: boolean;
++    /**
++     * 平台未登录也能用（汽水）：电台那一眼（私人FM / 场景）按游客身份去读，
++     * 不让「没有账号」等于「首页空着」。
++     */
++    guestAccess: boolean;
+ };
+ 
+ /** 本地曲库能不能用（浏览器要安全上下文与文件系统 API）。 */
+diff --git a/src/library/core/model/homeSources.ts b/src/library/core/model/homeSources.ts
+index fb72c28..28bf87a 100644
+--- a/src/library/core/model/homeSources.ts
++++ b/src/library/core/model/homeSources.ts
+@@ -72,6 +72,7 @@ export const resolveHomeOnlineSource = ({
+         canUseAlbums: capabilities.userLibrary && Boolean(capabilities.userAlbums),
+         canUseRadio: capabilities.recommendations,
+         hasPersonalFmModes: Boolean(capabilities.personalFmModes),
++        guestAccess: provider?.guestAccess === true,
+     };
+ };
+ 
+diff --git a/src/library/suites/bravais/BravaisHomeSources.tsx b/src/library/suites/bravais/BravaisHomeSources.tsx
+index 56f2d0d..f6b587e 100644
+--- a/src/library/suites/bravais/BravaisHomeSources.tsx
++++ b/src/library/suites/bravais/BravaisHomeSources.tsx
+@@ -67,7 +67,9 @@ export const BravaisHomeOnline: React.FC<BravaisHomeSourceCommonProps & {
+     account: LibraryAccountController;
+ }> = ({ tab, online, list, account: accountController, homeActions, onOpenGridView, ...common }) => {
+     const { t } = useTranslation();
+-    const showList = online.accountView === 'authenticated';
++    // 已登录就照常列；游客可用的平台（汽水）在其某一眼真读到卡片时也列（电台：私人FM + 场景），
++    // 其余情况墙空着、缝里说原因。
++    const showList = online.accountView === 'authenticated' || (online.guestAccess && list.items.length > 0);
+     useLibraryHomeListRegistration({
+         enabled: showList,
+         getState: (): LibraryHomeListState => ({
+diff --git a/src/services/onlineMusic/qishui/qishuiCatalog.ts b/src/services/onlineMusic/qishui/qishuiCatalog.ts
+index 0b4e67f..dea56bf 100644
+--- a/src/services/onlineMusic/qishui/qishuiCatalog.ts
++++ b/src/services/onlineMusic/qishui/qishuiCatalog.ts
+@@ -1,5 +1,5 @@
+ import i18n from '../../../i18n/config';
+-import type { OnlineCatalogProvider, OnlineLibraryProvider, ProviderCollection, ProviderPage } from '../../../types/onlineMusic';
++import type { MediaId, OnlineCatalogProvider, OnlineLibraryProvider, ProviderCollection, ProviderPage } from '../../../types/onlineMusic';
+ import { OnlineProviderError } from '../../../types/onlineMusic';
+ import { normalizeQishuiCollection, normalizeQishuiSong, record, type QishuiRecord } from './qishuiNormalize';
+ import { requestQishui } from './qishuiTransport';
+@@ -12,6 +12,15 @@ import { createQishuiSceneCover } from './qishuiSceneCover';
+ // 供增量缓存判断），我们这条分支的这个接口只返回 id 数组，所以这里把 `whole` 降到日志里，
+ // 返回值按本仓库的形状给。等以后搬上游的增量缓存时再把 `whole` 接出去。
+ const RECENT_ID = 'recent-played';
++/**
++ * 场景卡片（首页电台那一眼）的集合 id 前缀，见 qishuiRecommendations 的 `scene-${id}`。
++ * 场景不是歌单：它按场景 id 向 `feed` 要歌，能翻页，不经过 `playlist_tracks`。
++ */
++const SCENE_PREFIX = 'scene-';
++const sceneIdOf = (id: MediaId): string | null => {
++    const value = String(id);
++    return value.startsWith(SCENE_PREFIX) ? value.slice(SCENE_PREFIX.length) : null;
++};
+ const recentCollection = async (): Promise<ProviderCollection> => ({ providerId: 'qishui', id: RECENT_ID, type: 'history',
+     name: i18n.t('qishui.recentPlayed'), isOwned: false, coverUrl: await createQishuiSceneCover(RECENT_ID, '') });
+ export const qishuiCatalog: OnlineCatalogProvider = {
+@@ -20,12 +29,19 @@ export const qishuiCatalog: OnlineCatalogProvider = {
+             const page = await requestQishui<ProviderPage<unknown>>('recent_played', { limit, offset });
+             return { ...page, items: page.items.map(normalizeQishuiSong) };
+         }
++        const scene = sceneIdOf(id);
++        if (scene) {
++            const page = await requestQishui<ProviderPage<unknown>>('feed', { queue: 'fm', scene, limit, offset });
++            return { ...page, items: page.items.map(normalizeQishuiSong) };
++        }
+         const page = await requestQishui<ProviderPage<unknown>>('playlist_tracks', { id: String(id), limit, offset,
+             ownerId: typeof collection?.providerData?.ownerId === 'string' ? collection.providerData.ownerId : '' });
+         return { ...page, items: page.items.map(normalizeQishuiSong) };
+     },
+     async getPlaylistDetail(id, collection) {
+         if (id === RECENT_ID) return recentCollection();
++        // 场景卡片自带名字与封面（首页那张卡片就是它），没有更细的详情可读。
++        if (sceneIdOf(id)) return collection ?? null;
+         const raw = await requestQishui('playlist_detail', { id: String(id), limit: 1,
+             ownerId: typeof collection?.providerData?.ownerId === 'string' ? collection.providerData.ownerId : '' });
+         if (!raw) return null;

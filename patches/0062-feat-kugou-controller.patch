@@ -1,0 +1,646 @@
+From c3218a3caa973fb6a67018f53b990960ea6e7a5b Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:04:57 +0800
+Subject: [PATCH 62/90] =?UTF-8?q?feat(kugou):=20=E6=89=8B=E6=9C=BA?=
+ =?UTF-8?q?=E5=8F=B7=E9=AA=8C=E8=AF=81=E7=A0=81=E7=99=BB=E5=BD=95=E8=A1=A8?=
+ =?UTF-8?q?=E5=8D=95=E4=B8=8E=E8=B4=A6=E6=88=B7=20controller=20=E6=8E=A5?=
+ =?UTF-8?q?=E7=BA=BF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- controller 增加 phoneLogin 快照与 sendPhoneCode / confirmPhoneLogin / closePhoneLogin；
+  startLogin 遇到支持手机号登录的平台直接开表单，不建扫码会话。
+- App 渲染 PhoneLoginSheet（手机号 / 验证码 / 60 秒重发倒计时 / 错误行）。
+- 酷狗匿名模式的 capabilities.auth 改为 true：切到酷狗先进登录，符合「必须登录」的选择；
+  未登录时账户行显示「未登录」而不是「无需登录」。
+- useKugouLibrary：有页面直连会话时照常刷新登录状态，没有时保持匿名。
+- i18n 三语补 kugouLogin.*。
+---
+ src/App.tsx                                   |  13 ++
+ .../app/account/PhoneLoginSheet.tsx           | 149 ++++++++++++++++++
+ src/hooks/useKugouLibrary.ts                  |   7 +-
+ src/i18n/locales/en.ts                        |  12 ++
+ src/i18n/locales/in.ts                        |  12 ++
+ src/i18n/locales/zh-CN.ts                     |  12 ++
+ src/library/core/contracts/account.ts         |  37 ++++-
+ .../services/providerAccountController.ts     | 131 ++++++++++++++-
+ src/services/onlineMusic/kugouProvider.ts     |  11 +-
+ .../library/core/useLibraryAccount.test.ts    |   1 +
+ .../player-panel/accountTabLogout.test.ts     |   1 +
+ 11 files changed, 367 insertions(+), 19 deletions(-)
+ create mode 100644 src/components/app/account/PhoneLoginSheet.tsx
+
+diff --git a/src/App.tsx b/src/App.tsx
+index bde5097..e491bac 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -80,6 +80,8 @@ import { useLibraryAccountController } from './library/app/useLibraryAccountCont
+ import { createLibraryAccountSwitchCleanupPort } from './library/app/createLibraryAccountPort';
+ import { useAppWallToolsHost } from './components/app/wall-tools/useAppWallToolsHost';
+ import { useLibraryAccountProviders } from './library/core/bindings/useLibraryAccount';
++import { useLibraryAccountSelector } from './library/core/bindings/useLibraryAccount';
++import PhoneLoginSheet from './components/app/account/PhoneLoginSheet';
+ import { resolveActiveProviderSummary } from './library/core/model/accountRules';
+ import { useAppPreferences } from './hooks/useAppPreferences';
+ import { useElectronPlaybackBridge } from './hooks/useElectronPlaybackBridge';
+@@ -780,6 +782,8 @@ export default function App() {
+         switchCleanup: providerSwitchCleanup,
+     });
+     const { providers: onlineProviders, activeProviderId } = useLibraryAccountProviders(accountController);
++    // 手机号验证码登录（酷狗在没有后端实例时）：快照里有表单就渲染，动作直接交给 controller。
++    const phoneLogin = useLibraryAccountSelector(accountController, snapshot => snapshot.phoneLogin);
+     const activeProvider = useMemo(
+         () => resolveActiveProviderSummary(onlineProviders, activeProviderId),
+         [activeProviderId, onlineProviders],
+@@ -2921,6 +2925,15 @@ export default function App() {
+             />
+ 
+             <AppDialogs model={appDialogsModel} />
++            {phoneLogin && (
++                <PhoneLoginSheet
++                    providerLabel={omni.getProviderLabel(phoneLogin.providerId)}
++                    state={phoneLogin}
++                    onSendCode={mobile => accountController.sendPhoneCode(mobile)}
++                    onSubmit={(mobile, code) => accountController.confirmPhoneLogin(mobile, code)}
++                    onClose={() => { void accountController.closePhoneLogin(); }}
++                />
++            )}
+             <ReleaseNotesDialog
+                 isOpen={startupExperience.isReleaseNotesOpen}
+                 isDaylight={isDaylight}
+diff --git a/src/components/app/account/PhoneLoginSheet.tsx b/src/components/app/account/PhoneLoginSheet.tsx
+new file mode 100644
+index 0000000..f66444f
+--- /dev/null
++++ b/src/components/app/account/PhoneLoginSheet.tsx
+@@ -0,0 +1,149 @@
++import React, { useEffect, useMemo, useState } from 'react';
++import { Loader2, Smartphone, X } from 'lucide-react';
++import { useTranslation } from 'react-i18next';
++import type { LibraryPhoneLoginState } from '../../../library/core/contracts/account';
++
++// src/components/app/account/PhoneLoginSheet.tsx
++// 手机号验证码登录的表单（酷狗在没有后端实例时；扫码面板在这类平台上没有二维码可要）。
++// 只画表单：发码、提交、关闭都由账户 controller 提供，状态（在途 / 错误 / 上次发码时间）从快照读。
++
++const RESEND_COOLDOWN_SECONDS = 60;
++// 中国大陆手机号：1 开头的 11 位数字。只做形状校验，号码是否存在由服务端回答。
++const MOBILE_PATTERN = /^1\d{10}$/;
++
++type PhoneLoginSheetProps = {
++    providerLabel: string;
++    state: LibraryPhoneLoginState;
++    onSendCode: (mobile: string) => Promise<unknown>;
++    onSubmit: (mobile: string, code: string) => Promise<unknown>;
++    onClose: () => void;
++};
++
++const PhoneLoginSheet: React.FC<PhoneLoginSheetProps> = ({
++    providerLabel,
++    state,
++    onSendCode,
++    onSubmit,
++    onClose,
++}) => {
++    const { t } = useTranslation();
++    const [mobile, setMobile] = useState('');
++    const [code, setCode] = useState('');
++    // 倒计时每一秒推进一次；只影响重发按钮的可用性与文案。
++    const [nowTick, setNowTick] = useState(() => Date.now());
++
++    useEffect(() => {
++        if (!state.codeSentAt) return undefined;
++        const timer = window.setInterval(() => setNowTick(Date.now()), 1000);
++        return () => window.clearInterval(timer);
++    }, [state.codeSentAt]);
++
++    const cooldown = useMemo(() => {
++        if (!state.codeSentAt) return 0;
++        const elapsed = Math.floor((nowTick - state.codeSentAt) / 1000);
++        return Math.max(0, RESEND_COOLDOWN_SECONDS - elapsed);
++    }, [nowTick, state.codeSentAt]);
++
++    const mobileValid = MOBILE_PATTERN.test(mobile);
++    const sending = state.pending === 'code';
++    const loggingIn = state.pending === 'login';
++    const canSend = mobileValid && !sending && !loggingIn && cooldown === 0;
++    const canSubmit = mobileValid && code.trim().length >= 4 && !sending && !loggingIn;
++
++    return (
++        <div
++            className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4 backdrop-blur-xl"
++            role="dialog"
++            aria-modal="true"
++            aria-label={t('kugouLogin.title')}
++        >
++            <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-zinc-900/95 p-6 text-left shadow-2xl">
++                <div className="mb-4 flex items-start justify-between gap-3">
++                    <div>
++                        <h3 className="text-base font-bold" style={{ color: 'var(--text-primary)' }}>
++                            {t('kugouLogin.title')}
++                        </h3>
++                        <p className="mt-1 text-[11px] leading-snug opacity-55" style={{ color: 'var(--text-secondary)' }}>
++                            {t('kugouLogin.hint')}
++                        </p>
++                    </div>
++                    <button
++                        type="button"
++                        onClick={onClose}
++                        aria-label={t('kugouLogin.title')}
++                        className="shrink-0 rounded-full bg-white/5 p-1 opacity-50 transition-opacity hover:opacity-100"
++                    >
++                        <X size={16} />
++                    </button>
++                </div>
++
++                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.16em] opacity-45" htmlFor="kugou-phone">
++                    {t('kugouLogin.mobile')}
++                </label>
++                <div className="mb-3 flex items-center gap-2">
++                    <div className="flex flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
++                        <Smartphone size={14} className="opacity-40" aria-hidden />
++                        <input
++                            id="kugou-phone"
++                            type="tel"
++                            inputMode="tel"
++                            autoComplete="tel"
++                            maxLength={11}
++                            value={mobile}
++                            placeholder={providerLabel}
++                            onChange={event => setMobile(event.target.value.replace(/\D/g, '').slice(0, 11))}
++                            className="min-w-0 flex-1 bg-transparent text-sm outline-none"
++                            style={{ color: 'var(--text-primary)' }}
++                        />
++                    </div>
++                    <button
++                        type="button"
++                        disabled={!canSend}
++                        onClick={() => { void onSendCode(mobile); }}
++                        className="shrink-0 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold disabled:opacity-35"
++                        style={{ color: 'var(--text-primary)' }}
++                    >
++                        {sending
++                            ? t('kugouLogin.sending')
++                            : cooldown > 0
++                                ? t('kugouLogin.resend', { seconds: cooldown })
++                                : t('kugouLogin.send')}
++                    </button>
++                </div>
++
++                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.16em] opacity-45" htmlFor="kugou-code">
++                    {t('kugouLogin.code')}
++                </label>
++                <input
++                    id="kugou-code"
++                    type="text"
++                    inputMode="numeric"
++                    autoComplete="one-time-code"
++                    maxLength={8}
++                    value={code}
++                    onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 8))}
++                    className="mb-3 w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm tracking-[0.3em] outline-none"
++                    style={{ color: 'var(--text-primary)' }}
++                />
++
++                {state.error && (
++                    <p className="mb-3 text-[11px] leading-snug text-red-400" role="alert">
++                        {t('kugouLogin.failed', { message: state.error })}
++                    </p>
++                )}
++
++                <button
++                    type="button"
++                    disabled={!canSubmit}
++                    onClick={() => { void onSubmit(mobile, code.trim()); }}
++                    className="flex w-full items-center justify-center gap-2 rounded-2xl bg-green-500/90 px-4 py-2.5 text-sm font-semibold text-black disabled:opacity-35"
++                >
++                    {loggingIn && <Loader2 size={14} className="animate-spin" aria-hidden />}
++                    {loggingIn ? t('kugouLogin.loggingIn') : t('kugouLogin.submit')}
++                </button>
++            </div>
++        </div>
++    );
++};
++
++export default PhoneLoginSheet;
+diff --git a/src/hooks/useKugouLibrary.ts b/src/hooks/useKugouLibrary.ts
+index 97b8a1f..b168fe1 100644
+--- a/src/hooks/useKugouLibrary.ts
++++ b/src/hooks/useKugouLibrary.ts
+@@ -5,6 +5,7 @@ import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccoun
+ import type { MediaId, ProviderCollection, ProviderUser } from '../types/onlineMusic';
+ import { ANONYMOUS_PUBLIC_MODE } from '../types/onlineMusic';
+ import { handleLoginStatusFailure } from '../services/onlineMusic/loginStatusFailure';
++import { hasKugouWebSession } from '../services/onlineMusic/kugouWebAuth';
+ import {
+     clearProviderAccountSnapshot,
+     loadProviderAccountSnapshot,
+@@ -120,9 +121,9 @@ export const useKugouLibrary = () => {
+     const refresh = useCallback(async () => {
+         const availability = omni.getProviderAvailability('kugou');
+         console.info('[KugouLibrary] refresh:start', { configured: availability.configured, mode: availability.mode });
+-        // 匿名公开模式（网页版只走酷狗公开接口）没有账户后端：没有可刷新的账号，也没有能求解的登录态，
+-        // 所以直接保持匿名，不去读登录状态、也不清任何会话，检索与播放仍由 provider 的公网路径承担。
+-        if (availability.mode === ANONYMOUS_PUBLIC_MODE) {
++        // 匿名公开模式（网页版只走酷狗公开接口）没有账户后端，但可以有页面直连的手机号登录：
++        // 没会话时保持匿名（不读登录状态、也不清任何东西）；有会话就照常走下面的登录状态刷新。
++        if (availability.mode === ANONYMOUS_PUBLIC_MODE && !hasKugouWebSession()) {
+             updateAccount('kugou', {
+                 status: 'anonymous',
+                 user: null,
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index 14da1f7..e3aff68 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -1,6 +1,18 @@
+ 
+ 
+ export default {
++  "kugouLogin": {
++    "title": "Sign in to KuGou",
++    "hint": "Enter your phone number and the code we send. The session is remembered with the account, so switching platforms does not sign you out.",
++    "mobile": "Phone number",
++    "code": "Verification code",
++    "send": "Send code",
++    "resend": "Resend in {{seconds}}s",
++    "submit": "Sign in",
++    "sending": "Sending…",
++    "loggingIn": "Signing in…",
++    "failed": "Sign-in failed: {{message}}"
++  },
+   "libraryBravais": {
+     "suiteName": "Bravais wall",
+     "homeTitle": "Library",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index 556a562..5a5e4e3 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -1,6 +1,18 @@
+ 
+ 
+ export default {
++  "kugouLogin": {
++    "title": "Masuk ke KuGou",
++    "hint": "Masukkan nomor ponsel dan kode yang kami kirim. Sesi diingat bersama akun, jadi berpindah platform tidak membuat Anda keluar.",
++    "mobile": "Nomor ponsel",
++    "code": "Kode verifikasi",
++    "send": "Kirim kode",
++    "resend": "Kirim ulang dalam {{seconds}} dtk",
++    "submit": "Masuk",
++    "sending": "Mengirim…",
++    "loggingIn": "Sedang masuk…",
++    "failed": "Gagal masuk: {{message}}"
++  },
+   "libraryBravais": {
+     "suiteName": "Dinding Bravais",
+     "homeTitle": "Pustaka",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 6a2c37a..383c27e 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -1,6 +1,18 @@
+ 
+ 
+ export default {
++  "kugouLogin": {
++    "title": "登录酷狗",
++    "hint": "输入手机号，收到验证码后登录。登录状态会跟着账号记住，切平台再切回来不用重登。",
++    "mobile": "手机号",
++    "code": "验证码",
++    "send": "获取验证码",
++    "resend": "{{seconds}} 秒后重发",
++    "submit": "登录",
++    "sending": "发送中…",
++    "loggingIn": "登录中…",
++    "failed": "登录失败：{{message}}"
++  },
+   "libraryBravais": {
+     "suiteName": "Bravais 墙面",
+     "homeTitle": "书库",
+diff --git a/src/library/core/contracts/account.ts b/src/library/core/contracts/account.ts
+index 18453c6..94a9a44 100644
+--- a/src/library/core/contracts/account.ts
++++ b/src/library/core/contracts/account.ts
+@@ -4,6 +4,7 @@ import type {
+     OnlineProviderId,
+     ProviderAccountSummary,
+     ProviderCapabilities,
++    ProviderUser,
+     QrLoginFailureKind,
+     QrLoginMethod,
+     QrLoginState,
+@@ -159,12 +160,34 @@ export type LibraryLoginCompletion = {
+     outcome: LibraryLoginOutcome;
+ };
+ 
++/**
++ * 手机号验证码登录的会话（酷狗在没有后端实例时走这条路）。
++ *
++ * 不走扫码会话：没有二维码、没有轮询，只有一个表单。`codeSentAt` 用来做重发倒计时，
++ * `pending` 让表单在请求在途时禁用按钮。
++ */
++export type LibraryPhoneLoginState = {
++    providerId: OnlineProviderId;
++    pending: 'code' | 'login' | null;
++    /** 最近一次失败的原因（已翻译前的原文，UI 直接显示）。 */
++    error: string | null;
++    /** 发码成功的时间戳；null 表示还没发过。 */
++    codeSentAt: number | null;
++};
++
++/** 手机号登录动作的结果；stale 表示表单已经被关掉或换了一轮。 */
++export type LibraryPhoneLoginActionResult =
++    | { status: 'ok' }
++    | { status: 'failed'; message: string }
++    | { status: 'stale' };
++
+ export type LibraryAccountSnapshot = {
+     /** provider 注册表 × 账户 store（omni.getProviderSummaries），mod 源增删时会变。 */
+     providers: ProviderAccountSummary[];
+     /** 已回落过的当前平台：存的平台不在列表里时是 netease（core/model/accountRules 的 resolveActiveProviderId）。 */
+     activeProviderId: OnlineProviderId;
+     login: LibraryLoginSessionSnapshot | null;
++    phoneLogin: LibraryPhoneLoginState | null;
+     pendingSwitch: LibraryProviderSwitchRequest | null;
+     logout: LibraryAccountLogoutState;
+     lastLoginCompletion: LibraryLoginCompletion | null;
+@@ -199,7 +222,7 @@ export type LibrarySwitchCancelResult =
+  * 之后的扫码进度（含要码失败 start-error）都在快照里。superseded：登录方式还没解析完就有更新的 startLogin。
+  */
+ export type LibraryStartLoginResult =
+-    | { status: 'started'; providerId: OnlineProviderId; sessionId: number; step: 'choosing-method' | 'qr' }
++    | { status: 'started'; providerId: OnlineProviderId; sessionId: number; step: 'choosing-method' | 'qr' | 'phone' }
+     | { status: 'superseded'; providerId: OnlineProviderId }
+     | { status: 'unavailable'; providerId: OnlineProviderId; reason: LibraryProviderUnavailableReason };
+ 
+@@ -268,6 +291,12 @@ export interface LibraryAccountController {
+     cancelSwitch(requestId: number): LibrarySwitchCancelResult;
+     /** 解析登录方式（带竞态代次）；单方式直接要码，多方式停在 choosing-method。旧会话先 keyed 取消。 */
+     startLogin(providerId: OnlineProviderId): Promise<LibraryStartLoginResult>;
++    /** 手机号验证码登录：发码（结果写回 phoneLogin.error / codeSentAt）。 */
++    sendPhoneCode(mobile: string): Promise<LibraryPhoneLoginActionResult>;
++    /** 手机号验证码登录：提交；成功后刷新账户并像扫码确认一样收尾。 */
++    confirmPhoneLogin(mobile: string, code: string): Promise<LibraryPhoneLoginActionResult>;
++    /** 关掉手机号登录表单（不发任何请求）。 */
++    closePhoneLogin(): LibraryLoginCloseResult;
+     selectLoginMethod(methodId: string): Promise<LibraryLoginRequestResult>;
+     /** 保留已选的登录方式重新要码。 */
+     retryLogin(): Promise<LibraryLoginRequestResult>;
+@@ -304,6 +333,12 @@ export type LibraryAccountAuthPort = {
+     /** 主动自检；没有可检查的对象时 resolve null，自检本身出错时 reject。 */
+     runQrLoginSelfCheck(providerId: OnlineProviderId): Promise<LoginSelfCheckResult | null>;
+     getProviderCapabilities(providerId: OnlineProviderId): Pick<ProviderCapabilities, 'auth'>;
++    /** 这个平台此刻能不能用手机号验证码登录（酷狗在无后端实例时）。不实现就当不能。 */
++    canLoginWithCode?(providerId: OnlineProviderId): boolean;
++    /** 发验证码；没有手机号登录的 provider 不实现。 */
++    sendLoginCode?(providerId: OnlineProviderId, mobile: string): Promise<void>;
++    /** 提交验证码登录，成功后返回登录到的用户。 */
++    loginWithCode?(providerId: OnlineProviderId, mobile: string, code: string): Promise<ProviderUser>;
+ };
+ 
+ /**
+diff --git a/src/library/core/services/providerAccountController.ts b/src/library/core/services/providerAccountController.ts
+index 3688656..c5ef9c8 100644
+--- a/src/library/core/services/providerAccountController.ts
++++ b/src/library/core/services/providerAccountController.ts
+@@ -13,6 +13,8 @@ import type {
+     LibraryLoginRequestResult,
+     LibraryLoginSessionSnapshot,
+     LibraryLogoutResult,
++    LibraryPhoneLoginActionResult,
++    LibraryPhoneLoginState,
+     LibraryProviderSwitchReason,
+     LibraryProviderSwitchRequest,
+     LibrarySelectProviderResult,
+@@ -146,6 +148,8 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+     let switchSeq = 0;
+     let logout: LibraryAccountLogoutState = IDLE_LOGOUT;
+     let lastLoginCompletion: LibraryLoginCompletion | null = null;
++    // 手机号验证码登录（酷狗在没有后端实例时）：与扫码会话互斥，只有一个表单。
++    let phoneLogin: LibraryPhoneLoginState | null = null;
+     let snapshot: LibraryAccountSnapshot;
+     // 内部一次改多处时只在最外层结束后重建一次快照，避免中间态（例如会话 start 同步发出的通知）漏到界面。
+     let batchDepth = 0;
+@@ -161,6 +165,11 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+     const activeProviderId = (): OnlineProviderId => resolveActiveProviderId(providers, accounts.getStoredActiveProviderId());
+     const findProvider = (providerId: OnlineProviderId) => providers.find(provider => provider.providerId === providerId);
+ 
++    /** 这个平台此刻能不能用手机号验证码登录（酷狗在没有后端实例时，端口才声明这两个方法）。 */
++    const supportsPhoneLogin = (providerId: OnlineProviderId): boolean => (
++        typeof auth.canLoginWithCode === 'function' && auth.canLoginWithCode(providerId)
++    );
++
+     // 会话属于当前登录时取它的原始状态；还没要码（或会话快照还没换到这一轮）时视为 loading。
+     const deriveLogin = (previous: LibraryLoginSessionSnapshot | null): LibraryLoginSessionSnapshot | null => {
+         if (!login) return null;
+@@ -201,6 +210,7 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+             providers,
+             activeProviderId: activeProviderId(),
+             login: deriveLogin(previous?.login ?? null),
++            phoneLogin,
+             pendingSwitch: pending?.request ?? null,
+             logout,
+             lastLoginCompletion,
+@@ -210,6 +220,7 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+             && previous.providers === next.providers
+             && previous.activeProviderId === next.activeProviderId
+             && previous.login === next.login
++            && previous.phoneLogin === next.phoneLogin
+             && previous.pendingSwitch === next.pendingSwitch
+             && previous.logout === next.logout
+             && previous.lastLoginCompletion === next.lastLoginCompletion
+@@ -347,18 +358,28 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+         const selection = resolveProviderSelection(findProvider(providerId));
+         if (selection.kind === 'unavailable') return { status: 'unavailable', providerId, reason: selection.reason };
+         const attempt = ++loginSeq;
++        // 手机号验证码登录（酷狗在没有后端实例时）：没有二维码可要，直接开表单，不建扫码会话。
++        const phone = supportsPhoneLogin(providerId);
+         batch(() => {
+             // 单一在途登录：先停旧会话（keyed 取消），旧会话不会再在后台替旧平台确认（A0 记下的潜在 bug）。
+             session.stop();
+-            login = {
+-                id: attempt,
+-                providerId,
+-                methods: NO_METHODS,
+-                selectedMethodId: null,
+-                stage: 'resolving-methods',
+-                sessionId: null,
+-            };
++            login = phone
++                ? null
++                : {
++                    id: attempt,
++                    providerId,
++                    methods: NO_METHODS,
++                    selectedMethodId: null,
++                    stage: 'resolving-methods',
++                    sessionId: null,
++                };
++            phoneLogin = phone
++                ? { providerId, pending: null, error: null, codeSentAt: null }
++                : null;
+         });
++        if (phone) {
++            return { status: 'started', providerId, sessionId: attempt, step: 'phone' };
++        }
+         let methods: readonly QrLoginMethod[];
+         try {
+             methods = await auth.resolveQrLoginMethods(providerId);
+@@ -379,6 +400,97 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+         return { status: 'started', providerId, sessionId: attempt, step: 'qr' };
+     };
+ 
++    // ─── 手机号验证码登录（酷狗在没有后端实例时） ───────────────────────
++
++    const closePhoneLogin = (): LibraryLoginCloseResult => {
++        if (!phoneLogin) return { status: 'no-session' };
++        const sessionId = loginSeq;
++        batch(() => {
++            loginSeq += 1;
++            phoneLogin = null;
++        });
++        return { status: 'closed', sessionId };
++    };
++
++    const sendPhoneCode = async (mobile: string): Promise<LibraryPhoneLoginActionResult> => {
++        const current = phoneLogin;
++        if (!current) return { status: 'stale' };
++        if (!auth.sendLoginCode) return { status: 'failed', message: 'phone login is not supported' };
++        batch(() => {
++            phoneLogin = { ...current, pending: 'code', error: null };
++        });
++        try {
++            await auth.sendLoginCode(current.providerId, mobile);
++        } catch (error) {
++            const message = describeError(error);
++            if (phoneLogin && phoneLogin.providerId === current.providerId) {
++                batch(() => {
++                    phoneLogin = { ...current, pending: null, error: message };
++                });
++            }
++            return { status: 'failed', message };
++        }
++        if (!phoneLogin || phoneLogin.providerId !== current.providerId) return { status: 'stale' };
++        batch(() => {
++            phoneLogin = { ...current, pending: null, error: null, codeSentAt: deps.clock.now() };
++        });
++        return { status: 'ok' };
++    };
++
++    const confirmPhoneLogin = async (mobile: string, code: string): Promise<LibraryPhoneLoginActionResult> => {
++        const current = phoneLogin;
++        if (!current) return { status: 'stale' };
++        if (!auth.loginWithCode) return { status: 'failed', message: 'phone login is not supported' };
++        batch(() => {
++            phoneLogin = { ...current, pending: 'login', error: null };
++        });
++        try {
++            await auth.loginWithCode(current.providerId, mobile, code);
++        } catch (error) {
++            const message = describeError(error);
++            if (phoneLogin && phoneLogin.providerId === current.providerId) {
++                batch(() => {
++                    phoneLogin = { ...current, pending: null, error: message };
++                });
++            }
++            return { status: 'failed', message };
++        }
++
++        // 登录成功：收起表单，刷新账户，然后走与扫码确认相同的收尾（不是当前平台就发起激活切换）。
++        const completionId = ++loginSeq;
++        batch(() => {
++            phoneLogin = null;
++        });
++        const refreshed = await providerAccounts.refresh(current.providerId)
++            .then(() => true)
++            .catch(error => {
++                log('warn', 'phone-login:refresh-error', describeLoginError(error));
++                return false;
++            });
++        if (!refreshed) {
++            batch(() => {
++                lastLoginCompletion = { sessionId: completionId, providerId: current.providerId, outcome: 'refresh-failed' };
++            });
++            return { status: 'ok' };
++        }
++        const needsActivation = current.providerId !== activeProviderId();
++        if (!needsActivation) {
++            batch(() => {
++                lastLoginCompletion = { sessionId: completionId, providerId: current.providerId, outcome: 'completed' };
++            });
++            return { status: 'ok' };
++        }
++        const result = await openSwitchRequest(current.providerId, 'activate-after-login');
++        batch(() => {
++            lastLoginCompletion = {
++                sessionId: completionId,
++                providerId: current.providerId,
++                outcome: result.status === 'switched' ? 'completed' : 'activation-declined',
++            };
++        });
++        return { status: 'ok' };
++    };
++
+     const currentBackend = (current: LoginState) => resolveLoginBackendState(current.providerId, neteaseBackend.getHealth());
+ 
+     const selectLoginMethod = async (methodId: string): Promise<LibraryLoginRequestResult> => {
+@@ -529,6 +641,9 @@ export const createProviderAccountController = (deps: LibraryAccountControllerDe
+         confirmSwitch,
+         cancelSwitch,
+         startLogin,
++        sendPhoneCode,
++        confirmPhoneLogin,
++        closePhoneLogin,
+         selectLoginMethod,
+         retryLogin,
+         closeLogin,
+diff --git a/src/services/onlineMusic/kugouProvider.ts b/src/services/onlineMusic/kugouProvider.ts
+index e021918..4259eac 100644
+--- a/src/services/onlineMusic/kugouProvider.ts
++++ b/src/services/onlineMusic/kugouProvider.ts
+@@ -1037,16 +1037,13 @@ const KUGOU_FULL_CAPABILITIES: ProviderCapabilities = {
+ };
+ 
+ /**
+- * 匿名公开模式（网页版没有实例、也没有账号后端）下只承诺三件事：检索、播放、歌词——它们由酷狗自己的
+- * 公开接口承担，已对真实端点实测可用。其余能力全部落在实例或账户那一侧，声明为真只会让界面摆出
+- * 点了必然失败的功能。
+- *
+- * `auth` 尤其关键：omni 用它算出 requiresAccount，为真时选中音源会进入二维码登录流程而不是直接切换，
+- * 而这一模式没有可登录的后端，于是活动音源永远切不过去，能用的匿名检索也就无从进入。
++ * 匿名公开模式（网页版没有实例、也没有账号后端）下的能力：检索、播放、歌词由酷狗自己的公开接口承担，
++ * 登录走页面直连的手机号验证码通道（kugouWebAuth），因此 auth 为真——选中音源会先进登录表单。
++ * 歌单/红心/日推这些仍需要实例接口，声明为真只会让界面摆出点了必然失败的功能。
+  */
+ const KUGOU_ANONYMOUS_PUBLIC_CAPABILITIES: ProviderCapabilities = {
+     ...KUGOU_FULL_CAPABILITIES,
+-    auth: false,
++    auth: true,
+     userLibrary: false,
+     playlists: false,
+     albums: false,
+diff --git a/test/unit/library/core/useLibraryAccount.test.ts b/test/unit/library/core/useLibraryAccount.test.ts
+index 261545c..96a58fb 100644
+--- a/test/unit/library/core/useLibraryAccount.test.ts
++++ b/test/unit/library/core/useLibraryAccount.test.ts
+@@ -84,6 +84,7 @@ const baseSnapshot = (): LibraryAccountSnapshot => ({
+     providers: PROVIDERS,
+     activeProviderId: 'netease',
+     login: null,
++    phoneLogin: null,
+     pendingSwitch: null,
+     logout: { providerId: null, status: 'idle' },
+     lastLoginCompletion: null,
+diff --git a/test/unit/player-panel/accountTabLogout.test.ts b/test/unit/player-panel/accountTabLogout.test.ts
+index c0c850b..627f01b 100644
+--- a/test/unit/player-panel/accountTabLogout.test.ts
++++ b/test/unit/player-panel/accountTabLogout.test.ts
+@@ -74,6 +74,7 @@ const snapshotWith = (provider: ProviderAccountSummary): LibraryAccountSnapshot
+     providers: [provider],
+     activeProviderId: provider.providerId,
+     login: null,
++    phoneLogin: null,
+     pendingSwitch: null,
+     logout: { providerId: null, status: 'idle' },
+     lastLoginCompletion: null,

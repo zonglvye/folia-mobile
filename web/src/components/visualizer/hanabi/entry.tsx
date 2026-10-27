@@ -2,12 +2,15 @@
 //
 // 与上游 v0.7.22 的 hanabi/entry.tsx 的差异（都只在鸿蒙/手机这一侧，不涉及渲染本身）：
 //   1. 补 `tuningKind: 'hanabi'` —— 我们的 registry 契约要求每个样式声明它。
-//   2. 去掉 `renderSettingsPanel` / `renderQuickControls` —— 它们依赖上游 0.7.21 的设置套件
-//      （settings/kit、panelRows）与调参存储，我们这一版先只保证画面对；面板随后单独补。
+//   2. 参数由 tuning 注册表注入成 props.hanabiTuning（见 ./tuning.ts），不再由 render 里手写。
+//   3. 面板沿用本仓库的 RangeControl / SettingsSection 写法（见 ./HanabiSettingsPanel.tsx）。
+//   4. 播放面板的两个快捷开关（画框、拼贴）暂时不注册：它们要上游 `VisualizerQuickControlsProps`
+//      的另一套 props 形状，先把面板做齐。
 import React from 'react';
 import { BEAT_EFFECT_IDS } from '../../../services/beatFx/beatEffects';
 import { defineVisualizer } from '../definition';
-import hanabiTuning from './tuning';
+import HanabiSettingsPanel from './HanabiSettingsPanel';
+import { DEFAULT_HANABI_TUNING } from './types';
 
 const VisualizerHanabi = React.lazy(() => import('./VisualizerHanabi'));
 
@@ -52,6 +55,7 @@ export default defineVisualizer({
     ],
     // Deliberately unkeyed on the seed, like lumiere: the runtime hands a track change over in
     // place (songHandover.ts / pixiRuntimeHost.ts) instead of throwing the WebGL context away.
-    render: props => <VisualizerHanabi {...props} hanabiTuning={hanabiTuning.read(props.visualizerTunings)} />,
+    render: props => <VisualizerHanabi {...props} hanabiTuning={props.hanabiTuning ?? DEFAULT_HANABI_TUNING} />,
+    renderSettingsPanel: props => <HanabiSettingsPanel {...props} />,
     ownFontSizeNoticeKey: 'options.hanabiFontSizeAutoNotice',
 });

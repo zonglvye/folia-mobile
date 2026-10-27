@@ -1,0 +1,23 @@
+From d82287074eba5e6b53a5cb66b0983270b2daccf2 Mon Sep 17 00:00:00 2001
+From: zonglvye <zonglvye@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 23:33:22 +0800
+Subject: [PATCH 81/90] test: the store contract now has hanabi_tuning
+
+The persisted-key list is the contract that catches a storage key renamed by
+accident; Hanabi's tuning adds one, so the snapshot gains it.
+---
+ test/unit/stores/__snapshots__/storeContract.test.ts.snap | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/test/unit/stores/__snapshots__/storeContract.test.ts.snap b/test/unit/stores/__snapshots__/storeContract.test.ts.snap
+index 68b2c74..deeedfe 100644
+--- a/test/unit/stores/__snapshots__/storeContract.test.ts.snap
++++ b/test/unit/stores/__snapshots__/storeContract.test.ts.snap
+@@ -49,6 +49,7 @@ exports[`store contract > keeps every localStorage key the stores read or write
+   "gridview_min_card_opacity",
+   "gridview_min_card_scale",
+   "gridview_square_cards",
++  "hanabi_tuning",
+   "harmony_subtitle_background",
+   "hidden_grid_playlists",
+   "hide_taskbar_icon",

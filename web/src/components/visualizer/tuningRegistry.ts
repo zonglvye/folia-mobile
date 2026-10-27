@@ -15,6 +15,7 @@ import type {
     VisualizerMode,
 } from '../../types';
 import type { VisualizerSharedProps } from './definition';
+import type { HanabiTuning } from './hanabi/types';
 
 // src/components/visualizer/tuningRegistry.ts
 // Pure-data registry for transporting heterogeneous visualizer tuning without importing renderers.
@@ -32,6 +33,7 @@ export interface VisualizerTuningMap {
     sonnet: SonnetTuning;
     tempera: TemperaTuning;
     lumiere: LumiereTuning;
+    hanabi: HanabiTuning;
 }
 
 export type VisualizerTuningMode = keyof VisualizerTuningMap;

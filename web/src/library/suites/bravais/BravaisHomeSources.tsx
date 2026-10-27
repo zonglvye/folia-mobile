@@ -67,7 +67,9 @@ export const BravaisHomeOnline: React.FC<BravaisHomeSourceCommonProps & {
     account: LibraryAccountController;
 }> = ({ tab, online, list, account: accountController, homeActions, onOpenGridView, ...common }) => {
     const { t } = useTranslation();
-    const showList = online.accountView === 'authenticated';
+    // 已登录就照常列；游客可用的平台（汽水）在其某一眼真读到卡片时也列（电台：私人FM + 场景），
+    // 其余情况墙空着、缝里说原因。
+    const showList = online.accountView === 'authenticated' || (online.guestAccess && list.items.length > 0);
     useLibraryHomeListRegistration({
         enabled: showList,
         getState: (): LibraryHomeListState => ({

@@ -38,6 +38,7 @@ export class FoliaBridge {
     // 三个方法全是同步的（同 proxyStart/proxyPoll 的理由），见 MediaCache。
     'mediaPrepare',
     'mediaStatus',
+    'mediaProgress',
     'mediaRelease',
   ];
 
@@ -118,7 +119,7 @@ export class FoliaBridge {
       this.proxyResults.set(id, JSON.stringify(result));
     }).catch(() => {
       ShellLog.error(`proxy failed: ${requestUrl.slice(0, 120)}`);
-      const failed: ProxyResult = { status: 502, mime: 'application/json', charset: 'utf-8', body: '' };
+      const failed: ProxyResult = { status: 502, mime: 'application/json', charset: 'utf-8', body: '', headers: '{}' };
       this.proxyResults.set(id, JSON.stringify(failed));
     });
     return id;
@@ -164,6 +165,11 @@ export class FoliaBridge {
   /** `pending` | `ready` | `failed` | `missing`。 */
   mediaStatus(token: number): string {
     return MediaCache.status(token);
+  }
+
+  /** 已经到达的字节数：页面按这个数字决定能取到哪一段（流式播放用）。 */
+  mediaProgress(token: number): number {
+    return MediaCache.progress(token);
   }
 
   /** 换歌后释放上一首（壳内部也只留最近两条，这里主要是及时放掉）。 */

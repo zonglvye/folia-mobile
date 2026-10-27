@@ -1,0 +1,61 @@
+From 07493a079caab4624e339ba2f4a787361a6265f4 Mon Sep 17 00:00:00 2001
+From: zonglvye <zonglvye@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 21:32:18 +0800
+Subject: [PATCH 79/90] =?UTF-8?q?test:=20=E6=8A=8A=E8=8A=B1=E7=81=AB?=
+ =?UTF-8?q?=E4=B8=8E=E9=9A=8F=E6=9C=BA=E6=B1=A0=E5=B8=A6=E5=87=BA=E6=9D=A5?=
+ =?UTF-8?q?=E7=9A=84=E4=B8=89=E5=A4=84=E6=9C=9F=E6=9C=9B=E5=80=BC=E8=A1=A5?=
+ =?UTF-8?q?=E4=B8=8A?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+花火进了内建模式清单，于是两处「逐字相等」的断言要多一项；随机池新增了一个
+localStorage 键，键集合快照要多一条。
+
+- registry：入口 order=26，落在 lumiere(25) 与 classic(30) 之间。
+- tuningRegistry：hanabi 有 tuningKind，按字母序排在 fume 之后。
+- storeContract：random_visualizer_modes。
+
+现在 7903 通过 / 1 失败（既有的 modSignature 符号链接 EPERM）/ 2 跳过。
+---
+ test/unit/stores/__snapshots__/storeContract.test.ts.snap | 1 +
+ test/unit/visualizer/registry.test.ts                     | 1 +
+ test/unit/visualizer/tuningRegistry.test.ts               | 1 +
+ 3 files changed, 3 insertions(+)
+
+diff --git a/test/unit/stores/__snapshots__/storeContract.test.ts.snap b/test/unit/stores/__snapshots__/storeContract.test.ts.snap
+index d940407..68b2c74 100644
+--- a/test/unit/stores/__snapshots__/storeContract.test.ts.snap
++++ b/test/unit/stores/__snapshots__/storeContract.test.ts.snap
+@@ -115,6 +115,7 @@ exports[`store contract > keeps every localStorage key the stores read or write
+   "prevent_display_sleep_during_playback",
+   "queue_add_behavior",
+   "queue_palette_keep_open",
++  "random_visualizer_modes",
+   "reduce_motion_collectionMorph",
+   "reduce_motion_follow_system",
+   "reduce_motion_lattice",
+diff --git a/test/unit/visualizer/registry.test.ts b/test/unit/visualizer/registry.test.ts
+index 22cc0a1..d892158 100644
+--- a/test/unit/visualizer/registry.test.ts
++++ b/test/unit/visualizer/registry.test.ts
+@@ -15,6 +15,7 @@ describe('visualizer registry', () => {
+             'sonnet',
+             'tempera',
+             'lumiere',
++            'hanabi',
+             'classic',
+             'cadenza',
+             'partita',
+diff --git a/test/unit/visualizer/tuningRegistry.test.ts b/test/unit/visualizer/tuningRegistry.test.ts
+index 18adc27..7eac7c7 100644
+--- a/test/unit/visualizer/tuningRegistry.test.ts
++++ b/test/unit/visualizer/tuningRegistry.test.ts
+@@ -16,6 +16,7 @@ describe('visualizer tuning registry', () => {
+             'classic',
+             'diorama',
+             'fume',
++            'hanabi',
+             'lumiere',
+             'monet',
+             'partita',

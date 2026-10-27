@@ -1,0 +1,208 @@
+From 3be3eaf1d988ee9a2f7430829708a46dff3999fe Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 17:36:16 +0800
+Subject: [PATCH 44/90] =?UTF-8?q?=E5=A3=B3=E5=86=85=E5=90=8C=E6=BA=90?=
+ =?UTF-8?q?=E4=BB=A3=E7=90=86=E6=94=B9=E8=B5=B0=E6=A1=A5=EF=BC=9A=E6=8B=A6?=
+ =?UTF-8?q?=E6=88=AA=E5=BC=8F=E5=9B=9E=E5=A1=AB=E5=9C=A8=E7=9C=9F=E6=9C=BA?=
+ =?UTF-8?q?=E4=B8=8A=E9=A1=B5=E9=9D=A2=E6=8B=BF=E5=88=B0=E7=A9=BA=20body?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+鸿蒙壳里网易云/酷狗/QQ 的请求都走同源 `/api/lyric-proxy`、`/api/netease-proxy`。
+安卓壳靠 WebResourceLoader 拦截应答，鸿蒙这边照搬发现不通，日志证据：
+
+  intercept filled: code=200 dataReady=true     ← 壳这边数据齐了
+  页面随后报"登录错误"，二维码不出来，之后一次代理请求都没有   ← 页面拿到的是空 body
+
+ArkWeb 的 onInterceptRequest 回调必须是同步的，"先返回空响应、稍后 setResponseData 回填"
+在真机上不交付。
+
+所以改成：壳用同步桥方法 proxyStart/proxyPoll 暴露代理（异步桥方法 asyncMethodList 也试过，
+方法确实被调到、上游也确实成功，但页面那边的 Promise 永不 resolve：日志里只有 proxy -> 没有
+proxy <-），页面侧由这个模块把 window.fetch 接到桥上。
+
+- 只有壳明确提供 proxyStart/proxyPoll 时才接管；浏览器、桌面 Electron、安卓壳行为不变
+- 上游错误（2300056 Failed to receive data from the peer）由壳侧重试解决，页面不知道
+- 顺带把页面侧结论也写进壳日志（report 通道），真机上 console 读不出来
+
+真机验证：扫码登录面板正常出二维码，且能看到 client/login 的 {"code":801,"等待扫码"} 轮询。
+
+待补：这个模块还没有单测（要 mock window.fetch 与桥）。
+---
+ src/index.tsx                   |   6 ++
+ src/services/shellFetchProxy.ts | 141 ++++++++++++++++++++++++++++++++
+ 2 files changed, 147 insertions(+)
+ create mode 100644 src/services/shellFetchProxy.ts
+
+diff --git a/src/index.tsx b/src/index.tsx
+index d793075..63ce01f 100644
+--- a/src/index.tsx
++++ b/src/index.tsx
+@@ -4,6 +4,7 @@ import { isAndroidShell } from './utils/platform';
+ import { installConsoleLogCapture } from './utils/consoleLogBuffer';
+ import { installDebugModule } from './services/debug/debugModule';
+ import { installMemorySampleFeed } from './services/debug/memorySamples';
++import { installShellFetchProxy } from './services/shellFetchProxy';
+ // import { installCoverSizeAudit } from './services/debug/coverSizeSamples';
+ // @ts-ignore
+ globalThis.Buffer = Buffer;
+@@ -28,6 +29,11 @@ if (isAndroidShell()) {
+ }
+ installGlobalVisualizerFrameRateLimiter();
+ 
++// 鸿蒙壳把同源代理做成了异步桥方法（ArkWeb 的拦截回调是同步的，拿不到上游数据）。
++// 有桥就把 fetch 接过去；浏览器 / 桌面 / 安卓壳没有这个方法，这一步什么也不做。
++// 必须在 bootstrap 之前装：provider 的第一次请求就在启动阶段。
++installShellFetchProxy();
++
+ // ---- service worker 策略 -------------------------------------------------------------
+ // 手机壳里**不注册** service worker，并且把以前注册过的那份清掉。
+ //
+diff --git a/src/services/shellFetchProxy.ts b/src/services/shellFetchProxy.ts
+new file mode 100644
+index 0000000..4c40b27
+--- /dev/null
++++ b/src/services/shellFetchProxy.ts
+@@ -0,0 +1,141 @@
++// src/services/shellFetchProxy.ts
++//
++// 打包壳里的同源代理通道。
++//
++// 背景：web 构建把酷狗/QQ/网易那些"没有 CORS 头的主机"的请求都写成同源的
++// `/api/lyric-proxy?url=…` 与 `/api/netease-proxy?…`。网页形态下由部署端的函数应答；安卓壳里由
++// Java 的 WebResourceLoader 拦截应答；鸿蒙壳里**不能**沿用拦截：ArkWeb 的 onInterceptRequest
++// 回调是同步的，而这两个代理都要联网 —— 先返回空响应、稍后 setResponseData 回填的写法在真机上
++// 页面拿到的是空 body（实测：壳这边 `code=200 dataReady=true`，页面却报"登录错误"、二维码不出来，
++// 而且之后一次代理请求都没有再发）。
++//
++// 所以鸿蒙壳改成异步桥方法 `proxyFetch(url) -> Promise<json>`，这个模块把 `window.fetch` 接到它
++// 上面。拦截那一侧被绕开，请求天然等得到上游。
++//
++// 只有桥明确提供 `proxyFetch` 时才接管。浏览器、桌面 Electron、安卓壳都没有这个方法，行为完全不变。
++
++/** 壳返回的一次代理结果。字段名是壳与页面之间的 wire format（见 shell/HttpProxy.ets）。 */
++export type ShellProxyResult = {
++    status: number;
++    mime: string;
++    charset: string;
++    /** 响应体的 base64。封面是二进制、歌词是文本，统一走 base64 就不用分两套。 */
++    body: string;
++};
++
++type ProxyFetchBridge = {
++    /** 发起一次代理请求，立刻返回 id；结果靠 proxyPoll 取。 */
++    proxyStart?: (requestUrl: string) => number;
++    /** 取结果：空串表示还在取。拿到之后壳会丢掉它。 */
++    proxyPoll?: (id: number) => string;
++    /** 页面侧的日志通道（ArkTS 的 console 在真机上读不出来，见壳里的 ShellLog）。 */
++    report?: (level: string, message: string) => void;
++};
++
++/** 轮询间隔与上限。代理本身有 10s/20s 的连接/读超时，这里留出余量。 */
++const POLL_INTERVAL_MS = 40;
++const POLL_TIMEOUT_MS = 30000;
++
++/** 需要接管的同源路径。改这里就要同步改 Android 壳与 api-ts 的路由。 */
++const PROXY_PATHS = ['/api/lyric-proxy', '/api/netease-proxy'];
++
++let installed = false;
++
++const readBridge = (): ProxyFetchBridge | undefined => (
++    typeof window === 'undefined'
++        ? undefined
++        : (window as { foliaAndroid?: ProxyFetchBridge }).foliaAndroid
++);
++
++const requestUrlOf = (input: RequestInfo | URL): string => {
++    if (typeof input === 'string') return input;
++    if (typeof URL !== 'undefined' && input instanceof URL) return input.toString();
++    return (input as Request).url;
++};
++
++const base64ToBytes = (base64: string): Uint8Array => {
++    if (!base64) return new Uint8Array(0);
++    const binary = atob(base64);
++    const bytes = new Uint8Array(binary.length);
++    for (let index = 0; index < binary.length; index += 1) {
++        bytes[index] = binary.charCodeAt(index);
++    }
++    return bytes;
++};
++
++const buildResponse = (result: ShellProxyResult): Response => {
++    const headers = new Headers();
++    if (result.mime) {
++        headers.set(
++            'content-type',
++            result.charset ? `${result.mime}; charset=${result.charset}` : result.mime,
++        );
++    }
++    // 交给 Response 的是一段独立的 ArrayBuffer：Uint8Array 可能是 SharedArrayBuffer 支撑的视图，
++    // 那样不满足 BodyInit（tsc 会拒），顺手也省掉一次拷贝歧义。
++    const bytes = base64ToBytes(result.body);
++    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
++    return new Response(buffer, { status: result.status, headers });
++};
++
++/**
++ * 装上 fetch 补丁，返回是否装上了（没有桥就是 false，调用方一般不需要关心）。
++ * 幂等：重复调用只装一次。
++ */
++export const installShellFetchProxy = (): boolean => {
++    if (installed) return true;
++
++    const bridge = readBridge();
++    if (typeof bridge?.proxyStart !== 'function' || typeof bridge.proxyPoll !== 'function') {
++        return false;
++    }
++    const proxyStart = bridge.proxyStart.bind(bridge);
++    const proxyPoll = bridge.proxyPoll.bind(bridge);
++
++    /**
++     * 一次代理请求 = proxyStart + 轮询 proxyPoll。
++     *
++     * 为什么是轮询而不是 async 桥方法：真机上 asyncMethodList 注册的方法确实被调到、上游也确实
++     * 成功，但页面这边的 Promise 永远不 resolve（壳日志里只有 `proxy ->` 没有 `proxy <-`）。
++     * 同步方法在这个桥上是确定可用的，所以把它拆成"发起 + 取结果"两步。
++     */
++    const runProxy = async (absolute: string): Promise<ShellProxyResult> => {
++        const id = proxyStart(absolute);
++        const deadline = Date.now() + POLL_TIMEOUT_MS;
++        while (Date.now() < deadline) {
++            const raw = proxyPoll(id);
++            if (raw) {
++                return JSON.parse(raw) as ShellProxyResult;
++            }
++            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
++        }
++        throw new Error('shell proxy timed out');
++    };
++
++    const originalFetch = window.fetch.bind(window);
++    window.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
++        let absolute: string;
++        try {
++            absolute = new URL(requestUrlOf(input), document.baseURI).href;
++        } catch {
++            return originalFetch(input, init);
++        }
++
++        if (!PROXY_PATHS.some(path => absolute.includes(path))) {
++            return originalFetch(input, init);
++        }
++
++        // 代理只发 GET（见 neteaseEapiTransport：上游方法、表单体、Cookie 都在 query 里），
++        // 所以 init 不参与，也不该参与。
++        return runProxy(absolute).then(result => {
++            const response = buildResponse(result);
++            bridge.report?.('I', `proxy <- ${result.status} ${result.mime} base64=${result.body.length}`);
++            return response;
++        }).catch(error => {
++            bridge.report?.('E', `proxy threw: ${absolute.slice(0, 100)} ${String(error).slice(0, 120)}`);
++            throw error;
++        });
++    };
++    installed = true;
++    return true;
++};

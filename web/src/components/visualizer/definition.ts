@@ -26,6 +26,7 @@ import {
 import type { VisualizerTuningBundle } from './tuningRegistry';
 import type { VisualizerBackgroundConfig } from './backgrounds/definition';
 import type { BeatEffectDef } from '../../services/beatFx/beatEffects';
+import type { HanabiTuning } from './hanabi/types';
 
 // src/components/visualizer/definition.ts
 // Shared contracts for discoverable visualizer modes.
@@ -107,6 +108,8 @@ export interface VisualizerSharedProps {
     onTemperaTuningChange?: (patch: Partial<TemperaTuning>) => void;
     lumiereTuning?: LumiereTuning;
     onLumiereTuningChange?: (patch: Partial<LumiereTuning>) => void;
+    hanabiTuning?: HanabiTuning;
+    onHanabiTuningChange?: (patch: Partial<HanabiTuning>) => void;
 }
 
 export interface VisualizerSettingsPanelProps {
@@ -154,6 +157,8 @@ export interface VisualizerSettingsPanelProps {
     onTemperaTuningChange?: (patch: Partial<TemperaTuning>) => void;
     lumiereTuning?: LumiereTuning;
     onLumiereTuningChange?: (patch: Partial<LumiereTuning>) => void;
+    hanabiTuning?: HanabiTuning;
+    onHanabiTuningChange?: (patch: Partial<HanabiTuning>) => void;
     /** Mark slider drag start so onChange only updates draft. */
     onSliderPointerDown?: () => void;
     /** Commit draft values to persistent store on slider release. */

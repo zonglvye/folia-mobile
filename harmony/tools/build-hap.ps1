@@ -91,9 +91,9 @@ Write-Host "DevEco Studio : $DevEcoDir"
 #
 # hvigor validates its own working directory and rejects anything outside
 #   letters digits - _ . ( ) space @
-# so a project checked out under a path holding non-ASCII characters cannot be built in place at
-# all. With the project at a plain ASCII path this whole step is skipped and the build runs where
-# the sources are - which is what DevEco Studio needs too.
+# so a project under e.g. "D:\dhs\<CJK>\folia-mobile\harmony" cannot be built in place at all.
+# With the project at an ASCII path (E:\huawei\harmony) this whole step is skipped and the build
+# runs where the sources are - which is what DevEco Studio needs too.
 $needsMirror = $projectDir -match '[^\x20-\x7E]'
 if ($needsMirror) {
     if ($WorkDir -match '[^\x20-\x7E]') {

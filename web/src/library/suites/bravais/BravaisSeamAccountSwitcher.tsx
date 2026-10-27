@@ -48,6 +48,13 @@ type BravaisAccountListPlacement = {
     bottom: number;
     width: number;
     maxHeight: number;
+    /**
+     * 往哪边长：入口上方空间够就往上长（底边对齐入口，桌面就是这样）；上方放不下整张列表时改成从入口往下长。
+     * 横屏手机只有 374px 高，入口又偏上，只往上长的话第四个平台会被裁在列表外面。
+     */
+    anchor: 'bottom' | 'top';
+    /** anchor 为 'top' 时用：列表顶边到 stage 顶端的距离。 */
+    top: number;
 };
 
 /** 按入口、缝与 stage 根节点的位置算列表放在哪：朝空间大的一侧，底边与入口底边对齐。 */
@@ -62,13 +69,19 @@ const placeAccountList = (entry: HTMLElement, seam: HTMLElement, host: HTMLEleme
     const left = side === 'right'
         ? seamRect.right - hostRect.left + LIST_SIDE_GAP
         : seamRect.left - hostRect.left - LIST_SIDE_GAP - width;
+    const spaceAbove = entryRect.bottom - hostRect.top - LIST_TOP_GAP;
+    const spaceBelow = hostRect.bottom - entryRect.top - LIST_TOP_GAP;
+    // 上方放得下就照旧往上长；放不下但下方更宽裕就翻到下面（横屏手机）。
+    const anchor: BravaisAccountListPlacement['anchor'] = spaceBelow > spaceAbove ? 'top' : 'bottom';
     return {
         host,
         side,
+        anchor,
+        top: Math.round(entryRect.top - hostRect.top),
         left: Math.round(left),
         bottom: Math.round(hostRect.bottom - entryRect.bottom),
         width: Math.round(width),
-        maxHeight: Math.max(0, Math.floor(entryRect.bottom - hostRect.top - LIST_TOP_GAP)),
+        maxHeight: Math.max(0, Math.floor(anchor === 'top' ? spaceBelow : spaceAbove)),
     };
 };
 
@@ -102,10 +115,12 @@ const BravaisAccountList: React.FC<{
             exit={pop.exit}
             transition={pop.transition}
             style={{
-                // 从入口那一侧的底角长出来。
-                transformOrigin: placement.side === 'right' ? '0% 100%' : '100% 100%',
+                // 从入口那一侧的角长出来（往上长取底角，往下长取顶角）。
+                transformOrigin: `${placement.side === 'right' ? '0%' : '100%'} ${placement.anchor === 'bottom' ? '100%' : '0%'}`,
                 left: placement.left,
-                bottom: placement.bottom,
+                ...(placement.anchor === 'bottom'
+                    ? { bottom: placement.bottom }
+                    : { top: placement.top }),
                 width: placement.width,
                 maxHeight: placement.maxHeight,
             }}
@@ -137,6 +152,22 @@ const BravaisAccountList: React.FC<{
                         </span>
                         {row.configured && !row.direct && <LogIn aria-hidden className="is-login" />}
                     </button>
+                    {row.login && (
+                        <button
+                            type="button"
+                            // 与登出同一个圆形图标按钮的外观（同一个位置的另一种动作）。
+                            className="bravais-account-logout"
+                            data-bravais-account-login={row.providerId}
+                            aria-label={row.login.label}
+                            title={row.login.label}
+                            onClick={() => {
+                                onClose();
+                                account.onLogin(row.providerId);
+                            }}
+                        >
+                            <LogIn aria-hidden />
+                        </button>
+                    )}
                     {row.logout && (
                         <button
                             type="button"

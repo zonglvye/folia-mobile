@@ -21,6 +21,12 @@ export type ShellProxyResult = {
     charset: string;
     /** 响应体的 base64。封面是二进制、歌词是文本，统一走 base64 就不用分两套。 */
     body: string;
+    /**
+     * 上游响应头，JSON 字符串（壳按白名单过滤过）。
+     * 汽水的登录票据就在 `bd-ticket-guard-server-data` 这个响应头里，body 中没有。
+     * 老版本壳不带这个字段，所以这里可选。
+     */
+    headers?: string;
 };
 
 type ProxyFetchBridge = {
@@ -70,6 +76,19 @@ const buildResponse = (result: ShellProxyResult): Response => {
             'content-type',
             result.charset ? `${result.mime}; charset=${result.charset}` : result.mime,
         );
+    }
+    // 上游响应头先铺一层，再把 content-type 覆盖成壳整理过的那份：汽水要靠
+    // bd-ticket-guard-server-data 拿 ticket，页面这边必须能 headers.get 到它。
+    if (result.headers) {
+        try {
+            const parsed = JSON.parse(result.headers) as Record<string, string>;
+            Object.keys(parsed).forEach((name) => {
+                if (name.toLowerCase() === 'content-type') return;
+                headers.set(name, parsed[name]);
+            });
+        } catch {
+            // 头不合法不该让整次请求失败：正文已经拿到了。
+        }
     }
     // 交给 Response 的是一段独立的 ArrayBuffer：Uint8Array 可能是 SharedArrayBuffer 支撑的视图，
     // 那样不满足 BodyInit（tsc 会拒），顺手也省掉一次拷贝歧义。

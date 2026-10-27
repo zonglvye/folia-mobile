@@ -1,0 +1,133 @@
+From 3491bb9a713ddb64806feb6f3c048652a6e21ed3 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 27 Oct 2026 22:00:45 +0800
+Subject: [PATCH 90/90] debug(qishui): keep a shape-only trace of the sign-in
+ requests
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+扫码失败时上游只回一句「参数错误」（error_code 10002），页面这层没有别的证据可选。
+这里给登录链路留一份「形状」轨迹：路径、方法、发出去的头名、请求体里每个字段是不是空、
+响应顶层与 data 里的键名、错误码与错误文案 —— 值一个都不记（ticket / access_code 都不落）。
+
+__foliaQishui.trace() 在 devtools 里直接读它。
+---
+ .../onlineMusic/qishui/qishuiLocalApi.ts      | 80 ++++++++++++++++++-
+ 1 file changed, 78 insertions(+), 2 deletions(-)
+
+diff --git a/src/services/onlineMusic/qishui/qishuiLocalApi.ts b/src/services/onlineMusic/qishui/qishuiLocalApi.ts
+index ac1ae9e..1b609ba 100644
+--- a/src/services/onlineMusic/qishui/qishuiLocalApi.ts
++++ b/src/services/onlineMusic/qishui/qishuiLocalApi.ts
+@@ -75,6 +75,60 @@ const sessions: QishuiSessionStore = {
+     },
+ };
+ 
++/**
++ * 登录链路的请求轨迹：只留形状不留值（路径、方法、发出去的头名、回来的顶层键与错误码）。
++ * 扫码失败时上游只给一句「参数错误」，没有这个就只能猜；里面有 ticket / access_code 的值，
++ * 所以一个都不记。在 devtools 里看 `__foliaQishui.trace()`。
++ */
++type QishuiLoginTrace = {
++    at: number;
++    path: string;
++    method: string;
++    headers: string[];
++    /** 请求体里有哪些字段、是不是空的（只记形状，不记值）。 */
++    body?: string[];
++    status?: number;
++    keys?: string[];
++    /** 响应 data 里面那一层的键名（上游把错误放在 data.error_code 里）。 */
++    innerKeys?: string[];
++    errorCode?: number | string;
++    errorText?: string;
++};
++const TRACE_PATHS = ['/passport/', '/access/', '/oauth/', '/me/info/'];
++const loginTrace: QishuiLoginTrace[] = [];
++const rememberTrace = (entry: QishuiLoginTrace) => {
++    loginTrace.push(entry);
++    while (loginTrace.length > 24) loginTrace.shift();
++};
++const traceOf = (response: Response, entry: QishuiLoginTrace) => {
++    void response.clone().json().then((data: unknown) => {
++        if (!data || typeof data !== 'object') return;
++        const record = data as Record<string, unknown>;
++        const inner = record.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : null;
++        entry.keys = Object.keys(record).slice(0, 8);
++        if (inner) entry.innerKeys = Object.keys(inner).slice(0, 20);
++        const code = record.err_no ?? inner?.error_code;
++        if (code !== undefined && Number(code) !== 0) entry.errorCode = code as number | string;
++        const text = record.err_msg ?? inner?.description ?? record.message;
++        if (typeof text === 'string' && text) entry.errorText = text.slice(0, 60);
++    }).catch(() => {});
++};
++
++/** 请求体的形状：字段名 + 该值是不是空的。凭据的值一个字符都不留。 */
++const bodyShape = (body: unknown): string[] | undefined => {
++    if (typeof body !== 'string' || body.length === 0) return undefined;
++    const shape: string[] = [];
++    try {
++        const parsed = JSON.parse(body) as Record<string, unknown>;
++        Object.keys(parsed).forEach(key => shape.push(`${key}:${String(parsed[key] ?? '').length ? 'set' : 'EMPTY'}`));
++        return shape;
++    } catch {
++        // 表单体
++    }
++    new URLSearchParams(body).forEach((value, key) => shape.push(`${key}:${value.length ? 'set' : 'EMPTY'}`));
++    return shape;
++};
++
+ /**
+  * 把一次 `fetch(url, init)` 翻成壳代理的一次调用。
+  *
+@@ -86,14 +140,34 @@ const proxiedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promi
+     const method = (init?.method ?? 'GET').toUpperCase();
+     const params = new URLSearchParams({ url: absolute });
+     if (method !== 'GET') params.set('method', method);
++    const headerNames: string[] = [];
+     if (init?.headers) {
+         const table: Record<string, string> = {};
+         new Headers(init.headers).forEach((value, name) => { table[name] = value; });
+-        if (Object.keys(table).length) params.set('headers', JSON.stringify(table));
++        if (Object.keys(table).length) {
++            params.set('headers', JSON.stringify(table));
++            headerNames.push(...Object.keys(table));
++        }
+     }
+     if (typeof init?.body === 'string' && init.body.length > 0) params.set('body', init.body);
++    const traced = TRACE_PATHS.some(segment => absolute.includes(segment));
++    const entry: QishuiLoginTrace | null = traced
++        ? {
++            at: Date.now(),
++            path: absolute.split('?')[0].replace(/^https:\/\/[^/]+/, ''),
++            method,
++            headers: headerNames,
++            ...(bodyShape(init?.body) ? { body: bodyShape(init?.body) } : {}),
++        }
++        : null;
++    if (entry) rememberTrace(entry);
+     // 这里用 window.fetch 而不是全局 fetch：它已经被 shellFetchProxy 接管，会把请求送到桥上。
+-    return fetch(`/api/lyric-proxy?${params.toString()}`);
++    const response = await fetch(`/api/lyric-proxy?${params.toString()}`);
++    if (entry) {
++        entry.status = response.status;
++        traceOf(response, entry);
++    }
++    return response;
+ };
+ 
+ const log = (message: string) => console.info(`${LOG_PREFIX} ${message}`);
+@@ -128,10 +202,12 @@ export const getQishuiAvailability = () => {
+ 
+ // 真机排查用：在 devtools 里直接敲 `__foliaQishui.request('search', { query: '陈奕迅' })`，
+ // 就能看这一步是不是通的（不经过 UI）。壳里的日志通道读不到页面 console，这个是唯一的窗口。
++// `trace()` 是登录链路最近 24 次请求的形状（没有凭据的值），扫码失败时看它。
+ if (typeof window !== 'undefined') {
+     (window as unknown as { __foliaQishui?: unknown }).__foliaQishui = {
+         request: requestQishuiBridge,
+         availability: getQishuiAvailability,
+         reset: () => sessions.clear(),
++        trace: () => loginTrace.slice(),
+     };
+ }

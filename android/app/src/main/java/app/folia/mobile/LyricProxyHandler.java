@@ -77,6 +77,21 @@ public final class LyricProxyHandler {
             "user-agent", "support-calm", "content-type", "x-router",
             "kg-rc", "kg-thash", "kg-rec", "kg-rf",
             "dfid", "mid", "clienttime",
+            // Qishui (汽水音乐): the client token plus the four ticket-guard handshake headers.
+            // `bd-ticket-guard-client-csr` only shows up once, when the account ticket is
+            // exchanged; the others ride along on every identified request.
+            "access-token", "bd-ticket-guard-version", "bd-ticket-guard-client-data",
+            "bd-ticket-guard-client-cert", "bd-ticket-guard-client-csr",
+            "bd-ticket-guard-server-data",
+    };
+
+    /**
+     * Response headers handed back to the page. The 抖音 ticket arrives in
+     * `bd-ticket-guard-server-data` and nowhere else, so dropping response headers makes the
+     * Qishui sign-in impossible even though every request succeeds. Same list as the Harmony shell.
+     */
+    private static final String[] FORWARDED_RESPONSE_HEADERS = {
+            "bd-ticket-guard-server-data",
     };
 
     private LyricProxyHandler() {
@@ -182,7 +197,17 @@ public final class LyricProxyHandler {
             // the callers make caching safe: search URLs carry a fresh signature and client time, so
             // they are unique per request, while lyrics and covers are the responses that benefit
             // from being cached at all.
+            //
+            // The ticket-guard handshake is the one case where a response header *is* the payload:
+            // 抖音 returns the account ticket in `bd-ticket-guard-server-data`, so those names must
+            // reach the page. Everything else stays filtered out.
             Map<String, String> responseHeaders = new HashMap<>();
+            for (String name : FORWARDED_RESPONSE_HEADERS) {
+                String value = connection.getHeaderField(name);
+                if (value != null && !value.isEmpty()) {
+                    responseHeaders.put(name, value);
+                }
+            }
 
             return new WebResourceResponse(
                     mimeTypeOf(contentType),
@@ -204,7 +229,13 @@ public final class LyricProxyHandler {
     private static boolean isAllowedHost(String host) {
         return host.equals("qq.com") || host.endsWith(".qq.com")
                 || host.equals("y.gtimg.cn")
-                || host.equals("kugou.com") || host.endsWith(".kugou.com");
+                || host.equals("kugou.com") || host.endsWith(".kugou.com")
+                // 汽水音乐：接口在 open.qishui.com / open.douyin.com / open-client.douyin.com
+                // （都不带 CORS 头），场景封面在 douyinpic.com。音频 CDN（365yg.com 等）不走这里
+                // ——WebView 的媒体栈能直接放，省一次中继。与鸿蒙壳的名单保持一致。
+                || host.equals("qishui.com") || host.endsWith(".qishui.com")
+                || host.equals("douyin.com") || host.endsWith(".douyin.com")
+                || host.equals("douyinpic.com") || host.endsWith(".douyinpic.com");
     }
 
     private static String trimToEmpty(String value) {

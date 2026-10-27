@@ -1,0 +1,642 @@
+From 6e6b3b07e1ac4be5875465ed531d6e8f169978e6 Mon Sep 17 00:00:00 2001
+From: zonglvye <zonglvye@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 00:21:23 +0800
+Subject: [PATCH 85/90] feat(qishui): register the provider and let its CDN
+ play directly
+
+Brings upstream's ten provider files over and adapts them to this branch's
+contract, which is a 0.7.20 shape rather than 0.7.22's:
+
+- transport: the renderer->main IPC boundary becomes the in-page bridge
+  (requestQishuiBridge); scene artwork now goes through the shell proxy because
+  douyinpic.com sends no CORS headers
+- auth: mapped onto this branch's QR names (getQrKey/createQr/checkQr/cancelQr/
+  getQrTtlMs/getQrLoginDiagnostics); describeLoginFailure/getLoginTexts/
+  signInRanOut have no counterpart here and are dropped
+- library: getLikedSongIds returns the id list (this branch's shape) instead of
+  { ids, whole }; the flag is logged until the incremental cache is ported
+- recommendations: getPersonalFmCatalog has no hook in this branch's contract, so
+  the scene list is an internal cache feeding getRecommendedCollections and
+  getPersonalFm
+- explore and the failure descriptor are left out (no OnlineExploreProvider /
+  OnlineFailureDetail on this branch), as is the provider 'mark'
+- types: audioQualityLevels is now an optional part of OnlinePlaybackProvider, so
+  a provider can say which qualities it can actually hand out
+- shellOnlineAudio: ByteDance CDN hosts bypass the shell relay. Measured on the
+  device: ArkWeb's media stack plays the m4a directly and issues its own Range
+  requests, so relaying a 1-2 MB file through shell memory only adds a hop.
+---
+ src/services/onlineMusic/providerRegistry.ts  |  4 +
+ .../onlineMusic/qishui/qishuiCatalog.ts       | 64 +++++++++++++++
+ .../onlineMusic/qishui/qishuiLyrics.ts        | 22 ++++++
+ .../onlineMusic/qishui/qishuiMutations.ts     | 37 +++++++++
+ .../onlineMusic/qishui/qishuiNormalize.ts     | 53 +++++++++++++
+ .../onlineMusic/qishui/qishuiPlayback.ts      | 54 +++++++++++++
+ .../onlineMusic/qishui/qishuiProvider.ts      | 60 ++++++++++++++
+ .../qishui/qishuiRecommendations.ts           | 52 +++++++++++++
+ .../onlineMusic/qishui/qishuiSceneCover.ts    | 48 ++++++++++++
+ .../onlineMusic/qishui/qishuiTransport.ts     | 78 +++++++++++++++++++
+ src/services/shellOnlineAudio.ts              | 19 +++++
+ src/types/onlineMusic.ts                      |  5 ++
+ 12 files changed, 496 insertions(+)
+ create mode 100644 src/services/onlineMusic/qishui/qishuiCatalog.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiLyrics.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiMutations.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiNormalize.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiPlayback.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiProvider.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiRecommendations.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiSceneCover.ts
+ create mode 100644 src/services/onlineMusic/qishui/qishuiTransport.ts
+
+diff --git a/src/services/onlineMusic/providerRegistry.ts b/src/services/onlineMusic/providerRegistry.ts
+index 7255a63..b10796c 100644
+--- a/src/services/onlineMusic/providerRegistry.ts
++++ b/src/services/onlineMusic/providerRegistry.ts
+@@ -6,6 +6,7 @@ import { neteaseProvider } from './neteaseProvider';
+ import { kugouProvider } from './kugouProvider';
+ import { qqProvider } from './qqProvider';
+ import { bodianProvider } from './bodianProvider';
++import { qishuiProvider } from './qishui/qishuiProvider';
+ 
+ // src/services/onlineMusic/providerRegistry.ts
+ 
+@@ -82,3 +83,6 @@ registerOnlineMusicProvider(neteaseProvider);
+ registerOnlineMusicProvider(kugouProvider);
+ registerOnlineMusicProvider(qqProvider);
+ registerOnlineMusicProvider(bodianProvider);
++// 汽水（qishui）：手机壳里唯一一个「协议包直接跑在页面里」的 provider，见 services/onlineMusic/qishui/。
++// 桌面版走主进程 IPC；网页版没有同源代理，availability 会报 runtime-unavailable。
++registerOnlineMusicProvider(qishuiProvider);
+diff --git a/src/services/onlineMusic/qishui/qishuiCatalog.ts b/src/services/onlineMusic/qishui/qishuiCatalog.ts
+new file mode 100644
+index 0000000..0b4e67f
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiCatalog.ts
+@@ -0,0 +1,64 @@
++import i18n from '../../../i18n/config';
++import type { OnlineCatalogProvider, OnlineLibraryProvider, ProviderCollection, ProviderPage } from '../../../types/onlineMusic';
++import { OnlineProviderError } from '../../../types/onlineMusic';
++import { normalizeQishuiCollection, normalizeQishuiSong, record, type QishuiRecord } from './qishuiNormalize';
++import { requestQishui } from './qishuiTransport';
++import { createQishuiSceneCover } from './qishuiSceneCover';
++
++// src/services/onlineMusic/qishui/qishuiCatalog.ts
++// Catalogue and account collection reads; paging metadata comes from the package.
++//
++// 与上游的差异只有一处：`getLikedSongIds`。上游返回 `{ ids, whole }`（`whole` 表示「这份清单是完整的」，
++// 供增量缓存判断），我们这条分支的这个接口只返回 id 数组，所以这里把 `whole` 降到日志里，
++// 返回值按本仓库的形状给。等以后搬上游的增量缓存时再把 `whole` 接出去。
++const RECENT_ID = 'recent-played';
++const recentCollection = async (): Promise<ProviderCollection> => ({ providerId: 'qishui', id: RECENT_ID, type: 'history',
++    name: i18n.t('qishui.recentPlayed'), isOwned: false, coverUrl: await createQishuiSceneCover(RECENT_ID, '') });
++export const qishuiCatalog: OnlineCatalogProvider = {
++    async getPlaylistTracks(id, limit, offset, collection) {
++        if (id === RECENT_ID) {
++            const page = await requestQishui<ProviderPage<unknown>>('recent_played', { limit, offset });
++            return { ...page, items: page.items.map(normalizeQishuiSong) };
++        }
++        const page = await requestQishui<ProviderPage<unknown>>('playlist_tracks', { id: String(id), limit, offset,
++            ownerId: typeof collection?.providerData?.ownerId === 'string' ? collection.providerData.ownerId : '' });
++        return { ...page, items: page.items.map(normalizeQishuiSong) };
++    },
++    async getPlaylistDetail(id, collection) {
++        if (id === RECENT_ID) return recentCollection();
++        const raw = await requestQishui('playlist_detail', { id: String(id), limit: 1,
++            ownerId: typeof collection?.providerData?.ownerId === 'string' ? collection.providerData.ownerId : '' });
++        if (!raw) return null;
++        const detail = normalizeQishuiCollection({ ...record(raw), isOwned: collection?.isOwned ?? record(raw).isOwned });
++        return { ...collection, ...detail, ...(collection?.isLiked === true ? { isLiked: true } : {}) };
++    },
++    async getArtistSongs(id, limit, offset) {
++        const page = await requestQishui<ProviderPage<unknown>>('artist_songs', { id: String(id), limit, offset });
++        return { ...page, items: page.items.map(normalizeQishuiSong) };
++    },
++    async getArtistDetail(id) {
++        const raw = await requestQishui('artist_detail', { id: String(id) });
++        return raw ? normalizeQishuiCollection(raw, 'artist') : null;
++    },
++};
++export const qishuiLibrary: OnlineLibraryProvider = {
++    async getUserPlaylists(_userId, limit, offset) {
++        // The read-only history card occupies one row; translate the library offset to playlist rows.
++        const first = offset === 0;
++        const page = await requestQishui<ProviderPage<QishuiRecord>>('user_playlists', {
++            limit: first ? Math.max(1, limit - 1) : limit, offset: Math.max(0, offset - 1),
++        });
++        const rows = first && limit === 1 ? [] : page.items.map(item => normalizeQishuiCollection(item));
++        const items = [...(first ? [await recentCollection()] : []), ...rows];
++        return { items, hasMore: first && limit === 1 ? page.items.length > 0 || page.hasMore : page.hasMore,
++            nextOffset: offset + items.length, ...(page.total === undefined ? {} : { total: page.total + 1 }) };
++    },
++    async getLikedSongIds() {
++        const data = await requestQishui<{ ids: string[]; whole: boolean }>('liked_songs');
++        if (!Array.isArray(data.ids) || data.ids.some(id => typeof id !== 'string' || !/^\d+$/.test(id))) {
++            throw new OnlineProviderError('invalid-response', 'Qishui liked songs are missing', 'qishui');
++        }
++        console.info('[Qishui] Liked songs read', { count: data.ids.length, whole: data.whole });
++        return data.ids;
++    },
++};
+diff --git a/src/services/onlineMusic/qishui/qishuiLyrics.ts b/src/services/onlineMusic/qishui/qishuiLyrics.ts
+new file mode 100644
+index 0000000..38872f9
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiLyrics.ts
+@@ -0,0 +1,22 @@
++import type { ProviderLyricsResult } from '../../../types/onlineMusic';
++import { parseLyricsByFormat } from '../../../utils/lyrics/parserCore';
++import { record } from './qishuiNormalize';
++
++// Parse car KRC with Folia's shared timing engine, including translations keyed by line time.
++export function parseQishuiLyrics(raw: unknown): ProviderLyricsResult {
++    const info = record(raw);
++    const entity = record(info.lyric_entity);
++    const content = typeof entity.content === 'string' ? entity.content.replace(/\u0000/g, '') : '';
++    if (!content.trim()) return { lyrics: null, mainText: '', isPureMusic: false };
++    const translations = record(info.lang_translations);
++    const translated = record(translations['zh-CN'] || translations['ZH-HANS-CN'] || Object.values(translations)[0]);
++    const translation = typeof translated.content === 'string' ? translated.content : '';
++    const lyrics = parseLyricsByFormat(entity.type === 'krc' ? 'krc' : 'lrc', content);
++    if (translation) {
++        const lines = parseLyricsByFormat(translated.type === 'krc' ? 'krc' : 'lrc', translation).lines;
++        const byTime = new Map(lines.map(line => [line.startTime, line.fullText]));
++        for (const line of lyrics.lines) line.translation = byTime.get(line.startTime) || line.translation;
++    }
++    return { lyrics: lyrics.lines.length ? lyrics : null, mainText: content,
++        wordByWordText: entity.type === 'krc' ? content : null, translationText: translation || null, isPureMusic: false };
++}
+diff --git a/src/services/onlineMusic/qishui/qishuiMutations.ts b/src/services/onlineMusic/qishui/qishuiMutations.ts
+new file mode 100644
+index 0000000..f2340bd
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiMutations.ts
+@@ -0,0 +1,37 @@
++import type { SongResult } from '../../../types';
++import type { MediaId, OnlineMutationProvider, ProviderCollection } from '../../../types/onlineMusic';
++import { OnlineProviderError } from '../../../types/onlineMusic';
++import { getPlaybackSourceRef } from '../../../utils/appPlaybackGuards';
++import { requestQishui } from './qishuiTransport';
++
++// Account writes use Omni's source identity and only expose editing for ordinary owned playlists.
++export function qishuiSongId(song: MediaId | SongResult): string {
++    if (typeof song !== 'object') return String(song);
++    const source = getPlaybackSourceRef(song);
++    if (source.kind !== 'online' || source.providerId !== 'qishui') {
++        throw new OnlineProviderError('unsupported', 'Song does not belong to Qishui', 'qishui');
++    }
++    return source.mediaId;
++}
++const editable = (playlist: ProviderCollection) => playlist.providerId === 'qishui'
++    && playlist.type === 'playlist' && playlist.isOwned === true && playlist.isLiked !== true;
++
++export const qishuiMutations: OnlineMutationProvider = {
++    canAddToPlaylist: editable,
++    canEditPlaylistTracks: editable,
++    async likeSong(song, liked) {
++        await requestQishui('like_song', { id: qishuiSongId(song), liked });
++        console.info('[Qishui] Song like changed', { liked });
++    },
++    async updatePlaylistTracks(operation, playlist, tracks) {
++        if (typeof playlist !== 'object' || !editable(playlist)) {
++            throw new OnlineProviderError('unsupported', 'Playlist is not an owned Qishui playlist', 'qishui');
++        }
++        if (!tracks.length) return;
++        if (tracks.length > 100) throw new OnlineProviderError('unsupported', 'Select at most 100 tracks per operation', 'qishui');
++        await requestQishui(operation === 'add' ? 'playlist_add_tracks' : 'playlist_remove_tracks', {
++            id: String(playlist.id), ids: tracks.map(qishuiSongId),
++        });
++        console.info('[Qishui] Playlist tracks changed', { operation, count: tracks.length });
++    },
++};
+diff --git a/src/services/onlineMusic/qishui/qishuiNormalize.ts b/src/services/onlineMusic/qishui/qishuiNormalize.ts
+new file mode 100644
+index 0000000..d0fb36a
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiNormalize.ts
+@@ -0,0 +1,53 @@
++import type { UnifiedSong } from '../../../types';
++import type { ProviderCollection, ProviderUser } from '../../../types/onlineMusic';
++import { OnlineProviderError } from '../../../types/onlineMusic';
++
++// Normalize car entities without rounding 64-bit media IDs or guessing playability from payment labels.
++export type QishuiRecord = Record<string, any>;
++export const record = (raw: unknown): QishuiRecord => raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
++const text = (value: unknown) => value == null ? '' : String(value);
++export function qishuiImage(raw: unknown): string {
++    if (typeof raw === 'string') return raw.startsWith('https://') ? raw : '';
++    const value = record(raw);
++    const url = Array.isArray(value.urls) ? value.urls.find((item: unknown) => typeof item === 'string' && item.startsWith('https://')) : '';
++    if (!url) return '';
++    return value.uri && url.endsWith('/') ? `${url}${value.uri}${value.template_prefix ? `~${value.template_prefix}-image.image` : ''}` : url;
++}
++export function normalizeQishuiSong(raw: unknown): UnifiedSong {
++    const song = record(raw);
++    if (song.sourceRef?.kind === 'online' && song.sourceRef.providerId === 'qishui') return song as UnifiedSong;
++    const base = record(song.base_info);
++    const id = text(base.id || song.id);
++    if (!/^\d+$/.test(id)) throw new OnlineProviderError('invalid-response', 'Qishui track ID is missing', 'qishui');
++    const related = record(song.related_info);
++    const album = record(related.album_link);
++    const artists = Array.isArray(related.artist_links) ? related.artist_links : base.song_maker_team?.composers || [];
++    return {
++        id, name: text(base.name), durationMs: Math.max(0, Number(base.duration_ms) || 0),
++        artists: artists.filter((artist: QishuiRecord) => artist.name).map((artist: QishuiRecord) => ({
++            id: text(artist.id), name: text(artist.name), ...(artist.id ? { catalogRef: { providerId: 'qishui', kind: 'artist' as const, id: text(artist.id) } } : {}),
++        })),
++        // The car SDK has no album endpoint; retain metadata without an unusable album link.
++        album: { id: text(album.id), name: text(album.name), coverUrl: qishuiImage(song.display_info?.cover_url) },
++        sourceRef: { kind: 'online', providerId: 'qishui', mediaId: id },
++    };
++}
++export function normalizeQishuiCollection(raw: unknown, type = 'playlist'): ProviderCollection {
++    const item = record(raw);
++    if (item.providerId === 'qishui') return item as ProviderCollection;
++    const base = record(item.base_info);
++    if (!base.id) throw new OnlineProviderError('invalid-response', 'Qishui collection ID is missing', 'qishui');
++    const owner = record(item.relation_info?.owner);
++    return { providerId: 'qishui', id: text(base.id), type, name: text(base.title || base.name),
++        coverUrl: qishuiImage(type === 'artist' ? base.url_avatar : item.display_info?.url_cover), description: text(base.desc || base.intro),
++        ...(item.resource_cnt?.track_cnt == null ? {} : { trackCount: Number(item.resource_cnt.track_cnt) }),
++        ...(owner.id ? { creator: { id: text(owner.id), nickname: text(owner.nickname) } } : {}),
++        ...(item.isOwned == null ? {} : { isOwned: Boolean(item.isOwned) }), providerData: { ownerId: text(base.owner_id || owner.id) },
++        ...(Number(base.type) === 1 && item.isOwned === true ? { isLiked: true } : {}),
++    };
++}
++export function normalizeQishuiUser(raw: unknown): ProviderUser {
++    const user = record(raw);
++    if (!user.id) throw new OnlineProviderError('invalid-response', 'Qishui account ID is missing', 'qishui');
++    return { id: text(user.id), nickname: text(user.nickname), avatarUrl: qishuiImage(user.avatar), vipType: user.isVip ? 1 : 0 };
++}
+diff --git a/src/services/onlineMusic/qishui/qishuiPlayback.ts b/src/services/onlineMusic/qishui/qishuiPlayback.ts
+new file mode 100644
+index 0000000..58e690b
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiPlayback.ts
+@@ -0,0 +1,54 @@
++import type { QishuiTrackCheck } from 'qishui-music-api';
++import type { OnlinePlaybackProvider, ProviderAudioSource, ProviderSongAvailability } from '../../../types/onlineMusic';
++import { normalizeQishuiSong } from './qishuiNormalize';
++import { qishuiSongId } from './qishuiMutations';
++import { QishuiRequestError, requestQishui } from './qishuiTransport';
++
++// Qishui's playback side: one song's detail by id, its plaintext audio address, and its playability checks.
++// Explicit playability checks are short-lived account facts; playback failures never change them.
++const checks = new Map<string, { at: number; availability: ProviderSongAvailability }>();
++let revision = 0;
++export function clearQishuiPlayback() { revision++; checks.clear(); }
++export async function readQishuiSongs(raw: unknown[]) {
++    const songs = raw.map(normalizeQishuiSong);
++    if (!songs.length) return songs;
++    const mine = revision;
++    try {
++        const data = await requestQishui<{ statuses: QishuiTrackCheck[] }>('check_tracks', { ids: songs.map(song => String(song.id)) });
++        if (mine !== revision) return songs;
++        const wanted = new Set(songs.map(song => String(song.id)));
++        for (const row of data.statuses) {
++            if (!wanted.has(row.id) || !Number.isInteger(row.riskResult) || row.riskResult < 0) continue;
++            checks.delete(row.id);
++            checks.set(row.id, { at: Date.now(), availability: row.riskResult === 0
++                ? { state: 'playable' } : { state: 'unknown', reason: 'restricted' } });
++        }
++        while (checks.size > 500) checks.delete(checks.keys().next().value!);
++    } catch (error) {
++        // A failed optional check must not hide otherwise readable songs or imply a takedown.
++        console.warn('[Qishui] Track availability check failed', error);
++    }
++    return songs;
++}
++// The package's sentence when the service answered a look-up without the track (qishui-music-api@0.2.1,
++// src/catalog.cjs `track`). For song_detail it is the only not-playable there is: the other failures of
++// that operation are network, auth-required, unavailable or invalid-response.
++const TRACK_NOT_RETURNED = 'Qishui did not return the track';
++export const qishuiPlayback: OnlinePlaybackProvider = {
++    audioQualityLevels: ['standard'],
++    async getSongDetail(id) {
++        let raw: unknown;
++        try { raw = await requestQishui('song_detail', { id: String(id) }); }
++        catch (error) {
++            // Qishui answered and has no such track: the song is missing, the request did not fail.
++            if (error instanceof QishuiRequestError && error.code === 'not-playable' && error.message === TRACK_NOT_RETURNED) return null;
++            throw error;
++        }
++        return (await readQishuiSongs([raw]))[0];
++    },
++    getAudioSource: (song, quality) => requestQishui<ProviderAudioSource>('audio', { id: qishuiSongId(song), quality }),
++    getAvailability(song) {
++        const check = checks.get(qishuiSongId(song));
++        return check && Date.now() - check.at < 60_000 ? check.availability : { state: 'unknown' };
++    },
++};
+diff --git a/src/services/onlineMusic/qishui/qishuiProvider.ts b/src/services/onlineMusic/qishui/qishuiProvider.ts
+new file mode 100644
+index 0000000..f07aa46
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiProvider.ts
+@@ -0,0 +1,60 @@
++import type { OnlineMusicProvider, ProviderPage, QrLoginState } from '../../../types/onlineMusic';
++import { OnlineProviderError } from '../../../types/onlineMusic';
++import { createProviderSongMetadata } from '../../../utils/songMetadata';
++import { getQishuiLastFailure, getQishuiAvailability, requestQishui } from './qishuiTransport';
++import { normalizeQishuiSong, normalizeQishuiUser, normalizeQishuiCollection } from './qishuiNormalize';
++import { qishuiCatalog, qishuiLibrary } from './qishuiCatalog';
++import { parseQishuiLyrics } from './qishuiLyrics';
++import { qishuiRecommendations, clearQishuiRecommendations } from './qishuiRecommendations';
++import { qishuiMutations, qishuiSongId as songId } from './qishuiMutations';
++import { qishuiPlayback, clearQishuiPlayback, readQishuiSongs } from './qishuiPlayback';
++
++// Car platform adapter; account and catalogue operations share the existing Omni entry points.
++// 换账号时要一起丢掉的：场景目录、可播放性检查，以及推荐流的记忆。
++// （上游还多一个「探索流」，那条流水线在我们这条分支上不存在，见文件头的裁剪说明。）
++function clearAccountState() { clearQishuiRecommendations(); clearQishuiPlayback(); }
++export const qishuiProvider: OnlineMusicProvider = {
++    id: 'qishui', displayName: '汽水音乐', shortName: '汽水',
++    getAvailability: getQishuiAvailability,
++    capabilities: { search: true, playback: true, lyrics: true, wordByWordLyrics: true, auth: true,
++        userLibrary: true, playlists: true, albums: false, artists: true, recommendations: true,
++        mutations: true, likes: true, playlistTrackMutations: true, personalFmModes: true },
++    normalizeSong: normalizeQishuiSong, normalizeUser: normalizeQishuiUser, normalizeCollection: normalizeQishuiCollection,
++    songMetadata: { getSongMetadata: createProviderSongMetadata },
++    getSongPageUrl: song => `https://music.douyin.com/qishui/share/track?track_id=${encodeURIComponent(songId(song))}`,
++    search: {
++        async searchSongs(query, limit, offset) {
++            if (!query.trim()) return { items: [], hasMore: false, nextOffset: offset };
++            const page = await requestQishui<ProviderPage<unknown>>('search', { query, limit, offset });
++            return { ...page, items: await readQishuiSongs(page.items) };
++        },
++    },
++    playback: qishuiPlayback,
++    lyrics: { getLyrics: async song => parseQishuiLyrics(await requestQishui('lyrics', { id: songId(song) })) },
++    auth: {
++        async getQrLoginDiagnostics() {
++            const failure = getQishuiLastFailure();
++            if (!failure) return [];
++            return [`stage=${failure.stage ?? '-'} code=${failure.code} upstreamCode=${failure.upstreamCode ?? '-'}`];
++        },
++        async getLoginStatus() { const user = await requestQishui('login_status'); return user ? normalizeQishuiUser(user) : null; },
++        async getQrKey() { return (await requestQishui<{ key: string }>('login_qr_key')).key; },
++        async createQr(key) { return (await requestQishui<{ imageUrl: string }>('login_qr_create', { key })).imageUrl; },
++        async checkQr(key) {
++            try {
++                const result = await requestQishui<QrLoginState>('login_qr_check', { key });
++                if (result.state === 'confirmed') clearAccountState();
++                return result;
++            } catch (error) {
++                if (error instanceof OnlineProviderError && error.code === 'network') return { state: 'error', transient: true, failure: { case: 'unreachable' } } as QrLoginState;
++                throw error;
++            }
++        },
++        async cancelQr(key) { await requestQishui('login_qr_cancel', { key }); },
++        getQrTtlMs: () => 300000,
++        async logout() { clearAccountState(); await requestQishui('logout'); },
++    },
++    catalog: qishuiCatalog, library: qishuiLibrary,
++    recommendations: qishuiRecommendations,
++    mutations: qishuiMutations,
++};
+diff --git a/src/services/onlineMusic/qishui/qishuiRecommendations.ts b/src/services/onlineMusic/qishui/qishuiRecommendations.ts
+new file mode 100644
+index 0000000..be2a052
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiRecommendations.ts
+@@ -0,0 +1,52 @@
++import type { OnlineRecommendationProvider, ProviderCollection } from '../../../types/onlineMusic';
++import { getPersonalFmRequestOptions } from '../../../stores/usePersonalFmModeStore';
++import { requestQishui } from './qishuiTransport';
++import { createQishuiSceneCover } from './qishuiSceneCover';
++import { normalizeQishuiSong, qishuiImage } from './qishuiNormalize';
++
++// src/services/onlineMusic/qishui/qishuiRecommendations.ts
++// 汽水的「场景电台」既是私人 FM 的来源，也是首页那排电台卡片。
++//
++// 与上游的差异：上游还把场景列表做成了 `getPersonalFmCatalog`（动态填充 FM 模式选择器的目录），
++// 我们这条分支的 `OnlineRecommendationProvider` 没有那个钩子（FM 模式来自 fmModes 的静态清单），
++// 所以这里只保留两个出口：`getPersonalFm`（按 fmModes 的模式向 feed 要歌）和
++// `getRecommendedCollections`（场景卡片）。将来搬动态目录时把 getQishuiFmCatalog 加回来即可。
++type Scene = { id: string; name: string; group: string; coverUrl?: unknown };
++let scenes: Scene[] = [];
++let scenesAt = 0;
++let generation = 0;
++// 统计「清空了几次」：换账号前发起的场景读取不能把新账号的列表填回去。
++export function clearQishuiRecommendations() { generation++; scenes = []; scenesAt = 0; }
++
++const loadScenes = async (): Promise<Scene[]> => {
++    if (scenes.length > 0 && Date.now() - scenesAt < 10 * 60_000) return scenes;
++    const mine = generation;
++    const rows = await requestQishui<Scene[]>('feed_modes');
++    const seen = new Set<string>();
++    const read = rows.filter(row => /^\d+$/.test(row.id) && row.name && !seen.has(row.id) && Boolean(seen.add(row.id)));
++    if (mine === generation) { scenes = read; scenesAt = Date.now(); }
++    return read;
++};
++
++export const qishuiRecommendations: OnlineRecommendationProvider = {
++    async dislikeSong(id) {
++        await requestQishui('dislike_song', { id: String(id), disliked: true });
++        console.info('[Qishui] Recommendation disliked');
++        return {};
++    },
++    async getPersonalFm(options) {
++        const selected = options || getPersonalFmRequestOptions();
++        const data = await requestQishui<{ items: unknown[] }>('feed', { queue: 'fm', limit: 20,
++            ...(selected.mode === 'SCENE_RCMD' && selected.submode ? { scene: selected.submode } : {}),
++            ...(selected.mode === 'FAMILIAR' ? { preference: 'familiar' } : selected.mode === 'EXPLORE' ? { preference: 'fresh' } : {}) });
++        return data.items.map(normalizeQishuiSong);
++    },
++    async getRecommendedCollections(limit): Promise<ProviderCollection[]> {
++        const read = await loadScenes();
++        return Promise.all(read.slice(0, limit).map(async scene => ({
++            providerId: 'qishui', id: `scene-${scene.id}`, type: 'radio', name: scene.name,
++            description: scene.group, coverUrl: await createQishuiSceneCover(scene.id, qishuiImage(scene.coverUrl)),
++            personalFm: { mode: 'SCENE_RCMD', scene: scene.id },
++        })));
++    },
++};
+diff --git a/src/services/onlineMusic/qishui/qishuiSceneCover.ts b/src/services/onlineMusic/qishui/qishuiSceneCover.ts
+new file mode 100644
+index 0000000..674813f
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiSceneCover.ts
+@@ -0,0 +1,48 @@
++import { readQishuiSceneIcon } from './qishuiTransport';
++
++// Compose small platform icons into crisp, spacious vector artwork suitable for any card aspect ratio.
++const covers = new Map<string, Promise<string>>();
++const PALETTES = [[222, 270], [166, 215], [304, 248], [24, 346], [190, 239], [258, 323], [145, 194], [345, 26]];
++export function createQishuiSceneCover(id: string, iconUrl: string): Promise<string> {
++    const key = `${id}:${iconUrl}`;
++    const kept = covers.get(key);
++    if (kept) return kept;
++    // Set when the icon could not be read: that artwork is shown this time only, and a later card asks again.
++    let withoutIcon = false;
++    const task = (async () => {
++        let icon = '';
++        if (iconUrl) {
++            try { icon = await readQishuiSceneIcon(iconUrl); }
++            catch (error) {
++                console.warn('[Qishui] Scene artwork uses its vector background', error);
++                withoutIcon = true;
++            }
++        }
++        const seed = [...id].reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 7);
++        const [a, b] = PALETTES[seed % PALETTES.length];
++        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
++<defs>
++<linearGradient id="base" x2="1" y2="1"><stop stop-color="hsl(${a},35%,12%)"/><stop offset="1" stop-color="hsl(${b},29%,7%)"/></linearGradient>
++<radialGradient id="light"><stop stop-color="hsl(${a},65%,49%)" stop-opacity=".54"/><stop offset="1" stop-color="hsl(${a},60%,30%)" stop-opacity="0"/></radialGradient>
++<radialGradient id="warm"><stop stop-color="hsl(${b},60%,44%)" stop-opacity=".38"/><stop offset="1" stop-color="hsl(${b},60%,25%)" stop-opacity="0"/></radialGradient>
++<linearGradient id="disc" x2="0" y2="1"><stop stop-color="#fff" stop-opacity=".065"/><stop offset="1" stop-color="#fff" stop-opacity=".012"/></linearGradient>
++</defs>
++<path fill="url(#base)" d="M0 0H640V640H0Z"/>
++<ellipse fill="url(#light)" cx="105" cy="130" rx="500" ry="420"/>
++<ellipse fill="url(#warm)" cx="590" cy="570" rx="450" ry="460"/>
++<g fill="none" stroke="#fff" stroke-opacity=".055">
++<path d="M-90 520C120 ${220 + seed % 120} 430 140 740 280"/>
++<path d="M-90 550C120 ${250 + seed % 120} 430 170 740 310"/>
++<path d="M-90 580C120 ${280 + seed % 120} 430 200 740 340"/>
++</g>
++<circle cx="320" cy="320" r="110" fill="url(#disc)" stroke="#fff" stroke-opacity=".09"/>
++<circle cx="320" cy="320" r="134" fill="none" stroke="#fff" stroke-opacity=".035"/>
++${icon ? `<image href="${icon}" x="256" y="256" width="128" height="128" opacity=".9" style="mix-blend-mode:screen"/>` : ''}
++</svg>`;
++        return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
++    })();
++    covers.set(key, task);
++    while (covers.size > 64) covers.delete(covers.keys().next().value!);
++    void task.then(() => { if (withoutIcon && covers.get(key) === task) covers.delete(key); });
++    return task;
++}
+diff --git a/src/services/onlineMusic/qishui/qishuiTransport.ts b/src/services/onlineMusic/qishui/qishuiTransport.ts
+new file mode 100644
+index 0000000..6ca9291
+--- /dev/null
++++ b/src/services/onlineMusic/qishui/qishuiTransport.ts
+@@ -0,0 +1,78 @@
++import { OnlineProviderError } from '../../../types/onlineMusic';
++import type { ProviderErrorCode } from '../../../types/onlineMusic';
++import type { QishuiOperation, QishuiParams } from 'qishui-music-api';
++import { getQishuiAvailability as getLocalAvailability, requestQishuiBridge } from './qishuiLocalApi';
++
++// src/services/onlineMusic/qishui/qishuiTransport.ts
++//
++// 上游这一层是「渲染进程 → 主进程 IPC」的边界：账号与播放器模型留在主进程，页面只拿结果。
++// 手机壳里没有主进程可借，契约原样保留（同样的操作名、同样的错误码、同样的失败文案），
++// 只把底层从 `window.electron.qishuiRequest` 换成本机实现：
++// 包在页面里跑（node:crypto 由 qishuiNodeCrypto 顶替），HTTP 走壳的同源代理。
++export type { QishuiOperation, QishuiParams, QishuiBridgeResult } from 'qishui-music-api';
++
++// 与上游同名同义：这个页面没有可用的汽水通道（例如浏览器里没有壳代理）。
++export const QISHUI_NEEDS_DESKTOP = 'Qishui requires the desktop app';
++export const QISHUI_BRIDGE_FAILED = 'Qishui desktop request failed';
++const STAGES = ['access-code', 'ticket', 'account'] as const;
++export type QishuiLoginStage = typeof STAGES[number];
++// 最近一次登录类操作（login_*）的失败，给登录诊断用；登录途中顺带发的歌词、电台、封面请求不算。
++let lastFailure: { stage: QishuiLoginStage | null; code: ProviderErrorCode; upstreamCode?: string } | null = null;
++export const getQishuiLastFailure = () => lastFailure;
++const isLoginOperation = (operation: QishuiOperation) => operation.startsWith('login_');
++export class QishuiRequestError extends OnlineProviderError {
++    constructor(code: ProviderErrorCode, message: string, public readonly stage: QishuiLoginStage | null, public readonly upstreamCode?: string) {
++        super(code, message, 'qishui');
++    }
++}
++export const getQishuiAvailability = () => (
++    getLocalAvailability().configured
++        ? { configured: true } as const : { configured: false, reason: 'runtime-unavailable' } as const
++);
++export async function requestQishui<T = unknown>(operation: QishuiOperation, params: QishuiParams = {}): Promise<T> {
++    if (operation === 'login_qr_key') lastFailure = null;
++    if (!getQishuiAvailability().configured) throw new OnlineProviderError('unavailable', QISHUI_NEEDS_DESKTOP, 'qishui');
++    let result;
++    try { result = await requestQishuiBridge(operation, params); }
++    catch (error) { throw new OnlineProviderError('network', QISHUI_BRIDGE_FAILED, 'qishui', error); }
++    if (!result.ok) {
++        const stage = STAGES.find(stage => stage === result.error.stage) ?? null;
++        const upstreamCode = typeof result.error.upstreamCode === 'string' && /^\d{1,12}$/.test(result.error.upstreamCode) ? result.error.upstreamCode : undefined;
++        if (isLoginOperation(operation)) lastFailure = { stage, code: result.error.code, upstreamCode };
++        throw new QishuiRequestError(result.error.code, result.error.message, stage, upstreamCode);
++    }
++    return result.data as T;
++}
++
++// The image type the bytes themselves say, for the formats a scene icon comes in; null when they say none of them.
++function sniffImageType(bytes: Uint8Array): string | null {
++    const starts = (...head: number[]) => head.every((byte, index) => bytes[index] === byte);
++    if (starts(0x89, 0x50, 0x4e, 0x47)) return 'image/png';
++    if (starts(0xff, 0xd8, 0xff)) return 'image/jpeg';
++    if (starts(0x47, 0x49, 0x46, 0x38)) return 'image/gif';
++    if (starts(0x52, 0x49, 0x46, 0x46) && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
++    return null;
++}
++const RASTER_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif']);
++
++// Scene artwork is public CDN content; it is fetched without any account headers or cookies.
++// The data URL carries the image's own type: the CDN's template decides the format, not the address.
++//
++// 手机壳里**不能**直接 fetch：douyinpic.com 不带 CORS 头，页面直连会被拦。改走同源代理
++// （壳已把 douyinpic.com 放进白名单），回来的仍是原始字节与原始 content-type。
++export async function readQishuiSceneIcon(raw: string): Promise<string> {
++    const url = new URL(raw);
++    if (url.protocol !== 'https:' || !/(?:^|\.)douyinpic\.com$/.test(url.hostname) || url.username || url.password) {
++        throw new Error('Invalid scene artwork URL');
++    }
++    const response = await fetch(`/api/lyric-proxy?url=${encodeURIComponent(url.href)}`);
++    const declared = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ?? '';
++    if (!response.ok || !declared.startsWith('image/')) throw new Error('Scene artwork is unavailable');
++    const bytes = new Uint8Array(await response.arrayBuffer());
++    if (bytes.length > 512 * 1024) throw new Error('Scene artwork is too large');
++    const type = sniffImageType(bytes) ?? (RASTER_TYPES.has(declared) ? declared : null);
++    if (!type) throw new Error('Scene artwork is not a raster image');
++    let binary = '';
++    for (const byte of bytes) binary += String.fromCharCode(byte);
++    return `data:${type};base64,${btoa(binary)}`;
++}
+diff --git a/src/services/shellOnlineAudio.ts b/src/services/shellOnlineAudio.ts
+index 02892c0..fb817e4 100644
+--- a/src/services/shellOnlineAudio.ts
++++ b/src/services/shellOnlineAudio.ts
+@@ -53,10 +53,29 @@ const hasShellMediaCache = (): boolean => {
+     return typeof bridge?.mediaPrepare === 'function' && typeof bridge?.mediaStatus === 'function';
+ };
+ 
++/**
++ * 这些主机的音频对 `<audio>` 是**可以直接播**的：字节系 CDN（汽水音乐的音源、封面）。
++ * 判据来自真机实测：ArkWeb 的媒体栈能自己发 Range 请求、自己解 AAC/MP4，
++ * 所以不需要壳把这几个 MB 取进内存再分块交回来。
++ */
++const DIRECT_PLAYABLE_HOSTS = /(?:^|\.)(?:365yg\.com|douyinvod\.com|douyinscdn\.com|bytefcdn\.com|bytecdn\.cn|byteicdn\.com|ibytedtos\.com|pstatp\.com|snssdk\.com|bytedance\.com|bytetos\.com|volcvideo\.com|volccdn\.com|volces\.com|volcengineapi\.com|douyin\.com|qishui\.com|zijieapi\.com|zjcdn\.com)$/;
++
++const isDirectPlayableCdn = (url: string): boolean => {
++    try {
++        return DIRECT_PLAYABLE_HOSTS.test(new URL(url).hostname);
++    } catch {
++        return false;
++    }
++};
++
+ /** 这个地址要不要经过壳：远程 http(s) 才需要，blob:/data: 本来就没有跨域问题。 */
+ export const needsShellAudioRelay = (url: string | null | undefined): boolean => {
+     if (!url) return false;
+     if (!/^https?:/i.test(url)) return false;
++    // 汽水（qishui）的音源走字节的 CDN：真机实测 <audio> 能直接播（Range 也支持），
++    // 而它一首只有 1–2 MB 的 AAC，中继一遍（取进壳内存再分块交回页面）纯属多绕一圈。
++    // 直连还能让播放器自己按需取，省掉我们那套 MSE 分块的复杂度。
++    if (isDirectPlayableCdn(url)) return false;
+     // 判据是「壳能不能中转」，不是「壳是不是鸿蒙」：锁屏那套（isShellNowPlayingSupported）只有
+     // 鸿蒙壳开通了，但两个壳的媒体缓存是一样的，而签名音频地址对谁都不发 CORS 头。
+     // 桌面与 PWA 形态没有 foliaAndroid，于是照旧把远程地址直接交给 <audio>。
+diff --git a/src/types/onlineMusic.ts b/src/types/onlineMusic.ts
+index b55f095..3b482f7 100644
+--- a/src/types/onlineMusic.ts
++++ b/src/types/onlineMusic.ts
+@@ -326,6 +326,11 @@ export interface OnlineSearchProvider {
+ }
+ 
+ export interface OnlinePlaybackProvider {
++    /**
++     * 这个 provider 实际能给的音质档位（从低到高）。没有这一项表示不声明、按用户偏好直接请求；
++     * 汽水那边游客只有 standard，声明出来 UI 才不会给出「无损」这种拿不到的选项。
++     */
++    audioQualityLevels?: readonly AudioQualityPreference[];
+     getSongDetail(id: MediaId): Promise<UnifiedSong | null>;
+     getAudioSource(song: SongResult, quality: AudioQualityPreference): Promise<ProviderAudioSource | null>;
+     getAvailability?(song: SongResult): ProviderSongAvailability;

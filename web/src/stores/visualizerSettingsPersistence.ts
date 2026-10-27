@@ -15,8 +15,23 @@ import { isAndroidShell } from '../utils/platform';
 import { sanitizeUrlBackgroundList } from '../utils/urlBackground';
 import { normalizeLumiereTuning } from '../utils/lumiereTuning';
 import { normalizeRandomVisualizerModes } from '../utils/randomVisualizerModes';
+import { DEFAULT_HANABI_TUNING } from '../components/visualizer/hanabi/types';
+import { normalizeHanabiTuning } from '../components/visualizer/hanabi/hanabiTuning';
 
 export const VISUALIZER_OPACITY_STORAGE_KEY = 'visualizer_opacity';
+
+// 花火（hanabi）的画质与分镜参数。键名与上游一致。
+export const HANABI_TUNING_STORAGE_KEY = 'hanabi_tuning';
+
+export const readStoredHanabiTuning = () => {
+    if (typeof window === 'undefined') return DEFAULT_HANABI_TUNING;
+    try {
+        const raw = localStorage.getItem(HANABI_TUNING_STORAGE_KEY);
+        return raw === null ? DEFAULT_HANABI_TUNING : normalizeHanabiTuning(JSON.parse(raw));
+    } catch {
+        return DEFAULT_HANABI_TUNING;
+    }
+};
 
 // 「每首歌随机歌词动画」的抽签池。存成一个样式 id 的 JSON 数组；
 // 读的时候一律过 normalizeRandomVisualizerModes：存档坏了、格式变了、池子空了都退回全部内置样式。

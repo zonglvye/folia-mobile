@@ -1,7 +1,14 @@
 // Copyright (c) 2026 chthollyphile
 import { snapResolutionToTexturePool } from '../pixi/pixiTextureBudget';
-import { numberWithin } from '../tuningDefinition';
 import { DEFAULT_HANABI_TUNING, type HanabiRenderQuality, type HanabiTuning } from './types';
+
+// 上游把 numberWithin 放在 tuningDefinition 里；我们这条分支的 tuning 走 tuningRegistry，
+// 用不到那整套契约，所以这四行的钳位直接留在本文件（语义与上游一致）。
+const numberWithin = (value: unknown, fallback: number, min: number, max: number) => (
+    typeof value === 'number' && Number.isFinite(value)
+        ? Math.min(max, Math.max(min, value))
+        : fallback
+);
 
 // src/components/visualizer/hanabi/hanabiTuning.ts
 // 花火 tuning 的归一化与运行时分类：存档、导入、同步、滑块拖动都经 normalizeHanabiTuning 补齐字段、钳住范围；

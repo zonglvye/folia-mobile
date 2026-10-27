@@ -38,6 +38,8 @@ export const useLibraryHomeOnline = (
         userId: online.user?.id ?? null,
         canUseAlbums: online.canUseAlbums,
         canUseRadio: online.canUseRadio,
+        // 汽水没登录也能拿私人 FM 与场景；不这样的话游客首页是一面空墙。
+        guestRadio: online.guestAccess && !online.user,
     });
 
     const playlistCards = useMemo(() => buildOnlinePlaylistCards(online.collections, t), [online.collections, t]);

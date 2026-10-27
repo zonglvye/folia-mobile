@@ -1,0 +1,177 @@
+From 483802ff2aefc71f82b6f5d52ed80d303da9c4e7 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 27 Oct 2026 21:24:33 +0800
+Subject: [PATCH 87/90] feat(qishui): give a signed-out Qishui a way to sign in
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+上一版让汽水能当游客切过去，代价是它顺手把登录入口挡掉了：平台列表里点「汽水」
+那一行只会切过去（不会登录），已经是当前平台的行点了也没有反应，于是游客没有任何
+路径去扫码。
+
+- BravaisAccountRow.login / BravaisHomeAccount.onLogin：当前平台能当游客用、又还
+  没登录时，行尾多一个圆形登录按钮（与登出同款，位置相同），点了走
+  account.startLogin，缝翻成登录态。
+- 登录文案按平台区分：LOGIN_COPY_BY_PROVIDER 补 qishui，新增
+  home.loginTitleQishui / loginNoteQishui（二维码是抖音的，扫的时候用抖音）。
+
+真机验证（SCA-AL00）：平台列表 → 汽水行尾的登录按钮 → 缝里出现「使用抖音扫码」
++ 256×256 二维码 + 「请扫描二维码」（= 轮询已进 waiting）。扫码本身需要真人手机，
+这里只验到要码与轮询这一层。
+---
+ src/i18n/locales/en.ts                           |  2 ++
+ src/i18n/locales/in.ts                           |  2 ++
+ src/i18n/locales/zh-CN.ts                        |  2 ++
+ src/library/core/model/accountRules.ts           |  2 ++
+ .../bravais/BravaisSeamAccountSwitcher.tsx       | 16 ++++++++++++++++
+ .../suites/bravais/bravaisAccountModel.ts        |  9 +++++++++
+ src/library/suites/bravais/bravaisHomeModels.ts  |  5 +++++
+ .../suites/bravais/useBravaisHomeAccount.ts      |  7 ++++++-
+ 8 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index a5dbaa3..e4a815a 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -1327,6 +1327,8 @@ export default {
+     "loginTitleQq": "Scan to sign in to QQ Music",
+     "loginTitleBodian": "Scan with Bodian Music",
+     "loginNoteBodian": "Scan this code with the Bodian Music app and confirm sign-in",
++    "loginTitleQishui": "Scan with Douyin",
++    "loginNoteQishui": "Open the Douyin app > Me > Scan (top right), then confirm on your phone",
+     "loginNoteQq": "Choose the sign-in method matching your account: QQ scan or WeChat scan",
+     "qqLoginMethodTitle": "Choose sign-in method",
+     "qqLoginMethodHint": "Use QQ scan for a QQ account, or WeChat scan for a WeChat account",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index a55aab0..94efb7b 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -1322,6 +1322,8 @@ export default {
+     "loginTitleQq": "Pindai untuk masuk ke QQ Music",
+     "loginTitleBodian": "Pindai dengan Bodian Music",
+     "loginNoteBodian": "Pindai kode ini dengan aplikasi Bodian Music dan konfirmasi masuk",
++    "loginTitleQishui": "Pindai dengan Douyin",
++    "loginNoteQishui": "Buka aplikasi Douyin > Saya > Pindai (kanan atas), lalu konfirmasi di ponsel",
+     "loginNoteQq": "Pilih metode masuk yang sesuai: pindai QQ atau pindai WeChat",
+     "qqLoginMethodTitle": "Pilih metode masuk",
+     "qqLoginMethodHint": "Gunakan pindai QQ untuk akun QQ, atau pindai WeChat untuk akun WeChat",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 5c6c941..e0ca93b 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -1326,6 +1326,8 @@ export default {
+     "loginTitleQq": "扫码登录QQ音乐",
+     "loginTitleBodian": "使用波点音乐 App 扫码",
+     "loginNoteBodian": "打开波点音乐 App 扫描二维码并确认登录",
++    "loginTitleQishui": "使用抖音扫码",
++    "loginNoteQishui": "打开抖音 App > 我 > 右上角「扫一扫」，扫码后在手机上确认登录",
+     "loginNoteQq": "请选择与账号一致的登录方式：QQ 扫码或微信扫码",
+     "qqLoginMethodTitle": "选择登录方式",
+     "qqLoginMethodHint": "请选择与 QQ 音乐账号一致的登录方式\nQQ 账号请选择 QQ 扫码，微信账号请选择微信扫码",
+diff --git a/src/library/core/model/accountRules.ts b/src/library/core/model/accountRules.ts
+index 7f68e67..679996f 100644
+--- a/src/library/core/model/accountRules.ts
++++ b/src/library/core/model/accountRules.ts
+@@ -96,6 +96,8 @@ const LOGIN_COPY_BY_PROVIDER: Readonly<Record<string, { title: string; note: str
+     kugou: { title: 'home.loginTitleKugou', note: 'home.loginNoteKugou' },
+     qq: { title: 'home.loginTitleQq', note: 'home.loginNoteQq' },
+     bodian: { title: 'home.loginTitleBodian', note: 'home.loginNoteBodian' },
++    // 汽水的二维码是抖音的，扫的时候得用抖音 App。
++    qishui: { title: 'home.loginTitleQishui', note: 'home.loginNoteQishui' },
+ };
+ const NETEASE_LOGIN_COPY = { title: 'home.loginTitle', note: 'home.loginNote' };
+ 
+diff --git a/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx b/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx
+index 755427a..29ed8ea 100644
+--- a/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx
++++ b/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx
+@@ -152,6 +152,22 @@ const BravaisAccountList: React.FC<{
+                         </span>
+                         {row.configured && !row.direct && <LogIn aria-hidden className="is-login" />}
+                     </button>
++                    {row.login && (
++                        <button
++                            type="button"
++                            // 与登出同一个圆形图标按钮的外观（同一个位置的另一种动作）。
++                            className="bravais-account-logout"
++                            data-bravais-account-login={row.providerId}
++                            aria-label={row.login.label}
++                            title={row.login.label}
++                            onClick={() => {
++                                onClose();
++                                account.onLogin(row.providerId);
++                            }}
++                        >
++                            <LogIn aria-hidden />
++                        </button>
++                    )}
+                     {row.logout && (
+                         <button
+                             type="button"
+diff --git a/src/library/suites/bravais/bravaisAccountModel.ts b/src/library/suites/bravais/bravaisAccountModel.ts
+index fb1fade..7cceae1 100644
+--- a/src/library/suites/bravais/bravaisAccountModel.ts
++++ b/src/library/suites/bravais/bravaisAccountModel.ts
+@@ -271,6 +271,11 @@ export type BravaisAccountRow = {
+      * 文案换成「正在登出」。
+      */
+     logout: { label: string; disabled: boolean } | null;
++    /**
++     * 游客可用的当前平台还没登录时的登录入口（汽水）：这种平台选它不会再拦登录，所以得单独给一个按钮。
++     * 其余行没有（未登录的普通平台，选它本身就是登录）。
++     */
++    login: { label: string } | null;
+ };
+ 
+ /** 切换器里的一行能不能现在登出：有登出入口，且没有登出在途（logout.status 不是 pending）。 */
+@@ -327,6 +332,10 @@ export const projectAccountSwitcherRows = ({
+                         disabled: logoutPending,
+                     }
+                     : null,
++                // 当前平台能当游客用、又还没登录：给它一个「登录到 X」的入口，否则点了行也不会有反应。
++                login: current && configured && !nickname && provider.requiresAccount !== false && provider.guestAccess === true
++                    ? { label: t('home.loginToProvider', { provider: provider.shortName || provider.displayName }) }
++                    : null,
+             };
+         });
+ };
+diff --git a/src/library/suites/bravais/bravaisHomeModels.ts b/src/library/suites/bravais/bravaisHomeModels.ts
+index dca3d5b..50df15f 100644
+--- a/src/library/suites/bravais/bravaisHomeModels.ts
++++ b/src/library/suites/bravais/bravaisHomeModels.ts
+@@ -120,6 +120,11 @@ export type BravaisHomeAccount = {
+     onSelect: (providerId: string) => void;
+     /** B10：登出（只对能登出、且没有登出在途的那一行）。 */
+     onLogout: (providerId: string) => void;
++    /**
++     * 当前平台能当游客用（汽水）、还没登录时，从列表里主动去扫码登录。
++     * 这种平台选它不会再拦登录（canSwitchToProviderDirectly），所以登录入口得单独给一个。
++     */
++    onLogin: (providerId: string) => void;
+ };
+ 
+ /** 首页层在缝里的那一部分（BravaisSeamModel.home）。 */
+diff --git a/src/library/suites/bravais/useBravaisHomeAccount.ts b/src/library/suites/bravais/useBravaisHomeAccount.ts
+index 9baf332..657d0c1 100644
+--- a/src/library/suites/bravais/useBravaisHomeAccount.ts
++++ b/src/library/suites/bravais/useBravaisHomeAccount.ts
+@@ -33,6 +33,10 @@ export const useBravaisHomeAccount = (account: LibraryAccountController, online:
+         if (!row || !canRunLogout(row)) return;
+         void latest.current.account.logout(providerId);
+     }, []);
++    // 游客可用的平台（汽水）切过去之后选它不会再拦登录，所以登录要从这里主动发起。
++    const onLogin = useCallback((providerId: string) => {
++        void latest.current.account.startLogin(providerId);
++    }, []);
+ 
+     const currentRow = rows.find(row => row.current);
+     const detail = currentRow?.detail ?? '';
+@@ -52,5 +56,6 @@ export const useBravaisHomeAccount = (account: LibraryAccountController, online:
+         rows,
+         onSelect,
+         onLogout,
+-    }), [avatarUrl, detail, guest, nickname, onLogout, onSelect, online.providerId, online.providerLabel, rows, t]);
++        onLogin,
++    }), [avatarUrl, detail, guest, nickname, onLogin, onLogout, onSelect, online.providerId, online.providerLabel, rows, t]);
+ };

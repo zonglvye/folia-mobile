@@ -394,3 +394,17 @@
 
 /* 书脊上只留一个图标按钮：点它展开窄缝（fb3：并打开平台列表）。 */
 .bravais-account-switcher.is-compact { align-items: center; }
+
+/*
+ * 横屏手机（视口只有 ~374px 高）：一行 58px 让四个平台塞不下，列表要么被裁在中间一行，要么得滚。
+ * 这里把行压扁一点（头像 34、内边距 6），四行约 200px，配合组件里翻到入口下方的那一版定位就能整张露出来。
+ */
+@media (max-height: 430px) {
+    .bravais-account-list { padding: 6px; }
+    .bravais-account-list .bravais-account-row > button[role='menuitemradio'] { gap: 10px; padding: 5px 8px; }
+    .bravais-account-row .bravais-account-avatar { width: 34px; height: 34px; }
+    .bravais-account-row .bravais-account-avatar.is-badge { font-size: 13px; }
+    .bravais-account-row .is-name { font-size: 13px; }
+    .bravais-account-row .is-note { font-size: 9px; }
+    .bravais-account-list .bravais-account-logout { width: 30px; height: 30px; }
+}

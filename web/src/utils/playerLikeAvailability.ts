@@ -32,10 +32,12 @@ export const resolveLikeAvailability = (
 
     const sourceRef = getPlaybackSourceRef(currentSong);
     if (sourceRef.kind === 'online' && !omni.canLikeSong(currentSong)) {
+        // 平台支持收藏、只是还没登录（汽水游客）：说的不是「不支持」，而是「登录后可以」。
+        const needsSignIn = omni.needsSignInForAccountMutation(sourceRef.providerId);
         return {
             disabled: true,
             reason: {
-                key: 'status.providerLikeUnavailable',
+                key: needsSignIn ? 'status.providerLikeNeedsSignIn' : 'status.providerLikeUnavailable',
                 params: { provider: omni.getProviderLabel(sourceRef.providerId) },
             },
         };

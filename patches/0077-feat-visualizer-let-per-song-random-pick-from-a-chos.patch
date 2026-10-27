@@ -1,0 +1,543 @@
+From a0996e3c5c6ada41b1f4fc680d41c5e4c8a7776e Mon Sep 17 00:00:00 2001
+From: zonglvye <zonglvye@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 17:54:55 +0800
+Subject: [PATCH 77/90] feat(visualizer): let per-song random pick from a
+ chosen pool of styles
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Brings over upstream v0.7.22's 'random lyric style scope' (#771). The core is
+small: a pool of built-in styles, stored as JSON, normalised on every read, and
+one pick per song that avoids repeating the current one.
+
+- utils/randomVisualizerModes.ts: normalise (built-ins only, deduped, in the
+  builtin order, empty pool falls back to all) and pick (never the current style
+  when another choice exists)
+- useVisualizerSettingsStore: randomVisualizerModes + handleSetRandomVisualizerModes;
+  handleSetVisualizerMode now turns per-song random off when a style is chosen by
+  hand, unless the caller passes preserveRandom (which the pick itself does) —
+  without that, a random pick would switch its own feature off
+- useRandomVisualizerMode: replaced with upstream's version - one choice per
+  song, no reroll for refreshed metadata or StrictMode, and editing the pool only
+  replaces a style that is no longer in it
+- panelTab/controls/RandomLyricStylePool: the pool editor, written against the
+  player panel's own primitives instead of upstream's settings kit. Lives under
+  the style stepper on the 控制 page.
+
+Verified on the device: removing the current style from the pool rerolls it
+without switching random off, and advancing a track rotated fume -> partita with
+random still on.
+---
+ src/App.tsx                                   |   2 +
+ .../panelTab/controls/AppearanceSection.tsx   |   3 +
+ .../controls/RandomLyricStylePool.tsx         | 114 ++++++++++++++++++
+ src/hooks/useRandomVisualizerMode.ts          |  55 +++++----
+ src/i18n/locales/en.ts                        |   5 +
+ src/i18n/locales/in.ts                        |   5 +
+ src/i18n/locales/zh-CN.ts                     |   5 +
+ src/stores/storagePrimitives.ts               |   7 ++
+ src/stores/useVisualizerSettingsStore.ts      |  49 ++++++--
+ src/stores/visualizerSettingsPersistence.ts   |  17 +++
+ src/utils/randomVisualizerModes.ts            |  28 +++++
+ 11 files changed, 252 insertions(+), 38 deletions(-)
+ create mode 100644 src/components/panelTab/controls/RandomLyricStylePool.tsx
+ create mode 100644 src/utils/randomVisualizerModes.ts
+
+diff --git a/src/App.tsx b/src/App.tsx
+index bc7f6a6..1e25472 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -466,6 +466,7 @@ export default function App() {
+     const {
+         visualizerMode,
+         randomVisualizerModePerSong,
++        randomVisualizerModes,
+         handleSetVisualizerMode,
+     } = useVisualizerSettingsStore(useShallow(selectVisualizerSettingsSnapshot));
+ 
+@@ -500,6 +501,7 @@ export default function App() {
+         currentSong,
+         enabled: randomVisualizerModePerSong,
+         visualizerMode,
++        modes: randomVisualizerModes,
+         setVisualizerMode: handleSetVisualizerMode,
+     });
+ 
+diff --git a/src/components/panelTab/controls/AppearanceSection.tsx b/src/components/panelTab/controls/AppearanceSection.tsx
+index effd977..2428cc2 100644
+--- a/src/components/panelTab/controls/AppearanceSection.tsx
++++ b/src/components/panelTab/controls/AppearanceSection.tsx
+@@ -16,6 +16,7 @@ import { openCommandPaletteCommand } from '../../../stores/useAppViewStore';
+ import { useLyricSegmentationStore } from '../../../stores/useLyricSegmentationStore';
+ import { LYRIC_SEGMENTATION_COMMAND_ID } from '../../command-palette/commands/lyricSegmentationCommand';
+ import ModeStepperRow from './ModeStepperRow';
++import RandomLyricStylePool from './RandomLyricStylePool';
+ import ThemeSourceRow from './ThemeSourceRow';
+ import { BackgroundModeGlyph, VisualizerModeGlyph } from '../../visualizer/modeGlyphs';
+ import { useVisualizerSettingsStore } from '../../../stores/useVisualizerSettingsStore';
+@@ -198,6 +199,8 @@ const AppearanceSection: React.FC<AppearanceSectionProps> = ({
+                 />
+             </div>
+ 
++            <RandomLyricStylePool t={t} isDaylight={isDaylight} theme={theme} />
++
+             <div className="pt-1">
+                 <ThemeSourceRow
+                     themeSourceModel={themeSourceModel}
+diff --git a/src/components/panelTab/controls/RandomLyricStylePool.tsx b/src/components/panelTab/controls/RandomLyricStylePool.tsx
+new file mode 100644
+index 0000000..d131b32
+--- /dev/null
++++ b/src/components/panelTab/controls/RandomLyricStylePool.tsx
+@@ -0,0 +1,114 @@
++// src/components/panelTab/controls/RandomLyricStylePool.tsx
++//
++// 控制页里「每首随机」的开关和它的抽签池。
++//
++// 上游 v0.7.22 把它做成一整页（RandomPoolPicker + PictureChecks，基于设置套件），我们这边控制页
++// 只有 320px 宽，所以收成一望即知的形态：一行开关，打开之后下面是一格一格的样式名单，
++// 勾上的就是会被抽到的。
++//
++// 状态直接读 useVisualizerSettingsStore：控制页本来就在面板里，多传两三个 prop 只会让
++// ControlsTab 的模型更胖。
++import React from 'react';
++import { Shuffle } from 'lucide-react';
++import { useShallow } from 'zustand/react/shallow';
++import type { Theme, VisualizerMode } from '../../../types';
++import { BUILTIN_VISUALIZER_MODES } from '../../../types/visualizerModes';
++import { getVisualizerModeLabel, VISUALIZER_REGISTRY } from '../../visualizer/registry';
++import { useVisualizerSettingsStore } from '../../../stores/useVisualizerSettingsStore';
++
++type RandomLyricStylePoolProps = {
++    t: (key: string) => string;
++    isDaylight: boolean;
++    theme: Theme;
++};
++
++const builtinModes = new Set<string>(BUILTIN_VISUALIZER_MODES);
++// 只列内置样式：模组样式可以随时被禁用，进池子只会抽到一个不存在的画面。
++const POOL_CHOICES = VISUALIZER_REGISTRY
++    .filter(entry => builtinModes.has(entry.mode))
++    .map(entry => entry.mode);
++
++const RandomLyricStylePool: React.FC<RandomLyricStylePoolProps> = ({ t, isDaylight, theme }) => {
++    const { enabled, modes, currentMode, onToggle, onSetModes } = useVisualizerSettingsStore(useShallow(state => ({
++        enabled: state.randomVisualizerModePerSong,
++        modes: state.randomVisualizerModes,
++        currentMode: state.visualizerMode,
++        onToggle: state.handleToggleRandomVisualizerModePerSong,
++        onSetModes: state.handleSetRandomVisualizerModes,
++    })));
++
++    const selected = new Set<string>(modes);
++    const allSelected = POOL_CHOICES.every(mode => selected.has(mode));
++    const accent = theme?.accentColor || (isDaylight ? '#18181b' : '#f4f4f5');
++    const idleText = isDaylight ? 'text-zinc-500' : 'text-white/50';
++
++    const toggleMode = (mode: VisualizerMode) => {
++        const next = selected.has(mode)
++            // 最后一格不让取消：池子空了就没有随机可言（store 那边也会退回全选）。
++            ? (modes.length <= 1 ? modes : modes.filter(item => item !== mode))
++            : [...modes.filter(item => builtinModes.has(item)), mode];
++        onSetModes(next);
++    };
++
++    return (
++        <div className="pt-1">
++            <div className="flex items-center justify-between px-1 py-1">
++                <span className={`flex items-center gap-1.5 text-[11px] ${isDaylight ? 'text-zinc-600' : 'text-white/60'}`}>
++                    <Shuffle size={12} />
++                    {t('options.randomVisualizerPerSong')}
++                </span>
++                <button
++                    type="button"
++                    role="switch"
++                    aria-checked={enabled}
++                    aria-label={t('options.randomVisualizerPerSong')}
++                    onClick={() => onToggle(!enabled, { notify: false })}
++                    className="relative w-9 h-5 rounded-full transition-all shrink-0"
++                    style={{ backgroundColor: enabled ? accent : (isDaylight ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.16)') }}
++                >
++                    <span
++                        className={`absolute top-0.5 w-4 h-4 rounded-full transition-transform shadow-sm ${enabled ? 'translate-x-[18px]' : 'translate-x-0.5'} ${isDaylight ? 'bg-white' : 'bg-zinc-100'}`}
++                    />
++                </button>
++            </div>
++
++            {enabled && (
++                <div className="px-1 pb-1">
++                    <div className="flex items-center justify-between mb-1">
++                        <span className={`text-[10px] ${idleText}`}>{t('options.randomVisualizerPoolHint')}</span>
++                        <button
++                            type="button"
++                            disabled={allSelected}
++                            onClick={() => onSetModes(BUILTIN_VISUALIZER_MODES)}
++                            className={`text-[10px] ${allSelected ? 'opacity-30' : 'opacity-70 hover:opacity-100'}`}
++                        >
++                            {t('options.randomVisualizerSelectAll')}
++                        </button>
++                    </div>
++                    <div role="group" aria-label={t('options.randomVisualizerModes')} className="flex flex-wrap gap-1">
++                        {POOL_CHOICES.map((mode) => {
++                            const checked = selected.has(mode);
++                            return (
++                                <button
++                                    key={mode}
++                                    type="button"
++                                    aria-pressed={checked}
++                                    onClick={() => toggleMode(mode)}
++                                    className={`px-1.5 py-0.5 rounded-md text-[11px] leading-4 transition-colors ${checked ? '' : `${idleText} ${isDaylight ? 'bg-black/5' : 'bg-white/5'}`}`}
++                                    style={checked ? { backgroundColor: `${accent}26`, color: accent } : undefined}
++                                >
++                                    {getVisualizerModeLabel(mode, t)}
++                                </button>
++                            );
++                        })}
++                    </div>
++                    {selected.has(currentMode) && (
++                        <p className={`mt-1 text-[10px] ${idleText}`}>{t('options.randomVisualizerCurrentInPool')}</p>
++                    )}
++                </div>
++            )}
++        </div>
++    );
++};
++
++export default RandomLyricStylePool;
+diff --git a/src/hooks/useRandomVisualizerMode.ts b/src/hooks/useRandomVisualizerMode.ts
+index 2616392..c304276 100644
+--- a/src/hooks/useRandomVisualizerMode.ts
++++ b/src/hooks/useRandomVisualizerMode.ts
+@@ -1,56 +1,55 @@
+ import { useEffect, useRef } from 'react';
+ import type { SongResult, VisualizerMode } from '../types';
+-import { VISUALIZER_REGISTRY } from '../components/visualizer/registry';
++import { pickRandomVisualizerMode } from '../utils/randomVisualizerModes';
++import type { SetVisualizerModeOptions } from '../stores/useVisualizerSettingsStore';
+ import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
+ 
+ // Applies a different registered lyric animation mode when the active track changes.
++//
++// 上游 v0.7.22 的版本：抽签池从设置里来（modes），而不是全库随机。三条规则都在下面：
++//   1. 一首歌只抽一次 —— 同一首歌里刷新元数据、StrictMode 重跑都不会重抽。
++//   2. 打开随机、或者改了池子时，只有当当前样式不在池子里才换（免得刚勾完就跳样式）。
++//   3. 抽签自己切样式时带 preserveRandom，否则 handleSetVisualizerMode 会把随机关掉。
+ export function useRandomVisualizerMode({
+     currentSong,
+     enabled,
+     visualizerMode,
++    modes,
+     setVisualizerMode,
+ }: {
+     currentSong: SongResult | null;
+     enabled: boolean;
+     visualizerMode: VisualizerMode;
+-    setVisualizerMode: (mode: VisualizerMode, options?: { notify?: boolean }) => void;
++    modes: readonly VisualizerMode[];
++    setVisualizerMode: (mode: VisualizerMode, options?: SetVisualizerModeOptions) => void;
+ }) {
+     const observedSongIdRef = useRef<string | null>(null);
+-    const wasEnabledRef = useRef(enabled);
++    const pendingChoiceRef = useRef<{ songId: string | null; from: VisualizerMode; modes: readonly VisualizerMode[] } | null>(null);
+ 
+     useEffect(() => {
+         const songId = currentSong ? getPlaybackSongKey(currentSong) : null;
+-        const wasEnabled = wasEnabledRef.current;
+-        wasEnabledRef.current = enabled;
+-
+         if (!enabled) {
+             observedSongIdRef.current = songId;
++            pendingChoiceRef.current = null;
+             return;
+         }
++        const songChanged = songId !== null && observedSongIdRef.current !== null && observedSongIdRef.current !== songId;
++        if (songId !== null) observedSongIdRef.current = songId;
+ 
+-        if (!wasEnabled) {
+-            observedSongIdRef.current = songId;
+-            return;
+-        }
+-
+-        if (songId === null) {
+-            return;
+-        }
+-
+-        if (observedSongIdRef.current === null) {
+-            observedSongIdRef.current = songId;
++        // Keep one choice for the whole song. Enabling random or editing its pool only replaces a
++        // style that is outside the selection; StrictMode and refreshed song metadata do not reroll.
++        if (!songChanged && modes.includes(visualizerMode)) {
++            pendingChoiceRef.current = null;
+             return;
+         }
+-
+-        if (observedSongIdRef.current === songId) {
+-            return;
++        // StrictMode can replay this effect before the selected mode reaches the next render.
++        const pending = pendingChoiceRef.current;
++        if (pending?.songId === songId && pending.from === visualizerMode && pending.modes === modes) return;
++        pendingChoiceRef.current = { songId, from: visualizerMode, modes };
++
++        const nextMode = pickRandomVisualizerMode(modes, visualizerMode);
++        if (nextMode !== visualizerMode) {
++            setVisualizerMode(nextMode, { notify: false, preserveRandom: true });
+         }
+-
+-        observedSongIdRef.current = songId;
+-        const candidates = VISUALIZER_REGISTRY
+-            .map(entry => entry.mode)
+-            .filter(mode => mode !== visualizerMode);
+-        const nextMode = candidates[Math.floor(Math.random() * candidates.length)] ?? visualizerMode;
+-        setVisualizerMode(nextMode, { notify: false });
+-    }, [currentSong, enabled, setVisualizerMode, visualizerMode]);
++    }, [currentSong, enabled, modes, setVisualizerMode, visualizerMode]);
+ }
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index 82391c6..4dc6d0f 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -2333,6 +2333,11 @@ export default {
+     "temperaFontSizeAutoNotice": "Tempera computes font sizes from the viewport, lyric volume and layout region; the generic font size setting has no effect in this mode.",
+     "lumiereFontSizeAutoNotice": "Lumiere sizes lyrics from the viewport and each light setup's text region; the generic font size setting only affects the subtitles in this mode.",
+     "hanabiFontSizeAutoNotice": "Hanabi sizes and lays out lyrics automatically from the viewport, lyric volume and shot layout. The general font-size setting only affects the subtitles in this mode.",
++    "randomVisualizerPerSong": "Random per song",
++    "randomVisualizerPoolHint": "Styles in the pool",
++    "randomVisualizerSelectAll": "Select all",
++    "randomVisualizerModes": "Random style pool",
++    "randomVisualizerCurrentInPool": "The current style is in the pool; the next song picks another.",
+     "temperaCameraIntensity": "Camera Intensity",
+     "temperaGlyphMotion": "Glyph Motion",
+     "temperaGlyphSettleStretch": "Entrance pacing",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index 2033fbe..6e6fe3f 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -2290,6 +2290,11 @@ export default {
+     "sonnetQualitySection": "Kualitas rendering",
+     "sonnetFontSizeAutoNotice": "Sonnet menghitung ukuran lirik secara otomatis dari viewport, panjang lirik, dan tata letak. Pengaturan ukuran font umum tidak berlaku dalam mode ini.",
+     "hanabiFontSizeAutoNotice": "Hanabi mengatur ukuran dan tata letak lirik otomatis dari viewport, jumlah lirik dan tata letak bidikan. Pengaturan ukuran font umum hanya memengaruhi subtitle dalam mode ini.",
++    "randomVisualizerPerSong": "Acak per lagu",
++    "randomVisualizerPoolHint": "Gaya dalam kumpulan",
++    "randomVisualizerSelectAll": "Pilih semua",
++    "randomVisualizerModes": "Kumpulan gaya acak",
++    "randomVisualizerCurrentInPool": "Gaya saat ini ada dalam kumpulan; lagu berikutnya memilih yang lain.",
+     "sonnetCameraIntensity": "Intensitas kamera",
+     "sonnetTypographyMotion": "Gerakan tipografi",
+     "sonnetMgDensity": "Kepadatan garis latar belakang",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 1b2765c..6402c08 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -2334,6 +2334,11 @@ export default {
+     "temperaFontSizeAutoNotice": "凝彩模式会根据画面尺寸、歌词量和排版区域自动计算字号；通用字体尺寸设置在此模式下无效。",
+     "lumiereFontSizeAutoNotice": "绘光模式会根据画面尺寸和每个光位的文字区自动计算歌词字号；通用字体尺寸设置在此模式下只影响底部字幕。",
+     "hanabiFontSizeAutoNotice": "花火模式会按画面尺寸、歌词量和分镜自动排版字号；通用字体尺寸设置在此模式下只影响底部字幕。",
++    "randomVisualizerPerSong": "每首随机",
++    "randomVisualizerPoolHint": "参与随机的样式",
++    "randomVisualizerSelectAll": "全选",
++    "randomVisualizerModes": "随机样式池",
++    "randomVisualizerCurrentInPool": "当前样式在池中，切歌时会换一种。",
+     "temperaCameraIntensity": "镜头运动强度",
+     "temperaGlyphMotion": "逐字动势",
+     "temperaGlyphSettleStretch": "逐字入场时序",
+diff --git a/src/stores/storagePrimitives.ts b/src/stores/storagePrimitives.ts
+index 80e7c98..637cd83 100644
+--- a/src/stores/storagePrimitives.ts
++++ b/src/stores/storagePrimitives.ts
+@@ -26,3 +26,10 @@ export const getStoredString = (key: string, fallback: string) => {
+ 
+     return localStorage.getItem(key) || fallback;
+ };
++
++/** 写一段字符串（随机歌词动画的池子存成 JSON 就用到它）。 */
++export const setStoredString = (key: string, value: string) => {
++    if (typeof window !== 'undefined') {
++        localStorage.setItem(key, value);
++    }
++};
+diff --git a/src/stores/useVisualizerSettingsStore.ts b/src/stores/useVisualizerSettingsStore.ts
+index bb94158..1d05610 100644
+--- a/src/stores/useVisualizerSettingsStore.ts
++++ b/src/stores/useVisualizerSettingsStore.ts
+@@ -18,10 +18,19 @@ import { buildStoredMonetBackgroundImage, clearMonetBackgroundImage, isSupported
+ import { buildStoredMonetPortraitImage, clearMonetPortraitImage, isSupportedMonetPortraitFile, saveMonetPortraitImage } from '../services/monetPortraitImage';
+ import { setStatusMessage } from './useStatusMessageStore';
+ import { LUMIERE_TUNING_STORAGE_KEY, VISUALIZER_OPACITY_STORAGE_KEY, clampCladdaghEllipseTiltDeg, clampCladdaghFocusScaleRatio, clampCladdaghLetterSpacingOffset, clampCladdaghRadiusScale, clampClassicBreathingFloatMultiplier, clampClassicWordSpacing, clampFumeBackgroundObjectOpacity, clampFumeCameraSpeed, clampFumeGlowIntensity, clampFumeHeroScale, clampFumeTextHoldRatio, clampPartitaStagger, clampUnit, readStoredBackgroundOpacity, readStoredCadenzaTuning, readStoredCappellaTuning, readStoredCladdaghTuning, readStoredClassicTuning, readStoredDioramaTuning, readStoredFumeTuning, readStoredLatentBackgroundTuning, readStoredLumiereTuning, readStoredMonetBackgroundTuning, readStoredMonetTuning, readStoredNomandBackgroundTuning, readStoredPartitaTuning, readStoredPendoloTuning, readStoredSonnetTuning, readStoredSoraBackgroundTuning, readStoredTemperaTuning, readStoredTiltTuning, readStoredUrlBackgroundList, readStoredUrlBackgroundSelectedId, readStoredVisualizerBackgroundMode, readStoredVisualizerFrameRate, readStoredVisualizerMode, readStoredVisualizerOpacity, resolveCappellaAvatarSource, resolveFumeCameraTrackingMode, resolvePendoloNumber, resolveStoredDioramaTuning, resolveStoredLatentBackgroundTuning, resolveStoredMonetBackgroundTuning, resolveStoredMonetTuning, resolveStoredNomandBackgroundTuning, resolveStoredSoraBackgroundTuning, sanitizeTemperaLayerImages } from './visualizerSettingsPersistence';
+-import { getStoredBoolean, setStoredBoolean } from './storagePrimitives';
++import { getStoredBoolean, setStoredBoolean, setStoredString } from './storagePrimitives';
+ import { isAndroidShell } from '../utils/platform';
+ import { useVisualizerAssetStore } from './useVisualizerAssetStore';
+ import { normalizeLumiereTuning } from '../utils/lumiereTuning';
++import { RANDOM_VISUALIZER_MODES_STORAGE_KEY, readStoredRandomVisualizerModes } from './visualizerSettingsPersistence';
++import { normalizeRandomVisualizerModes, type RandomVisualizerMode } from '../utils/randomVisualizerModes';
++
++/**
++ * 切样式时可以带的两件事：
++ * - `notify`：是否弹「已切换」提示（随机抽签时不弹）。
++ * - `preserveRandom`：保住「每首歌随机」开关（随机抽签自己切样式时必须带，否则一次抽签就把随机关掉了）。
++ */
++export type SetVisualizerModeOptions = { notify?: boolean; preserveRandom?: boolean };
+ 
+ export type VisualizerSettingsState = {
+     disableVisualizerVignette: boolean;
+@@ -34,6 +43,8 @@ export type VisualizerSettingsState = {
+     visualizerFrameRate: VisualizerFrameRate;
+     visualizerMode: VisualizerMode;
+     randomVisualizerModePerSong: boolean;
++    /** 「每首歌随机」的抽签池：只有这里面的样式会被抽到。 */
++    randomVisualizerModes: RandomVisualizerMode[];
+     /** Snap animated glow blur radii to a bounded set. See components/visualizer/wordGlow.ts. */
+     glowBlurQuantize: boolean;
+     classicTuning: ClassicTuning;
+@@ -65,8 +76,9 @@ export type VisualizerSettingsState = {
+     handleSetUrlBackgroundSelectedId: (id: string | null) => void;
+     handleSetUrlBackgroundList: (items: UrlBackgroundItem[]) => void;
+     handleSetVisualizerFrameRate: (frameRate: VisualizerFrameRate) => void;
+-    handleSetVisualizerMode: (mode: VisualizerMode, options?: { notify?: boolean }) => void;
+-    handleToggleRandomVisualizerModePerSong: (enable: boolean) => void;
++    handleSetVisualizerMode: (mode: VisualizerMode, options?: SetVisualizerModeOptions) => void;
++    handleToggleRandomVisualizerModePerSong: (enable: boolean, options?: { notify?: boolean }) => void;
++    handleSetRandomVisualizerModes: (modes: readonly VisualizerMode[]) => void;
+     handleToggleGlowBlurQuantize: (enable: boolean) => void;
+     handleSetClassicTuning: (patch: Partial<ClassicTuning>) => void;
+     handleResetClassicTuning: () => void;
+@@ -126,6 +138,7 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set,
+     visualizerFrameRate: readStoredVisualizerFrameRate(),
+     visualizerMode: readStoredVisualizerMode(),
+     randomVisualizerModePerSong: getStoredBoolean('random_visualizer_mode_per_song', false),
++    randomVisualizerModes: readStoredRandomVisualizerModes(),
+     glowBlurQuantize: readStoredGlowBlurQuantize(),
+     classicTuning: readStoredClassicTuning(),
+     cadenzaTuning: readStoredCadenzaTuning(),
+@@ -258,7 +271,13 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set,
+         if (typeof window !== 'undefined') {
+             localStorage.setItem('visualizer_mode', mode);
+         }
+-        set({ visualizerMode: mode });
++        // 手动挑了一种样式，就等于放弃了「每首歌随机」——除非这次切换本身就是随机抽签发起的。
++        if (!options?.preserveRandom && get().randomVisualizerModePerSong) {
++            setStoredBoolean('random_visualizer_mode_per_song', false);
++            set({ visualizerMode: mode, randomVisualizerModePerSong: false });
++        } else {
++            set({ visualizerMode: mode });
++        }
+         if (options?.notify !== false) {
+             setStatusMessage({
+                 type: 'info',
+@@ -268,13 +287,21 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set,
+             });
+         }
+     },
+-    handleToggleRandomVisualizerModePerSong: (enable) => {
++    handleToggleRandomVisualizerModePerSong: (enable, options) => {
+         setStoredBoolean('random_visualizer_mode_per_song', enable);
+         set({ randomVisualizerModePerSong: enable });
+-        setStatusMessage({
+-            type: 'info',
+-            text: i18n.t(`status.randomVisualizerModePerSong${enable ? 'On' : 'Off'}`),
+-        });
++        if (options?.notify !== false) {
++            setStatusMessage({
++                type: 'info',
++                text: i18n.t(`status.randomVisualizerModePerSong${enable ? 'On' : 'Off'}`),
++            });
++        }
++    },
++    handleSetRandomVisualizerModes: (modes) => {
++        // 一律过一遍归一化：去重、剔掉模组样式、按内置顺序排，池空了退回全部内置样式。
++        const next = normalizeRandomVisualizerModes(modes);
++        setStoredString(RANDOM_VISUALIZER_MODES_STORAGE_KEY, JSON.stringify(next));
++        set({ randomVisualizerModes: next });
+     },
+     handleToggleGlowBlurQuantize: (enable) => {
+         if (typeof window !== 'undefined') {
+@@ -898,6 +925,7 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
+     handleToggleDisableVisualizerGeometricBackground: state.handleToggleDisableVisualizerGeometricBackground,
+     handleToggleDisableVisualizerVignette: state.handleToggleDisableVisualizerVignette,
+     handleToggleRandomVisualizerModePerSong: state.handleToggleRandomVisualizerModePerSong,
++    handleSetRandomVisualizerModes: state.handleSetRandomVisualizerModes,
+     handleUpdateUrlBackgroundItem: state.handleUpdateUrlBackgroundItem,
+     handleUploadMonetBackgroundImage: state.handleUploadMonetBackgroundImage,
+     handleUploadMonetPortraitImage: state.handleUploadMonetPortraitImage,
+@@ -909,6 +937,7 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
+     partitaTuning: state.partitaTuning,
+     pendoloTuning: state.pendoloTuning,
+     randomVisualizerModePerSong: state.randomVisualizerModePerSong,
++    randomVisualizerModes: state.randomVisualizerModes,
+     sonnetTuning: state.sonnetTuning,
+     soraBackgroundTuning: state.soraBackgroundTuning,
+     temperaTuning: state.temperaTuning,
+@@ -922,6 +951,6 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
+ });
+ 
+ // Module-level handle for the assembly layer; an action needs no subscription.
+-export const handleSetVisualizerMode = (mode: VisualizerMode, options?: { notify?: boolean }) => (
++export const handleSetVisualizerMode = (mode: VisualizerMode, options?: SetVisualizerModeOptions) => (
+     useVisualizerSettingsStore.getState().handleSetVisualizerMode(mode, options)
+ );
+diff --git a/src/stores/visualizerSettingsPersistence.ts b/src/stores/visualizerSettingsPersistence.ts
+index 89b49f2..2f0431e 100644
+--- a/src/stores/visualizerSettingsPersistence.ts
++++ b/src/stores/visualizerSettingsPersistence.ts
+@@ -14,9 +14,26 @@ import { parseVisualizerFrameRate, VISUALIZER_FRAME_RATE_STORAGE_KEY } from '../
+ import { isAndroidShell } from '../utils/platform';
+ import { sanitizeUrlBackgroundList } from '../utils/urlBackground';
+ import { normalizeLumiereTuning } from '../utils/lumiereTuning';
++import { normalizeRandomVisualizerModes } from '../utils/randomVisualizerModes';
+ 
+ export const VISUALIZER_OPACITY_STORAGE_KEY = 'visualizer_opacity';
+ 
++// 「每首歌随机歌词动画」的抽签池。存成一个样式 id 的 JSON 数组；
++// 读的时候一律过 normalizeRandomVisualizerModes：存档坏了、格式变了、池子空了都退回全部内置样式。
++export const RANDOM_VISUALIZER_MODES_STORAGE_KEY = 'random_visualizer_modes';
++
++export const readStoredRandomVisualizerModes = () => {
++    if (typeof window === 'undefined') {
++        return normalizeRandomVisualizerModes(null);
++    }
++    try {
++        const raw = localStorage.getItem(RANDOM_VISUALIZER_MODES_STORAGE_KEY);
++        return normalizeRandomVisualizerModes(raw === null ? null : JSON.parse(raw));
++    } catch {
++        return normalizeRandomVisualizerModes(null);
++    }
++};
++
+ // src/stores/visualizerSettingsPersistence.ts
+ // localStorage read/clamp/resolve helpers for every visualizer and background setting.
+ //
+diff --git a/src/utils/randomVisualizerModes.ts b/src/utils/randomVisualizerModes.ts
+new file mode 100644
+index 0000000..fad6c73
+--- /dev/null
++++ b/src/utils/randomVisualizerModes.ts
+@@ -0,0 +1,28 @@
++// src/utils/randomVisualizerModes.ts
++//
++// 「每首歌随机歌词动画」的抽签池。上游 v0.7.22 的实现，逐行照搬：
++// 池子里只收内置样式（模组样式不进池：它们可以随时被禁用，抽到就没了），
++// 归一化时按内置清单的顺序过滤、去重，池空了就退回「全部内置样式」。
++import type { VisualizerMode } from '../types';
++import { BUILTIN_VISUALIZER_MODES } from '../types/visualizerModes';
++
++/** 能进随机池的样式：只可能是内置的那几种。 */
++export type RandomVisualizerMode = typeof BUILTIN_VISUALIZER_MODES[number];
++
++export const normalizeRandomVisualizerModes = (value: unknown): RandomVisualizerMode[] => {
++    const selected = new Set(Array.isArray(value) ? value : []);
++    const modes = BUILTIN_VISUALIZER_MODES.filter(mode => selected.has(mode));
++    return modes.length > 0 ? modes : [...BUILTIN_VISUALIZER_MODES];
++};
++
++/** 在选中的池子里抽一个，尽量避开当前样式（池里只剩它一个时只能重抽自己）。 */
++export const pickRandomVisualizerMode = (
++    modes: readonly VisualizerMode[],
++    current: VisualizerMode,
++    random: () => number = Math.random,
++): RandomVisualizerMode => {
++    const selected = normalizeRandomVisualizerModes(modes);
++    const alternatives = selected.filter(mode => mode !== current);
++    const candidates = alternatives.length > 0 ? alternatives : selected;
++    return candidates[Math.floor(random() * candidates.length)];
++};

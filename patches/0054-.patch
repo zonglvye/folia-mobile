@@ -1,0 +1,58 @@
+From 8170d9d2d2ee95f79bd38b9e3513085b8f536595 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 22:26:09 +0800
+Subject: [PATCH 54/90] =?UTF-8?q?=E6=AD=8C=E6=89=8B=E9=A1=B5/=E9=9B=86?=
+ =?UTF-8?q?=E5=90=88=E9=A1=B5=E5=9C=A8=E7=9F=AE=E8=A7=86=E5=8F=A3=E4=B8=8A?=
+ =?UTF-8?q?=E6=BB=9A=E4=B8=8D=E5=8A=A8=EF=BC=8C=E5=BA=95=E9=83=A8=E5=8A=A8?=
+ =?UTF-8?q?=E4=BD=9C=E8=A1=8C=E6=95=B4=E5=9D=97=E7=82=B9=E5=9C=A8=E5=B1=8F?=
+ =?UTF-8?q?=E5=B9=95=E5=A4=96?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机实测（823×374）：缝里的内容排到 508，可视高度只有 374，动作行底边落在 416 ——
+「列表」「更多」两个按钮整块在屏幕下方之外，而且**从按钮往上一路没有任何可滚动的祖先**
+（缝本体是 overflow: hidden），页面上也没有滚动条或手势能把它露出来。用户看到的就是「显示不全」。
+
+- @media (max-height: 480px) 这一档让 .bravais-seam-body 自己纵向滚动
+  （overflow-y: auto + touch-action: pan-y + overscroll-behavior: contain，滚动条宽度收掉）。
+  内容再长也够得着，横向手势仍留给缝内的翻页/切换。
+- 验证：滚动后「列表」从 y=380 移到 248，点开是完整的列表面板；面板内部本来就有
+  .custom-scrollbar（1590/152），系统级 swipe 实测能滚（scrollTop 129）。
+
+另外发现一个更麻烦的问题：重新打包后页面仍在用**上一版懒加载 chunk 的 CSS**（缓存里的旧
+chunk 按旧 URL 要 CSS，而那个 URL 早就不在 rawfile 里了，还是被缓存喂回来）。壳侧改为
+Cache-Control: no-store，并加了资源缓存代次（见 shell/AssetCache），否则以后每次改样式
+都可能「装了包、真机没变」。
+---
+ src/library/suites/bravais/bravais.css | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/src/library/suites/bravais/bravais.css b/src/library/suites/bravais/bravais.css
+index 8d935e0..a15905e 100644
+--- a/src/library/suites/bravais/bravais.css
++++ b/src/library/suites/bravais/bravais.css
+@@ -415,6 +415,23 @@
+         white-space: nowrap;
+         writing-mode: horizontal-tb;
+     }
++
++    /* 内容比屏幕高的缝（歌手页最典型：简介 + 热门歌曲 + 两行动作）在矮视口上会掉到屏幕外。
++     * 实测 823×374：动作行底边 416（屏幕外 42px），「列表」「更多」两个按钮整块点不到，
++     * 而从按钮往上一路**没有任何可滚动的祖先** —— 缝本体是 overflow: hidden，谁也滚不动，
++     * 页面上又没有滚动条或手势能把它露出来，看起来就是「歌手页显示不全」。
++     * 这一档让缝体自己纵向滚动：内容再长也够得着，横向手势仍留给缝内的翻页/切换。 */
++    .bravais-seam .bravais-seam-body {
++        overflow-y: auto;
++        overscroll-behavior: contain;
++        touch-action: pan-y;
++        scrollbar-width: none;
++    }
++
++    .bravais-seam .bravais-seam-body::-webkit-scrollbar {
++        width: 0;
++        height: 0;
++    }
+ }
+ 
+ .bravais-seam-rule { flex: none; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); }

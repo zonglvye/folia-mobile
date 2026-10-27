@@ -1,0 +1,39 @@
+From fb27118bb6afe2bae1c9929675abdfe39c9e5150 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 20:48:54 +0800
+Subject: [PATCH 47/90] =?UTF-8?q?=E9=A6=96=E9=A1=B5=E7=94=B5=E5=8F=B0?=
+ =?UTF-8?q?=E9=A1=B5=E7=AD=BE=E9=87=8C=E5=B9=B6=E5=85=A5=E3=80=8C=E6=88=91?=
+ =?UTF-8?q?=E7=9A=84=E6=AD=8C=E5=8D=95=E3=80=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+私人FM / 每日推荐 / 推荐歌单 / 我的歌单 现在同一张网格里，不用切页签才能看到自己的歌单。
+账户歌单页签保留原样（内容不变）。
+
+实测：登录后 user/playlist 33 KB 渲染成卡片（歌单·355 首、创建者 lumen607）。
+---
+ src/library/core/bindings/useLibraryHomeOnline.ts | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/library/core/bindings/useLibraryHomeOnline.ts b/src/library/core/bindings/useLibraryHomeOnline.ts
+index ca21920..845a556 100644
+--- a/src/library/core/bindings/useLibraryHomeOnline.ts
++++ b/src/library/core/bindings/useLibraryHomeOnline.ts
+@@ -47,7 +47,15 @@ export const useLibraryHomeOnline = (
+         [personalFmModeLabel, radioFeed.data, t],
+     );
+ 
+-    const items = tab === 'playlist' ? playlistCards : tab === 'albums' ? albumCards : tab === 'radio' ? radioCards : NO_CARDS;
++    // 电台页签里连自己的歌单一起列出来：首页一张网格就能看到「私人FM / 每日推荐 / 推荐歌单 / 我的歌单」，
++    // 不必为了打开自己的歌单先切页签（账户歌单页签仍然保留，内容不变）。
++    const items = tab === 'playlist'
++        ? playlistCards
++        : tab === 'albums'
++            ? albumCards
++            : tab === 'radio'
++                ? [...radioCards, ...playlistCards]
++                : NO_CARDS;
+     const onlineTab = isOnlineHomeTab(tab) ? tab : 'radio';
+     const unavailable = resolveOnlineTabUnavailableReason(online, onlineTab);
+     return {

@@ -50,6 +50,11 @@ export interface ProviderCapabilities {
     userAlbums?: boolean;
     /** The provider accepts a listening report for a track the user actually played. */
     playbackReports?: boolean;
+    /**
+     * 未登录也能用：检索、音源、歌词都走公开接口，账号只多出歌单与红心。
+     * 声明为真的平台在切换器里可以直接切过去（不拦在登录框前），登录仍能从在线页签的入口发起。
+     */
+    guestAccess?: boolean;
 }
 
 /**
@@ -77,6 +82,10 @@ export interface ProviderAccountSummary {
     availability: ProviderAvailability;
     /** False for a provider with no account at all (a Folium mod source): it is used without signing in. Absent means true. */
     requiresAccount?: boolean;
+    /**
+     * 有账号，但没登录也能用（见 ProviderCapabilities.guestAccess）。选中它直接切过去，账号相关的页签等登录后再说。
+     */
+    guestAccess?: boolean;
     status: 'unknown' | 'authenticated' | 'anonymous' | 'error';
     user: ProviderUser | null;
     collections: ProviderCollection[];
@@ -326,6 +335,11 @@ export interface OnlineSearchProvider {
 }
 
 export interface OnlinePlaybackProvider {
+    /**
+     * 这个 provider 实际能给的音质档位（从低到高）。没有这一项表示不声明、按用户偏好直接请求；
+     * 汽水那边游客只有 standard，声明出来 UI 才不会给出「无损」这种拿不到的选项。
+     */
+    audioQualityLevels?: readonly AudioQualityPreference[];
     getSongDetail(id: MediaId): Promise<UnifiedSong | null>;
     getAudioSource(song: SongResult, quality: AudioQualityPreference): Promise<ProviderAudioSource | null>;
     getAvailability?(song: SongResult): ProviderSongAvailability;

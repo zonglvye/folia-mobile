@@ -271,6 +271,11 @@ export type BravaisAccountRow = {
      * 文案换成「正在登出」。
      */
     logout: { label: string; disabled: boolean } | null;
+    /**
+     * 游客可用的当前平台还没登录时的登录入口（汽水）：这种平台选它不会再拦登录，所以得单独给一个按钮。
+     * 其余行没有（未登录的普通平台，选它本身就是登录）。
+     */
+    login: { label: string } | null;
 };
 
 /** 切换器里的一行能不能现在登出：有登出入口，且没有登出在途（logout.status 不是 pending）。 */
@@ -279,7 +284,9 @@ export const canRunLogout = (row: Pick<BravaisAccountRow, 'logout'>): boolean =>
 const describeProviderStatus = (provider: ProviderAccountSummary, t: TFunction): string => {
     if (!provider.availability.configured) return t('libraryBravaisAccount.notConfigured');
     if (provider.requiresAccount === false) return t('home.providerNoAccount');
-    return provider.user?.nickname || t('libraryBravaisAccount.notSignedIn');
+    if (provider.user?.nickname) return provider.user.nickname;
+    // 游客可用的平台（汽水）不写「未登录」：它现在就能用，只是没有账号数据。
+    return provider.guestAccess === true ? t('libraryBravaisAccount.guestAccess') : t('libraryBravaisAccount.notSignedIn');
 };
 
 /**
@@ -311,7 +318,8 @@ export const projectAccountSwitcherRows = ({
                 label: provider.shortName || provider.displayName,
                 displayName: provider.displayName || provider.shortName,
                 detail,
-                note: !configured || provider.requiresAccount === false || nickname ? detail : '',
+                // 有可说的小字就显示：未配置、无需登录、游客可用，或者当前账号的昵称。
+                note: !configured || provider.requiresAccount === false || provider.guestAccess === true || nickname ? detail : '',
                 avatarUrl: nickname ? provider.user?.avatarUrl || null : null,
                 nickname,
                 current,
@@ -323,6 +331,10 @@ export const projectAccountSwitcherRows = ({
                         label: loggingOut ? t('libraryBravaisAccount.loggingOut') : t('account.logout'),
                         disabled: logoutPending,
                     }
+                    : null,
+                // 当前平台能当游客用、又还没登录：给它一个「登录到 X」的入口，否则点了行也不会有反应。
+                login: current && configured && !nickname && provider.requiresAccount !== false && provider.guestAccess === true
+                    ? { label: t('home.loginToProvider', { provider: provider.shortName || provider.displayName }) }
                     : null,
             };
         });

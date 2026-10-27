@@ -213,6 +213,7 @@ const OnlineProviderSwitcher: React.FC<OnlineProviderSwitcherProps> = ({
                             const active = provider.providerId === activeProviderId;
                             const configured = provider.availability.configured;
                             const accountless = provider.requiresAccount === false;
+                            const guestAccess = !accountless && provider.guestAccess === true;
                             return (
                                 <div
                                     key={provider.providerId}
@@ -243,7 +244,8 @@ const OnlineProviderSwitcher: React.FC<OnlineProviderSwitcherProps> = ({
                                                     ? t('home.providerNotConfigured')
                                                     : accountless
                                                         ? t('home.providerNoAccount')
-                                                        : provider.user?.nickname || t('home.providerNotLoggedIn')}
+                                                        : provider.user?.nickname
+                                                            || (guestAccess ? t('home.providerGuestAccess') : t('home.providerNotLoggedIn'))}
                                             </span>
                                         </span>
                                         {!active && !canSwitchToProviderDirectly(provider) ? <LogIn size={16} className="opacity-55" /> : null}

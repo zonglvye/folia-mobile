@@ -53,10 +53,29 @@ const hasShellMediaCache = (): boolean => {
     return typeof bridge?.mediaPrepare === 'function' && typeof bridge?.mediaStatus === 'function';
 };
 
+/**
+ * 这些主机的音频对 `<audio>` 是**可以直接播**的：字节系 CDN（汽水音乐的音源、封面）。
+ * 判据来自真机实测：ArkWeb 的媒体栈能自己发 Range 请求、自己解 AAC/MP4，
+ * 所以不需要壳把这几个 MB 取进内存再分块交回来。
+ */
+const DIRECT_PLAYABLE_HOSTS = /(?:^|\.)(?:365yg\.com|douyinvod\.com|douyinscdn\.com|bytefcdn\.com|bytecdn\.cn|byteicdn\.com|ibytedtos\.com|pstatp\.com|snssdk\.com|bytedance\.com|bytetos\.com|volcvideo\.com|volccdn\.com|volces\.com|volcengineapi\.com|douyin\.com|qishui\.com|zijieapi\.com|zjcdn\.com)$/;
+
+const isDirectPlayableCdn = (url: string): boolean => {
+    try {
+        return DIRECT_PLAYABLE_HOSTS.test(new URL(url).hostname);
+    } catch {
+        return false;
+    }
+};
+
 /** 这个地址要不要经过壳：远程 http(s) 才需要，blob:/data: 本来就没有跨域问题。 */
 export const needsShellAudioRelay = (url: string | null | undefined): boolean => {
     if (!url) return false;
     if (!/^https?:/i.test(url)) return false;
+    // 汽水（qishui）的音源走字节的 CDN：真机实测 <audio> 能直接播（Range 也支持），
+    // 而它一首只有 1–2 MB 的 AAC，中继一遍（取进壳内存再分块交回页面）纯属多绕一圈。
+    // 直连还能让播放器自己按需取，省掉我们那套 MSE 分块的复杂度。
+    if (isDirectPlayableCdn(url)) return false;
     // 判据是「壳能不能中转」，不是「壳是不是鸿蒙」：锁屏那套（isShellNowPlayingSupported）只有
     // 鸿蒙壳开通了，但两个壳的媒体缓存是一样的，而签名音频地址对谁都不发 CORS 头。
     // 桌面与 PWA 形态没有 foliaAndroid，于是照旧把远程地址直接交给 <audio>。
@@ -128,6 +147,7 @@ const looksLikeMp3 = (buffer: ArrayBuffer): boolean => {
 const streamViaMse = async (
     url: string,
     bridge: ShellMediaBridge,
+    knownDurationSec?: number,
 ): Promise<{ audioSrc: string; blobUrl?: string } | null> => {
     if (typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported(MSE_TYPE)) return null;
     const progress = bridge.mediaProgress;
@@ -179,41 +199,142 @@ const streamViaMse = async (
             }
             const sourceBuffer = mediaSource.addSourceBuffer(MSE_TYPE);
             sourceBuffer.mode = 'sequence';
+            // 流的真实长度要等 endOfStream 之后浏览器才算得出来，而按「领先 30 秒」的节流方式
+            // 那要等到整首播完——中间这段时间 duration 会是 Infinity：进度条没有总长、锁屏页拿不到
+            // positionState。曲目本身知道长度，直接告诉 MediaSource，元素随即报出有限值。
+            if (typeof knownDurationSec === 'number' && Number.isFinite(knownDurationSec) && knownDurationSec > 0) {
+                try {
+                    mediaSource.duration = knownDurationSec;
+                } catch {
+                    // 早期设置失败不影响后续追加，退回到「浏览器自己算」。
+                }
+            }
 
             const append = (chunk: ArrayBuffer) => new Promise<void>((resolve, reject) => {
-                const onEnd = () => {
+                const cleanup = () => {
                     sourceBuffer.removeEventListener('updateend', onEnd);
                     sourceBuffer.removeEventListener('error', onError);
+                };
+                const onEnd = () => {
+                    cleanup();
                     resolve();
                 };
                 const onError = () => {
-                    sourceBuffer.removeEventListener('updateend', onEnd);
-                    sourceBuffer.removeEventListener('error', onError);
+                    cleanup();
                     reject(new Error('sourcebuffer error'));
                 };
                 sourceBuffer.addEventListener('updateend', onEnd);
                 sourceBuffer.addEventListener('error', onError);
-                sourceBuffer.appendBuffer(chunk);
+                try {
+                    sourceBuffer.appendBuffer(chunk);
+                } catch (error) {
+                    // appendBuffer 在额度用尽时**同步**抛 QuotaExceededError，上面的 error 事件不会来。
+                    cleanup();
+                    reject(error);
+                }
             });
 
-            await append(head);
+            // 丢掉最前面一段已缓冲的数据，换成额度继续往里塞。
+            const evictOldest = (ratio: number) => new Promise<void>((resolve, reject) => {
+                const buffered = sourceBuffer.buffered;
+                if (!buffered.length) { resolve(); return; }
+                const start = buffered.start(0);
+                const end = buffered.end(buffered.length - 1);
+                const cut = start + (end - start) * ratio;
+                if (!(cut > start)) { resolve(); return; }
+                const cleanup = () => {
+                    sourceBuffer.removeEventListener('updateend', onEnd);
+                    sourceBuffer.removeEventListener('error', onError);
+                };
+                const onEnd = () => {
+                    cleanup();
+                    resolve();
+                };
+                const onError = () => {
+                    cleanup();
+                    reject(new Error('sourcebuffer remove error'));
+                };
+                sourceBuffer.addEventListener('updateend', onEnd);
+                sourceBuffer.addEventListener('error', onError);
+                sourceBuffer.remove(start, cut);
+            });
+
+            // 真机上这道额度是真的会撞上：整首 10 MB 全部追加完之前就会抛 QuotaExceededError，
+            // 一旦抛出去后面的数据再也不会进缓冲（表现为时长 Infinity、进度条不动、播到缓冲末尾就断）。
+            // 两手：正常情况按「播放头前面只留 AHEAD_SECONDS 秒」放行，压根不把额度填满；
+            // 万一还是撞上了，丢掉最旧的一半再试。
+            const AHEAD_SECONDS = 30;
+            let element: HTMLAudioElement | null = null;
+            const findElement = () => (
+                typeof document === 'undefined'
+                    ? null
+                    : [...document.querySelectorAll('audio')].find(a => a.src === objectUrl || a.currentSrc === objectUrl) ?? null
+            );
+            const bufferedEnd = () => (
+                sourceBuffer.buffered.length ? sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1) : 0
+            );
+            const waitForRoom = async () => {
+                if (!element) element = findElement();
+                if (!element) return;
+                // 暂停时也按同一把尺子：停在 0 秒就只填 30 秒，按下播放再继续，不会先把整首塞满。
+                for (let waited = 0; waited < 60000; waited += 250) {
+                    if (bufferedEnd() - element.currentTime <= AHEAD_SECONDS) return;
+                    await sleep(250);
+                }
+            };
+
+            const appendPaced = async (chunk: ArrayBuffer) => {
+                await waitForRoom();
+                for (let attempt = 0; attempt < 5; attempt += 1) {
+                    try {
+                        await append(chunk);
+                        return;
+                    } catch (error) {
+                        const name = (error as { name?: string } | null)?.name;
+                        if (name !== 'QuotaExceededError' && name !== 'QuotaExceededErr') throw error;
+                        await evictOldest(0.5);
+                    }
+                }
+                throw new Error('sourcebuffer quota');
+            };
+
+            await appendPaced(head);
             let position = head.byteLength;
+            // 下载已经结束、但有一段始终取不到（边界上少几个字节、上游提前断开）时的轮数。
+            // 不能无限等：endOfStream 不调用，MediaSource 的 duration 就永远是 Infinity。
+            let stalledRounds = 0;
 
             for (;;) {
                 const state = status.call(bridge, token);
                 const received = progress.call(bridge, token);
+                const before = position;
                 while (position < received) {
                     const end = Math.min(received, position + MSE_CHUNK_BYTES);
                     const chunk = await fetchShellRange(token, position, end - 1);
                     if (!chunk) break;
-                    await append(chunk);
+                    await appendPaced(chunk);
                     position += chunk.byteLength;
                 }
-                if (state === 'ready' && position >= progress.call(bridge, token)) {
-                    if (mediaSource.readyState === 'open') mediaSource.endOfStream();
+                const finished = state === 'ready' || state === 'failed' || state === 'missing';
+                if (finished && position >= progress.call(bridge, token)) {
+                    if (mediaSource.readyState === 'open') {
+                        // 失败收尾时给 'network'：让播放器知道后面没有数据了，而不是等下去。
+                        if (state === 'ready') mediaSource.endOfStream();
+                        else mediaSource.endOfStream('network');
+                    }
                     return;
                 }
-                if (state === 'failed' || state === 'missing') return;
+                if (finished) {
+                    stalledRounds = position === before ? stalledRounds + 1 : 0;
+                    if (stalledRounds >= 5) {
+                        console.warn('[ShellAudio] stream finished with a gap, closing it', {
+                            position,
+                            received: progress.call(bridge, token),
+                        });
+                        if (mediaSource.readyState === 'open') mediaSource.endOfStream();
+                        return;
+                    }
+                }
                 await sleep(120);
             }
         } catch (error) {
@@ -362,6 +483,7 @@ export const prefetchShellAudio = (url: string | null | undefined): void => {
  */
 export const materializeShellAudioSource = async (
     url: string,
+    knownDurationSec?: number,
 ): Promise<{ audioSrc: string; blobUrl?: string }> => {
     if (!needsShellAudioRelay(url)) {
         return { audioSrc: url };
@@ -372,7 +494,7 @@ export const materializeShellAudioSource = async (
         // 先试流式：mp3 边下边放，首声只等第一块（~64 KB）。
         // flac 之类 MSE 放不了的，会在这里返回 null，落到下面的 blob 路径。
         try {
-            const streamed = await streamViaMse(url, bridge);
+            const streamed = await streamViaMse(url, bridge, knownDurationSec);
             if (streamed) {
                 return { audioSrc: streamed.audioSrc, ...(streamed.blobUrl ? { blobUrl: streamed.blobUrl } : {}) };
             }

@@ -25,6 +25,10 @@ import { isMainAppSurface, isObsBrowserSourceSurface, isRemoteControlSurface, ob
 // 副作用 import：store 在模块加载时就把 `<html data-reduce-motion>` 写好并保持同步。放在 bootstrap
 // 而不是 App 里，是因为下面按 URL 挂的根不止 App —— 远程控制窗口的进度辉光也读这个属性。
 import './stores/useMotionSettingsStore';
+// 汽水（qishui）在本机落地的那一层：装上 Buffer / node:crypto 替身，并把 provider 用的请求入口
+// 挂到 window.__foliaQishui 上（真机排查用）。放在 bootstrap 是有意的：只要页面起来，
+// 无论停在资料库还是播放页，调试口都在。
+import './services/onlineMusic/qishui/qishuiLocalApi';
 
 // src/bootstrap.tsx
 // Mounts the React app after index.tsx installs runtime-level browser shims.

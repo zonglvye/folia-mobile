@@ -1,0 +1,488 @@
+From 0b0974e3a85d4504d7be9b54cb44e18b686972d4 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 27 Oct 2026 00:40:33 +0800
+Subject: [PATCH 86/90] feat(qishui): let Qishui be picked without signing in
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+汽水在首页平台列表里已经出现，但选中它要走抖音扫码；而它的检索、音源和逐字歌词
+都走公开接口，游客本来就能用。所以给它一条「游客可用」的通道：
+
+- ProviderCapabilities.guestAccess + ProviderAccountSummary.guestAccess：平台自己
+  声明未登录可用；canSwitchToProviderDirectly 据此直接切过去，不拦在登录框前。
+- useQishuiLibrary：汽水没有自建后端，没有会话时把账号落成 anonymous（hydration
+  ready），首页不会一直停在「解析中」，在线页签按游客态显示。
+- 平台列表里这一行的小字从「未登录」换成「游客可用」（bravais 与 grid 两套都改）。
+- 账户页的音质选项只列平台真能给的档位（汽水游客只有标准）。
+
+顺带修一个横屏手机上的定位问题：平台列表原本只从入口往上长，374px 高的视口里
+第四个平台会被裁在列表外（看得见一半、点不到）。现在上方放不下就翻到入口下方，
+并在矮视口里把行压扁（58px → 46px），四个平台一屏放得下。
+
+真机验证（SCA-AL00，823x374）：平台列表选中汽水 → 切换确认 → 首页进入游客态；
+搜索「陈奕迅」出汽水结果；点「十面埋伏」直连 365yg CDN 播放，00:01 / 02:55 与
+metadata 一致，KRC 歌词逐字渲染；切回网易云歌单恢复。
+---
+ src/App.tsx                                   |  10 +-
+ src/components/panelTab/AccountTab.tsx        |   7 +-
+ src/hooks/useQishuiLibrary.ts                 | 109 ++++++++++++++++++
+ src/i18n/locales/en.ts                        |   2 +
+ src/i18n/locales/in.ts                        |   2 +
+ src/i18n/locales/zh-CN.ts                     |   2 +
+ .../core/model/onlineProviderAccountView.ts   |   7 +-
+ .../bravais/BravaisSeamAccountSwitcher.tsx    |  23 +++-
+ src/library/suites/bravais/bravaisAccount.css |  14 +++
+ .../suites/bravais/bravaisAccountModel.ts     |   7 +-
+ .../grid/account/OnlineProviderSwitcher.tsx   |   4 +-
+ src/services/onlineMusic/omni.ts              |   6 +
+ .../onlineMusic/qishui/qishuiProvider.ts      |   4 +-
+ src/types/onlineMusic.ts                      |   9 ++
+ 14 files changed, 193 insertions(+), 13 deletions(-)
+ create mode 100644 src/hooks/useQishuiLibrary.ts
+
+diff --git a/src/App.tsx b/src/App.tsx
+index be83031..78e095c 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -76,6 +76,7 @@ import { useNeteaseLibrary } from './hooks/useNeteaseLibrary';
+ import { useKugouLibrary } from './hooks/useKugouLibrary';
+ import { useQqLibrary } from './hooks/useQqLibrary';
+ import { useBodianLibrary } from './hooks/useBodianLibrary';
++import { useQishuiLibrary } from './hooks/useQishuiLibrary';
+ import { useLibraryAccountController } from './library/app/useLibraryAccountController';
+ import { createLibraryAccountSwitchCleanupPort } from './library/app/createLibraryAccountPort';
+ import { useAppWallToolsHost } from './components/app/wall-tools/useAppWallToolsHost';
+@@ -758,18 +759,23 @@ export default function App() {
+         logout: logoutQqLibrary,
+     } = useQqLibrary();
+     const { refresh: refreshBodianLibrary, logout: logoutBodianLibrary } = useBodianLibrary();
++    // 汽水：没有自建后端，没有会话就是游客态（检索/播放/歌词照常），所以它也有一个刷新器——
++    // 切换过去时把账号落成 anonymous，否则首页会一直停在「解析中」。
++    const { refresh: refreshQishuiLibrary, logout: logoutQishuiLibrary } = useQishuiLibrary();
+     const onlineProviderRefreshers = useMemo<Partial<Record<OnlineProviderId, () => Promise<unknown>>>>(() => ({
+         netease: refreshUserData,
+         kugou: refreshKugouLibrary,
+         qq: refreshQqLibrary,
+         bodian: refreshBodianLibrary,
+-    }), [refreshKugouLibrary, refreshQqLibrary, refreshBodianLibrary, refreshUserData]);
++        qishui: refreshQishuiLibrary,
++    }), [refreshBodianLibrary, refreshKugouLibrary, refreshQishuiLibrary, refreshQqLibrary, refreshUserData]);
+     const onlineProviderLogouts = useMemo<Partial<Record<OnlineProviderId, () => Promise<void>>>>(() => ({
+         netease: handleLogout,
+         kugou: logoutKugouLibrary,
+         qq: logoutQqLibrary,
+         bodian: logoutBodianLibrary,
+-    }), [handleLogout, logoutKugouLibrary, logoutQqLibrary, logoutBodianLibrary]);
++        qishui: logoutQishuiLibrary,
++    }), [handleLogout, logoutBodianLibrary, logoutKugouLibrary, logoutQishuiLibrary, logoutQqLibrary]);
+ 
+     // 在线账户 controller（Library v2 · A4）：扫码登录、选平台、切换确认与登出都在 core，App 只交出 per-provider 的
+     // 刷新与登出，以及确认切换后的播放清理端口。端口读的三样（audio / automix 句柄、歌词写入）都是稳定引用，建一次。
+diff --git a/src/components/panelTab/AccountTab.tsx b/src/components/panelTab/AccountTab.tsx
+index 0c0ea94..cbeb7bd 100644
+--- a/src/components/panelTab/AccountTab.tsx
++++ b/src/components/panelTab/AccountTab.tsx
+@@ -57,6 +57,11 @@ const AccountTab: React.FC<AccountTabProps> = ({
+     const logoutPending = useLibraryAccountSelector(accountController, selectLogoutPending);
+     const canLogout = !logoutPending
+         && canLogoutProvider(providers.find(provider => provider.providerId === activeProviderId), activeProviderId);
++    // 只列当前平台真能给的档位（汽水游客只有标准，摆出「无损」只会让人点了个假的）。
++    const qualityLevels = omni.getProviderAudioQualityLevels(activeProviderId);
++    const qualityOptions = qualityLevels
++        ? AUDIO_QUALITY_OPTIONS.filter(option => qualityLevels.includes(option.value))
++        : AUDIO_QUALITY_OPTIONS;
+ 
+     // 网易与其它平台同一条路径：controller 调宿主注入的 per-provider 登出（网易的会清登录态并提示已登出）。
+     const handleLogout = async () => {
+@@ -121,7 +126,7 @@ const AccountTab: React.FC<AccountTabProps> = ({
+                     </span>
+                 </div>
+                 <div className="grid grid-cols-2 gap-2">
+-                    {AUDIO_QUALITY_OPTIONS.map(option => (
++                    {qualityOptions.map(option => (
+                         <button
+                             key={option.value}
+                             type="button"
+diff --git a/src/hooks/useQishuiLibrary.ts b/src/hooks/useQishuiLibrary.ts
+new file mode 100644
+index 0000000..bfa2067
+--- /dev/null
++++ b/src/hooks/useQishuiLibrary.ts
+@@ -0,0 +1,109 @@
++import { useCallback, useEffect, useRef } from 'react';
++import { omni } from '../services/onlineMusic/omni';
++import { clearProviderAccountSnapshot, loadProviderAccountSnapshot, saveProviderAccountSnapshot } from '../services/onlineMusic/providerAccountCache';
++import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccountStore';
++import { OnlineProviderError } from '../types/onlineMusic';
++import type { MediaId, ProviderCollection } from '../types/onlineMusic';
++
++// src/hooks/useQishuiLibrary.ts
++//
++// 汽水的账户刷新与登出。汽水没有自建后端：登录态就是页面里那个 localStorage 会话，
++// 没登录时 `login_status` 直接给 null（不联网、不抛错），所以这里把「没有账号」落成
++// `clearAccount` —— status 变 anonymous、hydration 变 ready，首页就不会一直卡在解析中，
++// 在线页签按游客态显示（检索、播放、歌词照常，歌单等登录后再出现）。
++export const useQishuiLibrary = () => {
++    const generation = useRef(0);
++    const pendingSave = useRef<Promise<unknown>>(Promise.resolve());
++
++    const settleGuest = useCallback(async () => {
++        const store = useOnlineProviderAccountStore.getState();
++        store.clearAccount('qishui');
++        await pendingSave.current.catch(() => {});
++        await clearProviderAccountSnapshot('qishui');
++    }, []);
++
++    const refresh = useCallback(async () => {
++        const current = ++generation.current;
++        const store = useOnlineProviderAccountStore.getState();
++        try {
++            if (!omni.getProviderAvailability('qishui').configured || !omni.getProviderCapabilities('qishui').auth) {
++                await settleGuest();
++                return false;
++            }
++            store.updateAccount('qishui', { freshness: 'refreshing', error: undefined });
++            const user = await omni.getLoginStatus('qishui');
++            if (generation.current !== current) return false;
++            if (!user) {
++                await settleGuest();
++                return false;
++            }
++            // 换账号时先丢掉上一个账号的缓存，再按 id 认领本地快照（与其它 provider 一致）。
++            const visibleUser = useOnlineProviderAccountStore.getState().accounts.qishui?.user;
++            if (!visibleUser || String(visibleUser.id) !== String(user.id)) {
++                store.clearAccount('qishui');
++                const snapshot = await loadProviderAccountSnapshot('qishui').catch(() => null);
++                if (generation.current !== current) return false;
++                const matching = snapshot && String(snapshot.user.id) === String(user.id) ? snapshot : null;
++                store.updateAccount('qishui', { status: 'authenticated', user,
++                    collections: matching?.collections || [], likedSongIds: matching?.likedSongIds || [],
++                    hydration: 'ready', freshness: 'refreshing', lastUpdatedAt: matching?.savedAt, error: undefined });
++            }
++            const likesBeforeRefresh = useOnlineProviderAccountStore.getState().accounts.qishui.likedSongIds;
++            const collections: ProviderCollection[] = [];
++            const capabilities = omni.getProviderCapabilities('qishui');
++            let offset = 0;
++            if (capabilities.userLibrary) {
++                while (true) {
++                    const page = await omni.getProviderUserPlaylists('qishui', user.id, { offset, limit: 50 });
++                    if (generation.current !== current) return false;
++                    collections.push(...page.items);
++                    if (!page.hasMore || page.nextOffset <= offset) break;
++                    offset = page.nextOffset;
++                }
++            }
++            const fetchedLikedSongIds: MediaId[] = capabilities.likes ? await omni.getProviderLikedSongIds('qishui', user.id) : [];
++            if (generation.current !== current) return false;
++            const save = pendingSave.current.catch(() => {}).then(() => {
++                if (generation.current !== current) return null;
++                // Omni 每次红心变更后会换掉这个数组；刷新期间用户点过就保留新的。
++                const latestLikes = useOnlineProviderAccountStore.getState().accounts.qishui.likedSongIds;
++                const likedSongIds = latestLikes === likesBeforeRefresh ? fetchedLikedSongIds : latestLikes;
++                store.updateAccount('qishui', { status: 'authenticated', user, collections, likedSongIds,
++                    hydration: 'ready', error: undefined });
++                return saveProviderAccountSnapshot('qishui', { user, collections, likedSongIds });
++            });
++            pendingSave.current = save;
++            const saved = await save;
++            if (generation.current !== current) return false;
++            if (!saved) return false;
++            store.updateAccount('qishui', { freshness: 'fresh', lastUpdatedAt: saved.savedAt });
++            return true;
++        } catch (error) {
++            if (generation.current !== current) return false;
++            if (error instanceof OnlineProviderError && error.code === 'auth-required') {
++                await settleGuest();
++            } else {
++                store.updateAccount('qishui', { hydration: 'ready', freshness: 'error',
++                    status: useOnlineProviderAccountStore.getState().accounts.qishui?.user ? 'authenticated' : 'anonymous',
++                    error: 'qishui-refresh-failed' });
++            }
++            return false;
++        }
++    }, [settleGuest]);
++
++    const logout = useCallback(async () => {
++        generation.current++;
++        useOnlineProviderAccountStore.getState().clearAccount('qishui');
++        await pendingSave.current.catch(() => {});
++        await Promise.all([omni.logout('qishui'), clearProviderAccountSnapshot('qishui')]);
++    }, []);
++
++    useEffect(() => {
++        // 启动时先确认登录态再显示缓存：没有会话时这一步把账号落成游客态。
++        useOnlineProviderAccountStore.getState().clearAccount('qishui');
++        void refresh();
++        return () => { generation.current++; };
++    }, [refresh]);
++
++    return { refresh, logout };
++};
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index 43f175c..a5dbaa3 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -219,6 +219,7 @@ export default {
+     "cancel": "Cancel",
+     "cooldown": "· {{seconds}}s",
+     "notSignedIn": "Not signed in",
++    "guestAccess": "Guest access",
+     "notConfigured": "Not configured",
+     "loggingOut": "Signing out…"
+   },
+@@ -1339,6 +1340,7 @@ export default {
+     "providerNotLoggedIn": "Not signed in · click to scan",
+     "providerNotConfigured": "API is not configured for Web",
+     "providerNoAccount": "No sign-in needed",
++    "providerGuestAccess": "Guest access · sign in to sync",
+     "loadingQr": "Loading QR...",
+     "scanQr": "Please scan the QR code",
+     "qrExpired": "QR Code expired. Refresh to try again.",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index b279479..a55aab0 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -219,6 +219,7 @@ export default {
+     "cancel": "Batal",
+     "cooldown": "· {{seconds}} dtk",
+     "notSignedIn": "Belum masuk",
++    "guestAccess": "Akses tamu",
+     "notConfigured": "Belum dikonfigurasi",
+     "loggingOut": "Sedang keluar…"
+   },
+@@ -1334,6 +1335,7 @@ export default {
+     "providerNotLoggedIn": "Belum login · klik untuk pindai",
+     "providerNotConfigured": "API tidak dikonfigurasi untuk Web",
+     "providerNoAccount": "Tanpa login",
++    "providerGuestAccess": "Akses tamu · login untuk sinkron",
+     "loadingQr": "Memuat QR...",
+     "scanQr": "Silakan pindai kode QR",
+     "qrExpired": "Kode QR kedaluwarsa. Muat ulang untuk mencoba lagi.",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 1bb06b3..5c6c941 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -219,6 +219,7 @@ export default {
+     "cancel": "取消",
+     "cooldown": "· {{seconds}} 秒",
+     "notSignedIn": "未登录",
++    "guestAccess": "游客可用",
+     "notConfigured": "未配置",
+     "loggingOut": "正在登出…"
+   },
+@@ -1338,6 +1339,7 @@ export default {
+     "providerNotLoggedIn": "未登录·点击扫码",
+     "providerNotConfigured": "Web 端未配置 API",
+     "providerNoAccount": "无需登录",
++    "providerGuestAccess": "游客可用 · 登录后可同步",
+     "loadingQr": "加载二维码...",
+     "scanQr": "请扫描二维码",
+     "qrExpired": "二维码已过期，请刷新。",
+diff --git a/src/library/core/model/onlineProviderAccountView.ts b/src/library/core/model/onlineProviderAccountView.ts
+index 680297d..3669f24 100644
+--- a/src/library/core/model/onlineProviderAccountView.ts
++++ b/src/library/core/model/onlineProviderAccountView.ts
+@@ -27,7 +27,10 @@ export const resolveOnlineProviderAccountView = ({
+     return 'guest';
+ };
+ 
+-/** Whether picking the provider switches to it now (signed in, or nothing to sign in to) rather than starting a login. */
++/**
++ * Whether picking the provider switches to it now (signed in, nothing to sign in to, or usable as a guest)
++ * rather than starting a login. 游客可用（`guestAccess`）的平台先切过去，需要账号的页签自己显示登录入口。
++ */
+ export const canSwitchToProviderDirectly = (provider: ProviderAccountSummary): boolean => (
+-    provider.status === 'authenticated' || isAccountless(provider)
++    provider.status === 'authenticated' || isAccountless(provider) || provider.guestAccess === true
+ );
+diff --git a/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx b/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx
+index 6f14835..755427a 100644
+--- a/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx
++++ b/src/library/suites/bravais/BravaisSeamAccountSwitcher.tsx
+@@ -48,6 +48,13 @@ type BravaisAccountListPlacement = {
+     bottom: number;
+     width: number;
+     maxHeight: number;
++    /**
++     * 往哪边长：入口上方空间够就往上长（底边对齐入口，桌面就是这样）；上方放不下整张列表时改成从入口往下长。
++     * 横屏手机只有 374px 高，入口又偏上，只往上长的话第四个平台会被裁在列表外面。
++     */
++    anchor: 'bottom' | 'top';
++    /** anchor 为 'top' 时用：列表顶边到 stage 顶端的距离。 */
++    top: number;
+ };
+ 
+ /** 按入口、缝与 stage 根节点的位置算列表放在哪：朝空间大的一侧，底边与入口底边对齐。 */
+@@ -62,13 +69,19 @@ const placeAccountList = (entry: HTMLElement, seam: HTMLElement, host: HTMLEleme
+     const left = side === 'right'
+         ? seamRect.right - hostRect.left + LIST_SIDE_GAP
+         : seamRect.left - hostRect.left - LIST_SIDE_GAP - width;
++    const spaceAbove = entryRect.bottom - hostRect.top - LIST_TOP_GAP;
++    const spaceBelow = hostRect.bottom - entryRect.top - LIST_TOP_GAP;
++    // 上方放得下就照旧往上长；放不下但下方更宽裕就翻到下面（横屏手机）。
++    const anchor: BravaisAccountListPlacement['anchor'] = spaceBelow > spaceAbove ? 'top' : 'bottom';
+     return {
+         host,
+         side,
++        anchor,
++        top: Math.round(entryRect.top - hostRect.top),
+         left: Math.round(left),
+         bottom: Math.round(hostRect.bottom - entryRect.bottom),
+         width: Math.round(width),
+-        maxHeight: Math.max(0, Math.floor(entryRect.bottom - hostRect.top - LIST_TOP_GAP)),
++        maxHeight: Math.max(0, Math.floor(anchor === 'top' ? spaceBelow : spaceAbove)),
+     };
+ };
+ 
+@@ -102,10 +115,12 @@ const BravaisAccountList: React.FC<{
+             exit={pop.exit}
+             transition={pop.transition}
+             style={{
+-                // 从入口那一侧的底角长出来。
+-                transformOrigin: placement.side === 'right' ? '0% 100%' : '100% 100%',
++                // 从入口那一侧的角长出来（往上长取底角，往下长取顶角）。
++                transformOrigin: `${placement.side === 'right' ? '0%' : '100%'} ${placement.anchor === 'bottom' ? '100%' : '0%'}`,
+                 left: placement.left,
+-                bottom: placement.bottom,
++                ...(placement.anchor === 'bottom'
++                    ? { bottom: placement.bottom }
++                    : { top: placement.top }),
+                 width: placement.width,
+                 maxHeight: placement.maxHeight,
+             }}
+diff --git a/src/library/suites/bravais/bravaisAccount.css b/src/library/suites/bravais/bravaisAccount.css
+index 8744cfd..969cf39 100644
+--- a/src/library/suites/bravais/bravaisAccount.css
++++ b/src/library/suites/bravais/bravaisAccount.css
+@@ -394,3 +394,17 @@
+ 
+ /* 书脊上只留一个图标按钮：点它展开窄缝（fb3：并打开平台列表）。 */
+ .bravais-account-switcher.is-compact { align-items: center; }
++
++/*
++ * 横屏手机（视口只有 ~374px 高）：一行 58px 让四个平台塞不下，列表要么被裁在中间一行，要么得滚。
++ * 这里把行压扁一点（头像 34、内边距 6），四行约 200px，配合组件里翻到入口下方的那一版定位就能整张露出来。
++ */
++@media (max-height: 430px) {
++    .bravais-account-list { padding: 6px; }
++    .bravais-account-list .bravais-account-row > button[role='menuitemradio'] { gap: 10px; padding: 5px 8px; }
++    .bravais-account-row .bravais-account-avatar { width: 34px; height: 34px; }
++    .bravais-account-row .bravais-account-avatar.is-badge { font-size: 13px; }
++    .bravais-account-row .is-name { font-size: 13px; }
++    .bravais-account-row .is-note { font-size: 9px; }
++    .bravais-account-list .bravais-account-logout { width: 30px; height: 30px; }
++}
+diff --git a/src/library/suites/bravais/bravaisAccountModel.ts b/src/library/suites/bravais/bravaisAccountModel.ts
+index 1bebb91..fb1fade 100644
+--- a/src/library/suites/bravais/bravaisAccountModel.ts
++++ b/src/library/suites/bravais/bravaisAccountModel.ts
+@@ -279,7 +279,9 @@ export const canRunLogout = (row: Pick<BravaisAccountRow, 'logout'>): boolean =>
+ const describeProviderStatus = (provider: ProviderAccountSummary, t: TFunction): string => {
+     if (!provider.availability.configured) return t('libraryBravaisAccount.notConfigured');
+     if (provider.requiresAccount === false) return t('home.providerNoAccount');
+-    return provider.user?.nickname || t('libraryBravaisAccount.notSignedIn');
++    if (provider.user?.nickname) return provider.user.nickname;
++    // 游客可用的平台（汽水）不写「未登录」：它现在就能用，只是没有账号数据。
++    return provider.guestAccess === true ? t('libraryBravaisAccount.guestAccess') : t('libraryBravaisAccount.notSignedIn');
+ };
+ 
+ /**
+@@ -311,7 +313,8 @@ export const projectAccountSwitcherRows = ({
+                 label: provider.shortName || provider.displayName,
+                 displayName: provider.displayName || provider.shortName,
+                 detail,
+-                note: !configured || provider.requiresAccount === false || nickname ? detail : '',
++                // 有可说的小字就显示：未配置、无需登录、游客可用，或者当前账号的昵称。
++                note: !configured || provider.requiresAccount === false || provider.guestAccess === true || nickname ? detail : '',
+                 avatarUrl: nickname ? provider.user?.avatarUrl || null : null,
+                 nickname,
+                 current,
+diff --git a/src/library/suites/grid/account/OnlineProviderSwitcher.tsx b/src/library/suites/grid/account/OnlineProviderSwitcher.tsx
+index 883de07..3a2488d 100644
+--- a/src/library/suites/grid/account/OnlineProviderSwitcher.tsx
++++ b/src/library/suites/grid/account/OnlineProviderSwitcher.tsx
+@@ -213,6 +213,7 @@ const OnlineProviderSwitcher: React.FC<OnlineProviderSwitcherProps> = ({
+                             const active = provider.providerId === activeProviderId;
+                             const configured = provider.availability.configured;
+                             const accountless = provider.requiresAccount === false;
++                            const guestAccess = !accountless && provider.guestAccess === true;
+                             return (
+                                 <div
+                                     key={provider.providerId}
+@@ -243,7 +244,8 @@ const OnlineProviderSwitcher: React.FC<OnlineProviderSwitcherProps> = ({
+                                                     ? t('home.providerNotConfigured')
+                                                     : accountless
+                                                         ? t('home.providerNoAccount')
+-                                                        : provider.user?.nickname || t('home.providerNotLoggedIn')}
++                                                        : provider.user?.nickname
++                                                            || (guestAccess ? t('home.providerGuestAccess') : t('home.providerNotLoggedIn'))}
+                                             </span>
+                                         </span>
+                                         {!active && !canSwitchToProviderDirectly(provider) ? <LogIn size={16} className="opacity-55" /> : null}
+diff --git a/src/services/onlineMusic/omni.ts b/src/services/onlineMusic/omni.ts
+index bd67010..0c1bc72 100644
+--- a/src/services/onlineMusic/omni.ts
++++ b/src/services/onlineMusic/omni.ts
+@@ -138,6 +138,7 @@ export const omni = {
+                 shortName: provider.shortName || provider.displayName,
+                 availability: provider.getAvailability?.() ?? { configured: true },
+                 requiresAccount: provider.capabilities.auth,
++                guestAccess: provider.capabilities.guestAccess === true,
+                 status: account?.status || 'unknown',
+                 user: account?.user || null,
+                 collections: account?.collections || [],
+@@ -194,6 +195,11 @@ export const omni = {
+         return requireOnlineMusicProvider(providerId).getAvailability?.() ?? { configured: true };
+     },
+ 
++    // 平台自己声明能给的音质档位；没声明就当它都能给（老 provider 都是这样，映射不了就降级）。
++    getProviderAudioQualityLevels(providerId: OmniProviderId): readonly AudioQualityPreference[] | null {
++        return getOnlineMusicProvider(providerId)?.playback?.audioQualityLevels ?? null;
++    },
++
+     getProviderLabel(providerId: OmniProviderId): string {
+         const provider = getOnlineMusicProvider(providerId);
+         return provider?.shortName || provider?.displayName || providerId;
+diff --git a/src/services/onlineMusic/qishui/qishuiProvider.ts b/src/services/onlineMusic/qishui/qishuiProvider.ts
+index f07aa46..1ee8981 100644
+--- a/src/services/onlineMusic/qishui/qishuiProvider.ts
++++ b/src/services/onlineMusic/qishui/qishuiProvider.ts
+@@ -18,7 +18,9 @@ export const qishuiProvider: OnlineMusicProvider = {
+     getAvailability: getQishuiAvailability,
+     capabilities: { search: true, playback: true, lyrics: true, wordByWordLyrics: true, auth: true,
+         userLibrary: true, playlists: true, albums: false, artists: true, recommendations: true,
+-        mutations: true, likes: true, playlistTrackMutations: true, personalFmModes: true },
++        mutations: true, likes: true, playlistTrackMutations: true, personalFmModes: true,
++        // 检索、音源与逐字歌词都走公开接口（实测游客能拿到整首歌），账号只多出歌单与红心。
++        guestAccess: true },
+     normalizeSong: normalizeQishuiSong, normalizeUser: normalizeQishuiUser, normalizeCollection: normalizeQishuiCollection,
+     songMetadata: { getSongMetadata: createProviderSongMetadata },
+     getSongPageUrl: song => `https://music.douyin.com/qishui/share/track?track_id=${encodeURIComponent(songId(song))}`,
+diff --git a/src/types/onlineMusic.ts b/src/types/onlineMusic.ts
+index 3b482f7..99f0518 100644
+--- a/src/types/onlineMusic.ts
++++ b/src/types/onlineMusic.ts
+@@ -50,6 +50,11 @@ export interface ProviderCapabilities {
+     userAlbums?: boolean;
+     /** The provider accepts a listening report for a track the user actually played. */
+     playbackReports?: boolean;
++    /**
++     * 未登录也能用：检索、音源、歌词都走公开接口，账号只多出歌单与红心。
++     * 声明为真的平台在切换器里可以直接切过去（不拦在登录框前），登录仍能从在线页签的入口发起。
++     */
++    guestAccess?: boolean;
+ }
+ 
+ /**
+@@ -77,6 +82,10 @@ export interface ProviderAccountSummary {
+     availability: ProviderAvailability;
+     /** False for a provider with no account at all (a Folium mod source): it is used without signing in. Absent means true. */
+     requiresAccount?: boolean;
++    /**
++     * 有账号，但没登录也能用（见 ProviderCapabilities.guestAccess）。选中它直接切过去，账号相关的页签等登录后再说。
++     */
++    guestAccess?: boolean;
+     status: 'unknown' | 'authenticated' | 'anonymous' | 'error';
+     user: ProviderUser | null;
+     collections: ProviderCollection[];

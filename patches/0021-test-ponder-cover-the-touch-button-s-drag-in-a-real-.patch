@@ -1,7 +1,7 @@
 From 822b962fe8d8c4f5cc976039dab2a5ae1185237d Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 22:00:02 +0800
-Subject: [PATCH 21/29] test(ponder): cover the touch button's drag in a real
+Subject: [PATCH 21/90] test(ponder): cover the touch button's drag in a real
  browser
 
 The drag itself is only testable with real pointer events: the coordinate is

@@ -1,0 +1,175 @@
+From 82c2ae3c7a8b6b592f219db92b38fd60cca6852c Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 16:10:01 +0800
+Subject: [PATCH 36/90] =?UTF-8?q?=E9=9F=B3=E6=BA=90=E4=B8=8D=E7=AD=89?=
+ =?UTF-8?q?=E5=B0=81=E9=9D=A2=E7=BC=93=E5=AD=98=EF=BC=8C=E5=85=83=E7=B4=A0?=
+ =?UTF-8?q?=E6=B2=A1=E6=9C=89=E9=9F=B3=E6=BA=90=E6=97=B6=E4=B9=9F=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=8D=E7=99=BD=E7=AD=89=20play()?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机取证（`play:timeout · running · rs 0/0`）：AudioContext 是 running，坏的是元素里一个字节都没有 ——
+而且这组读数是在超时那一刻取的，也就是按了播放 4 秒之后仍然空着，音源从头到尾没落地。
+
+- 落地的顺序原来是「setAudioSrc(null) → await getCachedSongCoverUrl(song) → setAudioSrc(音源)」。
+  封面那一跳是几次 IDB 读加一次可能的回写，任何一次不回来，声音就跟着一起扣死，而且不报错（它没失败，
+  只是没答）。现在音源紧跟着 setCurrentSong 落地，封面最多等 1.2s（settleWithin），超时/失败就用预取的
+  那张或默认图。
+- 落地守卫那里不再直接 URL.revokeObjectURL：音源已经交给 deck 了，回收等于把正在用的地址抽走；
+  交接照旧由 retireBlobUrl 负责（它在没有 deck 放这条 URL 时才回收）。
+- resumePlayback 增加空音源守卫：元素没有音源时 store 里有就补进去（React 的 src 还没 commit），
+  两边都没有就直接报 `src:missing · <PlayerState>` 并停手 —— 空元素的 play() 按规范永不决议，
+  白等 4 秒之外什么也换不来。
+- 用例：landed 的 blob 用例改成钉住新顺序（封面没回来时音源已在，且不被打地回收）；
+  两个分支用不同的 blob 地址，免得 retireBlobUrl 的模块级持有名单跨用例串味。
+---
+ src/hooks/usePlaybackQueueController.ts       | 42 ++++++++++++-------
+ src/hooks/usePlaybackTransportController.ts   | 21 ++++++++++
+ test/unit/playback/onlinePlaybackStop.test.ts | 15 +++++--
+ 3 files changed, 61 insertions(+), 17 deletions(-)
+
+diff --git a/src/hooks/usePlaybackQueueController.ts b/src/hooks/usePlaybackQueueController.ts
+index 14e94ba..e74288b 100644
+--- a/src/hooks/usePlaybackQueueController.ts
++++ b/src/hooks/usePlaybackQueueController.ts
+@@ -48,6 +48,7 @@ import { hasBeforePlayHook, notifyPlaybackFailed, runBeforePlayHook } from '../s
+ import { classifyPlaybackError, isTransientPlaybackFailure } from '../services/playbackRecovery/onlinePlaybackFailure';
+ import { PLAYBACK_RETRYING_MESSAGE_KEY, isAutoSkipFailure } from '../services/playbackRecovery/playbackFailurePolicy';
+ import { presentPlaybackFailure, type PlaybackFailurePresenterDeps } from '../components/app/playback/presentPlaybackFailure';
++import { settleWithin } from '../utils/settleWithin';
+ 
+ // src/hooks/usePlaybackQueueController.ts
+ 
+@@ -141,6 +142,11 @@ type UsePlaybackQueueControllerParams = {
+ const MAX_UNAVAILABLE_AUTO_SKIP_COUNT = 2;
+ const UNAVAILABLE_SKIP_CONFIRM_TIMEOUT_MS = 5000;
+ const UNAVAILABLE_SKIP_CONFIRM_INTERVAL_MS = 1000;
++/**
++ * 落地时等封面缓存的期限。封面是装饰：缓存读慢或读不回来时，这首歌照样要放，
++ * 退回预取的封面或默认图（真机上「有歌没声、也没提示」的一例就是这里扣住了音源）。
++ */
++const COVER_LOOKUP_DEADLINE_MS = 1200;
+ 
+ // 「无法播放时自动跳过」在失败发生那一刻读取，不订阅：presenter 与连跳计数用的是同一刻的值。
+ const readAutoSkipUnplayable = () => useAudioSettingsStore.getState().autoSkipUnplayable;
+@@ -743,20 +749,11 @@ export function usePlaybackQueueController({
+         }
+         setPlayerState(PlayerState.IDLE);
+ 
+-        const cachedCoverUrl = await getCachedSongCoverUrl(song);
+-        // 本次请求已经落地（当前歌曲、队列都已写入、audioSrc 已置空）：只有别的播放也落地了才放弃，
+-        // 并回收这个还没交给任何 deck 的 blob。更新的请求只是开始、尚未落地不算取代，仍要接上音源，
+-        // 否则那次请求失败时，当前歌会停在没有音源的半落地状态。
+-        if (currentSongRef.current !== songKey || playbackGenerationRef.current !== landedGeneration) {
+-            if (audioResult.blobUrl) URL.revokeObjectURL(audioResult.blobUrl);
+-            return;
+-        }
+-        if (cachedCoverUrl) {
+-            setCachedCoverUrl(cachedCoverUrl);
+-        } else if (prefetched?.coverUrl) {
+-            setCachedCoverUrl(prefetched.coverUrl);
+-        }
+-
++        // 音源紧跟着落地，**不等封面缓存**。真机取证（2026-10，`play:timeout · running · rs 0/0`）：
++        // 按下播放 4 秒之后元素里仍然一个字节都没有 —— 歌曲、标题、封面卡都显示着，音源却始终没写进来。
++        // 原来的顺序是「setAudioSrc(null) → await 封面缓存 → setAudioSrc(音源)」，而
++        // getCachedSongCoverUrl 是几次 IDB 读加一次可能的回写：任何一次不回来，声音就跟着一起扣死，
++        // 而且不报错（它没失败，只是没答）。封面是装饰，没有它照样能放，所以把音源提到前面。
+         if (audioResult.blobUrl) {
+             blobUrlRef.current = audioResult.blobUrl;
+             currentOnlineAudioUrlFetchedAtRef.current = null;
+@@ -770,6 +767,23 @@ export function usePlaybackQueueController({
+         }
+         setAudioSrc(audioResult.audioSrc);
+ 
++        // 封面最多等这么久：超时或失败就当这首歌没有缓存封面，退回预取的那张或默认图。
++        const cachedCoverUrl = await settleWithin(getCachedSongCoverUrl(song), COVER_LOOKUP_DEADLINE_MS);
++        // 本次请求已经落地（当前歌曲、队列、音源都已写入）：只有别的播放也落地了才放弃。
++        // 这里**不再**回收 blob —— 音源已经交给 deck 了，回收等于把正在用的那条 URL 抽走；
++        // 之后有别的歌落地时会走 retireBlobUrl 把它交接出去（见上方 retireBlobUrl 处的注释）。
++        if (currentSongRef.current !== songKey || playbackGenerationRef.current !== landedGeneration) {
++            return;
++        }
++        if (cachedCoverUrl.status === 'rejected') {
++            console.warn('[App] Failed to read the cached cover', cachedCoverUrl.error);
++        }
++        if (cachedCoverUrl.status === 'ok' && cachedCoverUrl.value) {
++            setCachedCoverUrl(cachedCoverUrl.value);
++        } else if (prefetched?.coverUrl) {
++            setCachedCoverUrl(prefetched.coverUrl);
++        }
++
+         try {
+             await loadOnlineSongLyrics(song, prefetched, userId, {
+                 isCurrent: () => currentSongRef.current === songKey,
+diff --git a/src/hooks/usePlaybackTransportController.ts b/src/hooks/usePlaybackTransportController.ts
+index 5efcc98..e4ede6e 100644
+--- a/src/hooks/usePlaybackTransportController.ts
++++ b/src/hooks/usePlaybackTransportController.ts
+@@ -172,6 +172,27 @@ export function usePlaybackTransportController({
+         const fadeToken = audio.paused || audio.ended
+             ? playbackFade.prepareFadeIn()
+             : null;
++
++        // 元素里没有任何音源时 play() 按规范永不决议 —— 等 4 秒、没有声音、也没有任何线索
++        // （真机抓到的正是 `play:timeout · running · rs 0/0`：按下播放 4 秒后元素还是空的）。
++        // 源码里音源晚到是可能的（播放落地要等在线地址），所以这里先补一手：
++        // store 里已经有地址、元素上没有 → 直接写进去；两边都没有 → 说明白，不再白等 4 秒。
++        if (!audio.currentSrc && !audio.getAttribute('src')) {
++            const storeSrc = usePlaybackStore.getState().audioSrc;
++            if (!storeSrc) {
++                playbackFade.abortFadeIn(fadeToken);
++                if (!isCurrent()) return;
++                setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : {
++                    type: 'error',
++                    text: `src:missing · ${usePlaybackStore.getState().playerState}`,
++                }));
++                setPlayerState(PlayerState.PAUSED);
++                return;
++            }
++            audio.src = storeSrc;
++            audio.load();
++        }
++
+         try {
+             // play() 按规范在真正开始播放时才决议，所以「一直不决议」就是音频链路没起来 —— 安卓壳上
+             // 连蓝牙耳机时正是这个表现。给它一个期限只为两件事：把结局记进 audioStartupProbe（诊断用），
+diff --git a/test/unit/playback/onlinePlaybackStop.test.ts b/test/unit/playback/onlinePlaybackStop.test.ts
+index a1d172f..afa8d2e 100644
+--- a/test/unit/playback/onlinePlaybackStop.test.ts
++++ b/test/unit/playback/onlinePlaybackStop.test.ts
+@@ -656,21 +656,30 @@ describe('stale requests', () => {
+     it.each([
+         ['another song', '3'],
+         ['the same song again', '2'],
+-    ])('releases the blob of a landed song when %s lands during its cover lookup', async (_label, nextId) => {
++    ])('hands the landed song its source before the cover lookup, and leaves its blob to the deck when %s lands', async (_label, nextId) => {
++        // blob 地址按用例取不同的值：retireBlobUrl 的持有名单是模块级的，两个用例共用一个地址时
++        // 前一个用例留下的台账会在后一个用例里被清扫掉，断言就测不到这一条了。
++        const blobSrc = `blob:b-${nextId}`;
+         const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+         const cover = deferred<string | null>();
+         const nextSrc = `https://cdn.example/${nextId}-fresh.mp3`;
+         vi.mocked(getCachedSongCoverUrl).mockReturnValueOnce(cover.promise);
+-        loader.mockResolvedValueOnce({ kind: 'ok', audioSrc: 'blob:b', blobUrl: 'blob:b' })
++        loader.mockResolvedValueOnce({ kind: 'ok', audioSrc: blobSrc, blobUrl: blobSrc })
+             .mockResolvedValueOnce({ kind: 'ok', audioSrc: nextSrc });
+         const queue = controller();
+         const landing = queue.playSong(songs[1], songs);
+         await vi.waitFor(() => expect(getCachedSongCoverUrl).toHaveBeenCalledOnce());
++        // 音源在封面缓存之前就落地了（真机 `play:timeout · running · rs 0/0`：封面缓存不回来，
++        // 声音跟着一起被扣死，而且不报错）。封面还没回来的这一刻，deck 已经拿到了音源。
++        expect(usePlaybackStore.getState().audioSrc).toBe(blobSrc);
++        expect(queue.blobUrlRef.current).toBe(blobSrc);
+         await queue.playSong(songs.find(song => song.id === nextId)!, songs);
+ 
+         cover.resolve(null);
+         await landing;
+-        expect(revoke).toHaveBeenCalledWith('blob:b');
++        // 不直接回收：这条 URL 已经交给 deck 了，回收等于把它正在用的地址抽走。
++        // 交接由 retireBlobUrl 负责 —— 新歌落地时把它记进持有名单，等没有 deck 在放它时才回收。
++        expect(revoke).not.toHaveBeenCalledWith(blobSrc);
+         expect(usePlaybackStore.getState().audioSrc).toBe(nextSrc);
+         expect(queue.blobUrlRef.current).toBeNull();
+     });

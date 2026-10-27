@@ -1,0 +1,731 @@
+From 0610d85cfa2bac949e94cb280a3ae9c3b12a753c Mon Sep 17 00:00:00 2001
+From: zonglvye <zonglvye@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 23:32:48 +0800
+Subject: [PATCH 80/90] feat(visualizer): give Hanabi a real settings panel
+
+The parameters now live in the visualizer settings store like every other
+style's, instead of being read ad hoc by the entry:
+
+- store: hanabiTuning + handleSetHanabiTuning / handleResetHanabiTuning, with
+  the same merge-then-normalise write path the other tunings use, persisted
+  under hanabi_tuning
+- hanabi/tuning.ts becomes a tuningRegistry adapter, so the render boundary
+  injects props.hanabiTuning (and useVisualizerTunings now carries it - without
+  that the bundle never had hanabi and the panel's changes went nowhere)
+- HanabiSettingsPanel: six sections (look, lyrics, fireworks, sky & camera,
+  bloom, quality) on the tempera RangeControl / SettingsSection /
+  VisualizerPresetGroup primitives, plus reset. Upstream's version is built on
+  the 0.7.21 settings kit; this one reads the store directly so neither
+  SettingsModal nor VisPlayground needed new plumbing
+- tuningDefinition.ts is gone: the tuning now goes through tuningRegistry, so
+  the subset file that existed only for Hanabi has no user left
+
+Verified on the device: the panel's segmented controls write colour mode and
+render quality into hanabi_tuning, and textOnly set through it strips the sky,
+fireworks and ornaments from the live picture while the lyrics stay.
+---
+ src/components/visualizer/definition.ts       |   5 +
+ .../visualizer/hanabi/HanabiSettingsPanel.tsx | 187 ++++++++++++++++++
+ src/components/visualizer/hanabi/entry.tsx    |  12 +-
+ .../visualizer/hanabi/hanabiTuning.ts         |   9 +-
+ src/components/visualizer/hanabi/tuning.ts    |  28 +--
+ src/components/visualizer/tuningDefinition.ts |  90 ---------
+ src/components/visualizer/tuningRegistry.ts   |   2 +
+ .../visualizer/useVisualizerTunings.ts        |   1 +
+ src/i18n/locales/en.ts                        |  38 ++++
+ src/i18n/locales/in.ts                        |  39 ++++
+ src/i18n/locales/zh-CN.ts                     |  38 ++++
+ src/stores/useVisualizerSettingsStore.ts      |  23 +++
+ src/stores/visualizerSettingsPersistence.ts   |  15 ++
+ 13 files changed, 372 insertions(+), 115 deletions(-)
+ create mode 100644 src/components/visualizer/hanabi/HanabiSettingsPanel.tsx
+ delete mode 100644 src/components/visualizer/tuningDefinition.ts
+
+diff --git a/src/components/visualizer/definition.ts b/src/components/visualizer/definition.ts
+index 73ff1e0..14d5336 100644
+--- a/src/components/visualizer/definition.ts
++++ b/src/components/visualizer/definition.ts
+@@ -26,6 +26,7 @@ import {
+ import type { VisualizerTuningBundle } from './tuningRegistry';
+ import type { VisualizerBackgroundConfig } from './backgrounds/definition';
+ import type { BeatEffectDef } from '../../services/beatFx/beatEffects';
++import type { HanabiTuning } from './hanabi/types';
+ 
+ // src/components/visualizer/definition.ts
+ // Shared contracts for discoverable visualizer modes.
+@@ -107,6 +108,8 @@ export interface VisualizerSharedProps {
+     onTemperaTuningChange?: (patch: Partial<TemperaTuning>) => void;
+     lumiereTuning?: LumiereTuning;
+     onLumiereTuningChange?: (patch: Partial<LumiereTuning>) => void;
++    hanabiTuning?: HanabiTuning;
++    onHanabiTuningChange?: (patch: Partial<HanabiTuning>) => void;
+ }
+ 
+ export interface VisualizerSettingsPanelProps {
+@@ -154,6 +157,8 @@ export interface VisualizerSettingsPanelProps {
+     onTemperaTuningChange?: (patch: Partial<TemperaTuning>) => void;
+     lumiereTuning?: LumiereTuning;
+     onLumiereTuningChange?: (patch: Partial<LumiereTuning>) => void;
++    hanabiTuning?: HanabiTuning;
++    onHanabiTuningChange?: (patch: Partial<HanabiTuning>) => void;
+     /** Mark slider drag start so onChange only updates draft. */
+     onSliderPointerDown?: () => void;
+     /** Commit draft values to persistent store on slider release. */
+diff --git a/src/components/visualizer/hanabi/HanabiSettingsPanel.tsx b/src/components/visualizer/hanabi/HanabiSettingsPanel.tsx
+new file mode 100644
+index 0000000..8d9a77c
+--- /dev/null
++++ b/src/components/visualizer/hanabi/HanabiSettingsPanel.tsx
+@@ -0,0 +1,187 @@
++// Copyright (c) 2026 chthollyphile
++import React, { useMemo } from 'react';
++import { useShallow } from 'zustand/react/shallow';
++import type { VisualizerSettingsPanelProps } from '../definition';
++import VisualizerPresetGroup, { type VisualizerPresetOption } from '../VisualizerPresetGroup';
++import { TemperaRangeControl as RangeControl, TemperaSettingsSection as SettingsSection } from '../tempera/TemperaSettingsControls';
++import { useVisualizerSettingsStore } from '../../../stores/useVisualizerSettingsStore';
++import type { HanabiRenderQuality, HanabiTuning } from './types';
++
++// src/components/visualizer/hanabi/HanabiSettingsPanel.tsx
++//
++// 花火的参数面板：画面、歌词、烟花、夜空与镜头、辉光、画质六组。
++//
++// 与其它样式不同的两点，都是为了少改本仓库既有的装配层：
++//   1. 上游这份面板用的是 0.7.21 的设置套件（Group/Row/Segmented/PictureChecks），我们改用
++//      tempera 那套现成的 RangeControl / SettingsSection / VisualizerPresetGroup。
++//   2. 参数与 setter 直接从 store 取，不从 props 里拿：props 里的 hanabiTuning 需要在
++//      SettingsModal / VisPlayground 两处装配点各加一段，而 store 本来就是唯一真相。
++
++type NumberKey = { [K in keyof HanabiTuning]: HanabiTuning[K] extends number ? K : never }[keyof HanabiTuning];
++type BooleanKey = { [K in keyof HanabiTuning]: HanabiTuning[K] extends boolean ? K : never }[keyof HanabiTuning];
++
++interface SliderSpec { kind: 'slider'; key: NumberKey; labelKey: string; min: number; max: number; step?: number; }
++interface ToggleSpec { kind: 'toggle'; key: BooleanKey; labelKey: string; }
++type ControlSpec = SliderSpec | ToggleSpec;
++
++const slider = (key: NumberKey, labelKey: string, min: number, max: number, step = 0.05): SliderSpec => (
++    { kind: 'slider', key, labelKey, min, max, step }
++);
++const toggle = (key: BooleanKey, labelKey: string): ToggleSpec => ({ kind: 'toggle', key, labelKey });
++
++const STAGE_CONTROLS: ControlSpec[] = [
++    toggle('textOnly', 'options.hanabiTextOnly'),
++    toggle('overlayFrame', 'options.hanabiOverlayFrame'),
++];
++
++const TEXT_CONTROLS: ControlSpec[] = [
++    slider('textMotion', 'options.hanabiTextMotion', 0, 2),
++    slider('blockOpacity', 'options.hanabiBlockOpacity', 0, 1, 0.01),
++    slider('collage', 'options.hanabiCollage', 0, 2),
++];
++
++const FIREWORK_CONTROLS: ControlSpec[] = [
++    slider('sparkAmount', 'options.hanabiSparkAmount', 0, 2),
++    slider('glow', 'options.hanabiGlow', 0, 2),
++    slider('ornamentAmount', 'options.hanabiOrnamentAmount', 0, 2),
++    toggle('launches', 'options.hanabiLaunches'),
++];
++
++const CAMERA_CONTROLS: ControlSpec[] = [
++    slider('sky', 'options.hanabiSky', 0, 1, 0.01),
++    slider('riseSpeed', 'options.hanabiRiseSpeed', 0, 2),
++    slider('spin', 'options.hanabiSpin', 0, 2),
++    slider('ambient', 'options.hanabiAmbient', 0, 2),
++];
++
++const BLOOM_CONTROLS: ControlSpec[] = [
++    slider('bloom', 'options.hanabiBloom', 0, 2),
++    slider('chorusBloom', 'options.hanabiChorusBloom', 0, 2),
++];
++
++const formatPlain = (value: number) => value.toFixed(2);
++
++const HanabiSettingsPanel: React.FC<VisualizerSettingsPanelProps> = ({
++    t,
++    isDaylight,
++    theme,
++    rangeInputClass,
++    controlCardBg,
++}) => {
++    const { tuning, onTuningChange, onReset } = useVisualizerSettingsStore(useShallow(state => ({
++        tuning: state.hanabiTuning,
++        onTuningChange: state.handleSetHanabiTuning,
++        onReset: state.handleResetHanabiTuning,
++    })));
++
++    const booleanOptions: VisualizerPresetOption<boolean>[] = useMemo(() => ([
++        { value: true, label: t('options.hanabiToggleOn') },
++        { value: false, label: t('options.hanabiToggleOff') },
++    ]), [t]);
++
++    const colorModeOptions: VisualizerPresetOption<HanabiTuning['colorMode']>[] = useMemo(() => ([
++        { value: 'theme', label: t('options.hanabiColorModeTheme') },
++        { value: 'vivid', label: t('options.hanabiColorModeVivid') },
++        { value: 'mixed', label: t('options.hanabiColorModeMixed') },
++    ]), [t]);
++
++    const qualityOptions: VisualizerPresetOption<HanabiRenderQuality>[] = useMemo(() => ([
++        { value: 'full', label: t('options.hanabiQualityFull') },
++        { value: 'balanced', label: t('options.hanabiQualityBalanced') },
++        { value: 'low', label: t('options.hanabiQualityLow') },
++    ]), [t]);
++
++    const renderControl = (spec: ControlSpec) => (spec.kind === 'slider' ? (
++        <RangeControl
++            key={spec.key}
++            label={t(spec.labelKey)}
++            value={tuning[spec.key]}
++            min={spec.min}
++            max={spec.max}
++            step={spec.step ?? 0.05}
++            formatValue={formatPlain}
++            rangeInputClass={rangeInputClass}
++            onChange={value => onTuningChange({ [spec.key]: value })}
++        />
++    ) : (
++        <VisualizerPresetGroup
++            key={spec.key}
++            label={t(spec.labelKey)}
++            value={tuning[spec.key]}
++            options={booleanOptions}
++            onChange={value => onTuningChange({ [spec.key]: value })}
++            isDaylight={isDaylight}
++            theme={theme}
++        />
++    ));
++
++    const hint = (key: string) => (
++        <p className="text-xs leading-relaxed opacity-55" style={{ color: 'var(--text-secondary)' }}>{t(key)}</p>
++    );
++
++    return (
++        <div className="rounded-[24px] border border-white/10 p-4 space-y-4" style={{ backgroundColor: controlCardBg }}>
++            <div className="space-y-1">
++                <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
++                    {t('options.hanabiSettings')}
++                </div>
++                <div className="text-xs opacity-50" style={{ color: 'var(--text-secondary)' }}>
++                    {t('options.hanabiSettingsDesc')}
++                </div>
++            </div>
++
++            <SettingsSection title={t('options.hanabiStageSection')}>
++                <VisualizerPresetGroup
++                    label={t('options.hanabiColorMode')}
++                    value={tuning.colorMode}
++                    options={colorModeOptions}
++                    onChange={value => onTuningChange({ colorMode: value })}
++                    isDaylight={isDaylight}
++                    theme={theme}
++                />
++                {STAGE_CONTROLS.map(renderControl)}
++            </SettingsSection>
++
++            <SettingsSection title={t('options.hanabiTextSection')}>
++                {TEXT_CONTROLS.map(renderControl)}
++                {hint('options.hanabiBlockOpacityHint')}
++            </SettingsSection>
++
++            <SettingsSection title={t('options.hanabiFireworkSection')}>
++                {FIREWORK_CONTROLS.map(renderControl)}
++            </SettingsSection>
++
++            <SettingsSection title={t('options.hanabiCameraSection')}>
++                {CAMERA_CONTROLS.map(renderControl)}
++                {hint('options.hanabiSpinHint')}
++            </SettingsSection>
++
++            <SettingsSection title={t('options.hanabiBloomSection')}>
++                {BLOOM_CONTROLS.map(renderControl)}
++            </SettingsSection>
++
++            <SettingsSection title={t('options.hanabiQualitySection')}>
++                <VisualizerPresetGroup
++                    label={t('options.hanabiRenderQuality')}
++                    value={tuning.renderQuality}
++                    options={qualityOptions}
++                    onChange={value => onTuningChange({ renderQuality: value })}
++                    isDaylight={isDaylight}
++                    theme={theme}
++                />
++                {hint('options.hanabiQualityHint')}
++            </SettingsSection>
++
++            <button
++                type="button"
++                onClick={onReset}
++                className="w-full rounded-xl border border-white/10 py-2 text-xs opacity-70 hover:opacity-100 transition-opacity"
++                style={{ color: 'var(--text-primary)' }}
++            >
++                {t('options.hanabiResetAll')}
++            </button>
++        </div>
++    );
++};
++
++export default HanabiSettingsPanel;
+diff --git a/src/components/visualizer/hanabi/entry.tsx b/src/components/visualizer/hanabi/entry.tsx
+index a61aec5..bfc1abd 100644
+--- a/src/components/visualizer/hanabi/entry.tsx
++++ b/src/components/visualizer/hanabi/entry.tsx
+@@ -2,12 +2,15 @@
+ //
+ // 与上游 v0.7.22 的 hanabi/entry.tsx 的差异（都只在鸿蒙/手机这一侧，不涉及渲染本身）：
+ //   1. 补 `tuningKind: 'hanabi'` —— 我们的 registry 契约要求每个样式声明它。
+-//   2. 去掉 `renderSettingsPanel` / `renderQuickControls` —— 它们依赖上游 0.7.21 的设置套件
+-//      （settings/kit、panelRows）与调参存储，我们这一版先只保证画面对；面板随后单独补。
++//   2. 参数由 tuning 注册表注入成 props.hanabiTuning（见 ./tuning.ts），不再由 render 里手写。
++//   3. 面板沿用本仓库的 RangeControl / SettingsSection 写法（见 ./HanabiSettingsPanel.tsx）。
++//   4. 播放面板的两个快捷开关（画框、拼贴）暂时不注册：它们要上游 `VisualizerQuickControlsProps`
++//      的另一套 props 形状，先把面板做齐。
+ import React from 'react';
+ import { BEAT_EFFECT_IDS } from '../../../services/beatFx/beatEffects';
+ import { defineVisualizer } from '../definition';
+-import hanabiTuning from './tuning';
++import HanabiSettingsPanel from './HanabiSettingsPanel';
++import { DEFAULT_HANABI_TUNING } from './types';
+ 
+ const VisualizerHanabi = React.lazy(() => import('./VisualizerHanabi'));
+ 
+@@ -52,6 +55,7 @@ export default defineVisualizer({
+     ],
+     // Deliberately unkeyed on the seed, like lumiere: the runtime hands a track change over in
+     // place (songHandover.ts / pixiRuntimeHost.ts) instead of throwing the WebGL context away.
+-    render: props => <VisualizerHanabi {...props} hanabiTuning={hanabiTuning.read(props.visualizerTunings)} />,
++    render: props => <VisualizerHanabi {...props} hanabiTuning={props.hanabiTuning ?? DEFAULT_HANABI_TUNING} />,
++    renderSettingsPanel: props => <HanabiSettingsPanel {...props} />,
+     ownFontSizeNoticeKey: 'options.hanabiFontSizeAutoNotice',
+ });
+diff --git a/src/components/visualizer/hanabi/hanabiTuning.ts b/src/components/visualizer/hanabi/hanabiTuning.ts
+index 24f66ae..37e6bc4 100644
+--- a/src/components/visualizer/hanabi/hanabiTuning.ts
++++ b/src/components/visualizer/hanabi/hanabiTuning.ts
+@@ -1,8 +1,15 @@
+ // Copyright (c) 2026 chthollyphile
+ import { snapResolutionToTexturePool } from '../pixi/pixiTextureBudget';
+-import { numberWithin } from '../tuningDefinition';
+ import { DEFAULT_HANABI_TUNING, type HanabiRenderQuality, type HanabiTuning } from './types';
+ 
++// 上游把 numberWithin 放在 tuningDefinition 里；我们这条分支的 tuning 走 tuningRegistry，
++// 用不到那整套契约，所以这四行的钳位直接留在本文件（语义与上游一致）。
++const numberWithin = (value: unknown, fallback: number, min: number, max: number) => (
++    typeof value === 'number' && Number.isFinite(value)
++        ? Math.min(max, Math.max(min, value))
++        : fallback
++);
++
+ // src/components/visualizer/hanabi/hanabiTuning.ts
+ // 花火 tuning 的归一化与运行时分类：存档、导入、同步、滑块拖动都经 normalizeHanabiTuning 补齐字段、钳住范围；
+ // 运行时按 HANABI_LIVE_KEYS 区分「每帧现读、改了立刻生效」与「烘焙进场景、改了要重建」的字段。
+diff --git a/src/components/visualizer/hanabi/tuning.ts b/src/components/visualizer/hanabi/tuning.ts
+index 7eb1b77..a7cf3f8 100644
+--- a/src/components/visualizer/hanabi/tuning.ts
++++ b/src/components/visualizer/hanabi/tuning.ts
+@@ -1,27 +1,15 @@
+ // Copyright (c) 2026 chthollyphile
+-import { defineVisualizerTuning, type StoredTuningFields } from '../tuningDefinition';
+-import { normalizeHanabiTuning } from './hanabiTuning';
+-import { DEFAULT_HANABI_TUNING, type HanabiTuning } from './types';
++import { defineVisualizerTuning } from '../tuningRegistry';
+ 
+ // src/components/visualizer/hanabi/tuning.ts
+-// 花火's tuning: its defaults, the settings store fields it lives in, and where it is stored. The
+-// renderer reads it from the tuning bundle with read() (entry.tsx), so there is no named prop.
+-
+-declare module '../tuningDefinition' {
+-    interface VisualizerTuningSettings extends StoredTuningFields<'hanabiTuning', 'handleSetHanabiTuning', 'handleResetHanabiTuning', HanabiTuning> {}
+-}
+-
+-export default defineVisualizerTuning<HanabiTuning>({
++// 把花火的参数接进本仓库的 tuning 注册表：store 里那一份（`hanabiTuning`）在渲染边界被注入成
++// `props.hanabiTuning`，与其它 13 个样式走同一条路。
++//
++// 上游 v0.7.22 用的是另一套 tuningDefinition（泛型 StoredTuning + 模块增强）；我们这条分支上
++// 等价物是 tuningRegistry，所以这里只声明「读哪个字段、用哪个 setter、注入成什么 prop」。
++export default defineVisualizerTuning({
+     mode: 'hanabi',
+-    defaults: DEFAULT_HANABI_TUNING,
+     settingsKey: 'hanabiTuning',
+     settingsSetterKey: 'handleSetHanabiTuning',
+-    settingsResetterKey: 'handleResetHanabiTuning',
+-    storage: {
+-        key: 'hanabi_tuning',
+-        read: normalizeHanabiTuning,
+-        // Merge then normalize: the same clamp runs for slider drags, imports, sync and Folium.
+-        merge: (held, patch) => normalizeHanabiTuning({ ...held, ...patch }),
+-        resetNotice: 'notifications.hanabiReset',
+-    },
++    apply: (props, tuning) => ({ ...props, hanabiTuning: tuning }),
+ });
+diff --git a/src/components/visualizer/tuningDefinition.ts b/src/components/visualizer/tuningDefinition.ts
+deleted file mode 100644
+index 88d1d5d..0000000
+--- a/src/components/visualizer/tuningDefinition.ts
++++ /dev/null
+@@ -1,90 +0,0 @@
+-// src/components/visualizer/tuningDefinition.ts
+-//
+-// 上游 v0.7.22 tuningDefinition.ts 的最小子集，只为花火（hanabi）服务。
+-//
+-// 背景：上游 0.7.21 把「每种样式的参数」重构成了一套泛型契约（StoredTuning /
+-// VisualizerTuningAdapter / defineVisualizerTuning，并要求 settings store 按模式做模块增强）。
+-// 我们这条 0.7.20 分支上的等价物是 tuningRegistry.ts，形状完全不同，整套搬过来要同时迁移
+-// 13 个已有样式的参数定义，收益不划算。
+-//
+-// 花火真正需要的只有两件事：
+-//   1. numberWithin —— 参数归一化用的钳位（hanabiTuning.ts）
+-//   2. defineVisualizerTuning 返回一个 read(bundle)，让 entry.tsx 能拿到当前参数
+-// 所以这里给出与上游同名、同签名的这两个口子，语义按上游实现；等真要把整套 tuning 重构
+-// 搬进来时，替换本文件即可，花火那边一行都不用改。
+-import type { VisualizerTuningBundle } from './tuningRegistry';
+-
+-/** 数值钳位：拿不到数就用默认值，越界夹到区间内。 */
+-export const numberWithin = (value: unknown, fallback: number, min: number, max: number) => (
+-    typeof value === 'number' && Number.isFinite(value)
+-        ? Math.min(max, Math.max(min, value))
+-        : fallback
+-);
+-
+-/** 一种样式的参数在本地怎么存、怎么合并。 */
+-export interface VisualizerTuningStorage<T> {
+-    /** localStorage 的键。 */
+-    key: string;
+-    /** 任何存下来的值 → 完整合法的参数。 */
+-    read: (raw: unknown) => T;
+-    /** 拖动滑块这类增量更新：先并再归一化。 */
+-    merge: (held: T, patch: Partial<T>) => T;
+-    /** 重置后提示文案的键。 */
+-    resetNotice?: string;
+-}
+-
+-export interface VisualizerTuningDefinition<T> {
+-    /** 样式 id，与 registry 的 mode 一致。 */
+-    mode: string;
+-    /** 没有存档时的完整默认值。 */
+-    defaults: T;
+-    /** 这套参数在 store 里挂的字段名。 */
+-    settingsKey: string;
+-    settingsSetterKey: string;
+-    settingsResetterKey: string;
+-    storage: VisualizerTuningStorage<T>;
+-}
+-
+-export interface VisualizerTuningAdapter<T = unknown> extends VisualizerTuningDefinition<T> {
+-    /**
+-     * 从渲染属性里的 tuning bundle 取这套参数；bundle 里没有就回落到本地存档。
+-     * 上游还兼顾 store 里的实时值，我们这里 store 没有这个字段，取存档即可。
+-     */
+-    read: (bundle?: VisualizerTuningBundle) => T;
+-}
+-
+-/** 供各样式 `declare module` 增强的容器；本子集不往 store 里塞字段，所以是空的。 */
+-export interface VisualizerTuningSettings { }
+-
+-/**
+- * 上游用它把 `settingsKey` / `settingsSetterKey` / `settingsResetterKey` 三个字段
+- * 一次性并进 settings store 的类型。这里保留同名类型，让样式的模块增强写法原样可用。
+- */
+-export type StoredTuningFields<
+-    Field extends string,
+-    Setter extends string,
+-    Resetter extends string,
+-    T,
+-> = Record<Field, T> & Record<Setter, (patch: Partial<T>) => void> & Record<Resetter, () => void>;
+-
+-const readFromStorage = <T>(storage: VisualizerTuningStorage<T>, fallback: T): T => {
+-    if (typeof window === 'undefined') return fallback;
+-    try {
+-        const raw = window.localStorage.getItem(storage.key);
+-        return raw === null ? fallback : storage.read(JSON.parse(raw));
+-    } catch {
+-        // 存档坏了不能让画面起不来：按默认参数画。
+-        return fallback;
+-    }
+-};
+-
+-export const defineVisualizerTuning = <T>(definition: VisualizerTuningDefinition<T>): VisualizerTuningAdapter<T> => ({
+-    ...definition,
+-    read: (bundle) => {
+-        // 上游的 bundle 是按样式名索引的松散表；本地类型是按 mode 收紧过的，这里按下标取。
+-        const held = (bundle as Record<string, unknown> | undefined)?.[definition.settingsKey];
+-        return held === undefined
+-            ? readFromStorage(definition.storage, definition.defaults)
+-            : definition.storage.read(held);
+-    },
+-});
+diff --git a/src/components/visualizer/tuningRegistry.ts b/src/components/visualizer/tuningRegistry.ts
+index 0112de3..cc8ee47 100644
+--- a/src/components/visualizer/tuningRegistry.ts
++++ b/src/components/visualizer/tuningRegistry.ts
+@@ -15,6 +15,7 @@ import type {
+     VisualizerMode,
+ } from '../../types';
+ import type { VisualizerSharedProps } from './definition';
++import type { HanabiTuning } from './hanabi/types';
+ 
+ // src/components/visualizer/tuningRegistry.ts
+ // Pure-data registry for transporting heterogeneous visualizer tuning without importing renderers.
+@@ -32,6 +33,7 @@ export interface VisualizerTuningMap {
+     sonnet: SonnetTuning;
+     tempera: TemperaTuning;
+     lumiere: LumiereTuning;
++    hanabi: HanabiTuning;
+ }
+ 
+ export type VisualizerTuningMode = keyof VisualizerTuningMap;
+diff --git a/src/components/visualizer/useVisualizerTunings.ts b/src/components/visualizer/useVisualizerTunings.ts
+index 8060a72..a76ed5a 100644
+--- a/src/components/visualizer/useVisualizerTunings.ts
++++ b/src/components/visualizer/useVisualizerTunings.ts
+@@ -21,4 +21,5 @@ export const useVisualizerTunings = () => useVisualizerSettingsStore(useShallow(
+     sonnet: state.sonnetTuning,
+     tempera: state.temperaTuning,
+     lumiere: state.lumiereTuning,
++    hanabi: state.hanabiTuning,
+ })));
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index 4dc6d0f..43f175c 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -2338,6 +2338,44 @@ export default {
+     "randomVisualizerSelectAll": "Select all",
+     "randomVisualizerModes": "Random style pool",
+     "randomVisualizerCurrentInPool": "The current style is in the pool; the next song picks another.",
++    "hanabiSettings": "Hanabi tuning",
++    "hanabiSettingsDesc": "Look, shots and render quality",
++    "hanabiStageSection": "Look",
++    "hanabiColorMode": "Colour",
++    "hanabiColorModeTheme": "Follow theme",
++    "hanabiColorModeVivid": "Vivid",
++    "hanabiColorModeMixed": "Mixed",
++    "hanabiTextOnly": "Lyrics only",
++    "hanabiOverlayFrame": "Frame ornaments",
++    "hanabiTextSection": "Lyrics",
++    "hanabiTextMotion": "Text motion",
++    "hanabiBlockOpacity": "Colour block opacity",
++    "hanabiBlockOpacityHint": "Opacity of the blocks behind the words; 0 leaves the text alone.",
++    "hanabiCollage": "Collage",
++    "hanabiFireworkSection": "Fireworks",
++    "hanabiSparkAmount": "Firework amount",
++    "hanabiGlow": "Firework glow",
++    "hanabiOrnamentAmount": "Ornament amount",
++    "hanabiLaunches": "Launch trails",
++    "hanabiCameraSection": "Sky and camera",
++    "hanabiSky": "Night sky",
++    "hanabiRiseSpeed": "Rise speed",
++    "hanabiSpin": "Spin",
++    "hanabiSpinHint": "The whole world keeps turning; at 0 the camera cuts in place.",
++    "hanabiAmbient": "Ambient particles",
++    "hanabiBloomSection": "Bloom",
++    "hanabiBloom": "Screen bloom",
++    "hanabiChorusBloom": "Chorus bloom",
++    "hanabiQualitySection": "Quality",
++    "hanabiRenderQuality": "Firework glow quality",
++    "hanabiQualityFull": "Full",
++    "hanabiQualityBalanced": "Balanced",
++    "hanabiQualityLow": "Battery saver",
++    "hanabiQualityHint": "Only the firework glow drops resolution; lyrics and colour blocks stay at full resolution.",
++    "hanabiToggleOn": "On",
++    "hanabiToggleOff": "Off",
++    "hanabiResetAll": "Reset to defaults",
++    "hanabiReset": "Hanabi tuning reset",
+     "temperaCameraIntensity": "Camera Intensity",
+     "temperaGlyphMotion": "Glyph Motion",
+     "temperaGlyphSettleStretch": "Entrance pacing",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index 6e6fe3f..b279479 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -2295,6 +2295,45 @@ export default {
+     "randomVisualizerSelectAll": "Pilih semua",
+     "randomVisualizerModes": "Kumpulan gaya acak",
+     "randomVisualizerCurrentInPool": "Gaya saat ini ada dalam kumpulan; lagu berikutnya memilih yang lain.",
++    "hanabiSettings": "Penyetelan Hanabi",
++    "hanabiSettingsDesc": "Tampilan, bidikan dan kualitas render",
++    "hanabiStageSection": "Tampilan",
++    "hanabiColorMode": "Warna",
++    "hanabiColorModeTheme": "Ikuti tema",
++    "hanabiColorModeVivid": "Cerah",
++    "hanabiColorModeMixed": "Campuran",
++    "hanabiTextOnly": "Hanya lirik",
++    "hanabiOverlayFrame": "Ornamen bingkai",
++    "hanabiTextSection": "Lirik",
++    "hanabiTextMotion": "Gerakan teks",
++    "hanabiBlockOpacity": "Opasitas blok warna",
++    "hanabiBlockOpacityHint": "Opasitas blok di belakang kata; 0 menyisakan teks saja.",
++    "hanabiCollage": "Kolase",
++    "hanabiFireworkSection": "Kembang api",
++    "hanabiSparkAmount": "Jumlah kembang api",
++    "hanabiGlow": "Pendar kembang api",
++    "hanabiOrnamentAmount": "Jumlah ornamen",
++    "hanabiLaunches": "Jejak peluncuran",
++    "hanabiCameraSection": "Langit dan kamera",
++    "hanabiSky": "Langit malam",
++    "hanabiRiseSpeed": "Kecepatan naik",
++    "hanabiSpin": "Putaran",
++    "hanabiSpinHint": "Seluruh dunia terus berputar; pada 0 kamera berganti di tempat.",
++    "hanabiAmbient": "Partikel sekitar",
++    "hanabiBloomSection": "Bloom",
++    "hanabiBloom": "Bloom layar",
++    "hanabiBloomChorus": "Bloom reff",
++    "hanabiChorusBloom": "Bloom reff",
++    "hanabiQualitySection": "Kualitas",
++    "hanabiRenderQuality": "Kualitas pendar kembang api",
++    "hanabiQualityFull": "Penuh",
++    "hanabiQualityBalanced": "Seimbang",
++    "hanabiQualityLow": "Hemat baterai",
++    "hanabiQualityHint": "Hanya pendar kembang api yang turun resolusi; lirik dan blok warna tetap penuh.",
++    "hanabiToggleOn": "Nyala",
++    "hanabiToggleOff": "Mati",
++    "hanabiResetAll": "Kembalikan ke awal",
++    "hanabiReset": "Penyetelan Hanabi direset",
+     "sonnetCameraIntensity": "Intensitas kamera",
+     "sonnetTypographyMotion": "Gerakan tipografi",
+     "sonnetMgDensity": "Kepadatan garis latar belakang",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 6402c08..1bb06b3 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -2339,6 +2339,44 @@ export default {
+     "randomVisualizerSelectAll": "全选",
+     "randomVisualizerModes": "随机样式池",
+     "randomVisualizerCurrentInPool": "当前样式在池中，切歌时会换一种。",
++    "hanabiSettings": "花火参数",
++    "hanabiSettingsDesc": "画面、分镜与画质的调整",
++    "hanabiStageSection": "画面",
++    "hanabiColorMode": "配色",
++    "hanabiColorModeTheme": "跟随主题",
++    "hanabiColorModeVivid": "鲜艳",
++    "hanabiColorModeMixed": "混合",
++    "hanabiTextOnly": "只显示歌词",
++    "hanabiOverlayFrame": "画框装饰",
++    "hanabiTextSection": "歌词",
++    "hanabiTextMotion": "文字动作幅度",
++    "hanabiBlockOpacity": "字底色块不透明度",
++    "hanabiBlockOpacityHint": "色块的不透明度；调到 0 就只剩文字。",
++    "hanabiCollage": "拼贴装饰",
++    "hanabiFireworkSection": "烟花",
++    "hanabiSparkAmount": "烟花数量",
++    "hanabiGlow": "烟花辉光",
++    "hanabiOrnamentAmount": "装饰件数量",
++    "hanabiLaunches": "升空尾迹",
++    "hanabiCameraSection": "夜空与镜头",
++    "hanabiSky": "夜空底色",
++    "hanabiRiseSpeed": "上升速度",
++    "hanabiSpin": "旋转",
++    "hanabiSpinHint": "整个世界一直在转；调到 0 时镜头在原地切换。",
++    "hanabiAmbient": "环境粒子",
++    "hanabiBloomSection": "整体辉光",
++    "hanabiBloom": "全屏辉光",
++    "hanabiChorusBloom": "副歌辉光",
++    "hanabiQualitySection": "画质",
++    "hanabiRenderQuality": "烟花辉光画质",
++    "hanabiQualityFull": "全画质",
++    "hanabiQualityBalanced": "均衡",
++    "hanabiQualityLow": "省电",
++    "hanabiQualityHint": "只降烟花辉光的分辨率，歌词与色块始终按满分辨率合成。",
++    "hanabiToggleOn": "开",
++    "hanabiToggleOff": "关",
++    "hanabiResetAll": "重置为默认参数",
++    "hanabiReset": "已重置花火参数",
+     "temperaCameraIntensity": "镜头运动强度",
+     "temperaGlyphMotion": "逐字动势",
+     "temperaGlyphSettleStretch": "逐字入场时序",
+diff --git a/src/stores/useVisualizerSettingsStore.ts b/src/stores/useVisualizerSettingsStore.ts
+index 1d05610..73a0322 100644
+--- a/src/stores/useVisualizerSettingsStore.ts
++++ b/src/stores/useVisualizerSettingsStore.ts
+@@ -24,6 +24,9 @@ import { useVisualizerAssetStore } from './useVisualizerAssetStore';
+ import { normalizeLumiereTuning } from '../utils/lumiereTuning';
+ import { RANDOM_VISUALIZER_MODES_STORAGE_KEY, readStoredRandomVisualizerModes } from './visualizerSettingsPersistence';
+ import { normalizeRandomVisualizerModes, type RandomVisualizerMode } from '../utils/randomVisualizerModes';
++import { HANABI_TUNING_STORAGE_KEY, readStoredHanabiTuning } from './visualizerSettingsPersistence';
++import { DEFAULT_HANABI_TUNING, type HanabiTuning } from '../components/visualizer/hanabi/types';
++import { normalizeHanabiTuning } from '../components/visualizer/hanabi/hanabiTuning';
+ 
+ /**
+  * 切样式时可以带的两件事：
+@@ -64,6 +67,7 @@ export type VisualizerSettingsState = {
+     sonnetTuning: SonnetTuning;
+     temperaTuning: TemperaTuning;
+     lumiereTuning: LumiereTuning;
++    hanabiTuning: HanabiTuning;
+     handleToggleDisableVisualizerVignette: (disable: boolean) => void;
+     handleToggleDisableVisualizerGeometricBackground: (disable: boolean) => void;
+     handleSetBackgroundOpacity: (opacity: number) => void;
+@@ -114,6 +118,8 @@ export type VisualizerSettingsState = {
+     handleResetTemperaTuning: () => void;
+     handleSetLumiereTuning: (patch: Partial<LumiereTuning>) => void;
+     handleResetLumiereTuning: () => void;
++    handleSetHanabiTuning: (patch: Partial<HanabiTuning>) => void;
++    handleResetHanabiTuning: () => void;
+     handleUploadMonetBackgroundImage: (files: File[]) => Promise<{ ok: boolean; error?: string; }>;
+     handleClearMonetBackgroundImage: () => Promise<void>;
+     handleUploadMonetPortraitImage: (files: File[]) => Promise<{ ok: boolean; error?: string; }>;
+@@ -157,6 +163,7 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set,
+     sonnetTuning: readStoredSonnetTuning(),
+     temperaTuning: readStoredTemperaTuning(),
+     lumiereTuning: readStoredLumiereTuning(),
++    hanabiTuning: readStoredHanabiTuning(),
+     handleToggleDisableVisualizerVignette: (disable) => {
+         setStoredBoolean('disable_visualizer_vignette', disable);
+         set({ disableVisualizerVignette: disable });
+@@ -557,6 +564,19 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set,
+         set({ lumiereTuning: DEFAULT_LUMIERE_TUNING });
+         setStatusMessage({ type: 'info', text: i18n.t('notifications.lumiereReset') });
+     },
++    handleSetHanabiTuning: (patch: Partial<HanabiTuning>) => {
++        // 合并再归一化：滑块拖动、导入、同步、Folium 走同一套钳位。
++        const next = normalizeHanabiTuning({ ...get().hanabiTuning, ...patch });
++        if (typeof window !== 'undefined') localStorage.setItem(HANABI_TUNING_STORAGE_KEY, JSON.stringify(next));
++        set({ hanabiTuning: next });
++    },
++    handleResetHanabiTuning: () => {
++        if (typeof window !== 'undefined') {
++            localStorage.setItem(HANABI_TUNING_STORAGE_KEY, JSON.stringify(DEFAULT_HANABI_TUNING));
++        }
++        set({ hanabiTuning: DEFAULT_HANABI_TUNING });
++        setStatusMessage({ type: 'info', text: i18n.t('notifications.hanabiReset') });
++    },
+     handleSetCappellaTuning: (patch) => {
+         const requestedCustomWithoutPack = patch.emojiPackSource === 'custom' && useVisualizerAssetStore.getState().storedCappellaEmojiPack.length === 0;
+         if (requestedCustomWithoutPack) {
+@@ -888,6 +908,9 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
+     handleResetFumeTuning: state.handleResetFumeTuning,
+     handleResetLatentBackgroundTuning: state.handleResetLatentBackgroundTuning,
+     handleResetLumiereTuning: state.handleResetLumiereTuning,
++    hanabiTuning: state.hanabiTuning,
++    handleSetHanabiTuning: state.handleSetHanabiTuning,
++    handleResetHanabiTuning: state.handleResetHanabiTuning,
+     handleResetMonetBackgroundTuning: state.handleResetMonetBackgroundTuning,
+     handleResetMonetTuning: state.handleResetMonetTuning,
+     handleResetNomandBackgroundTuning: state.handleResetNomandBackgroundTuning,
+diff --git a/src/stores/visualizerSettingsPersistence.ts b/src/stores/visualizerSettingsPersistence.ts
+index 2f0431e..91ac345 100644
+--- a/src/stores/visualizerSettingsPersistence.ts
++++ b/src/stores/visualizerSettingsPersistence.ts
+@@ -15,9 +15,24 @@ import { isAndroidShell } from '../utils/platform';
+ import { sanitizeUrlBackgroundList } from '../utils/urlBackground';
+ import { normalizeLumiereTuning } from '../utils/lumiereTuning';
+ import { normalizeRandomVisualizerModes } from '../utils/randomVisualizerModes';
++import { DEFAULT_HANABI_TUNING } from '../components/visualizer/hanabi/types';
++import { normalizeHanabiTuning } from '../components/visualizer/hanabi/hanabiTuning';
+ 
+ export const VISUALIZER_OPACITY_STORAGE_KEY = 'visualizer_opacity';
+ 
++// 花火（hanabi）的画质与分镜参数。键名与上游一致。
++export const HANABI_TUNING_STORAGE_KEY = 'hanabi_tuning';
++
++export const readStoredHanabiTuning = () => {
++    if (typeof window === 'undefined') return DEFAULT_HANABI_TUNING;
++    try {
++        const raw = localStorage.getItem(HANABI_TUNING_STORAGE_KEY);
++        return raw === null ? DEFAULT_HANABI_TUNING : normalizeHanabiTuning(JSON.parse(raw));
++    } catch {
++        return DEFAULT_HANABI_TUNING;
++    }
++};
++
+ // 「每首歌随机歌词动画」的抽签池。存成一个样式 id 的 JSON 数组；
+ // 读的时候一律过 normalizeRandomVisualizerModes：存档坏了、格式变了、池子空了都退回全部内置样式。
+ export const RANDOM_VISUALIZER_MODES_STORAGE_KEY = 'random_visualizer_modes';

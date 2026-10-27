@@ -54,6 +54,11 @@ export type LibraryHomeOnlineSource = {
     canUseRadio: boolean;
     /** provider 支持私人 FM 模式（FM 卡的描述显示当前模式）。 */
     hasPersonalFmModes: boolean;
+    /**
+     * 平台未登录也能用（汽水）：电台那一眼（私人FM / 场景）按游客身份去读，
+     * 不让「没有账号」等于「首页空着」。
+     */
+    guestAccess: boolean;
 };
 
 /** 本地曲库能不能用（浏览器要安全上下文与文件系统 API）。 */

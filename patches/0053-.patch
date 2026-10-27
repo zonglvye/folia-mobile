@@ -1,0 +1,67 @@
+From 62a875c4ce5e9ef86558516db5c51f60a899f695 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 22:06:54 +0800
+Subject: [PATCH 53/90] =?UTF-8?q?=E6=92=AD=E6=94=BE=E9=A1=B5=EF=BC=9A?=
+ =?UTF-8?q?=E7=82=B9=E8=83=8C=E6=99=AF=E4=B9=9F=E8=83=BD=E6=94=B6=E8=B5=B7?=
+ =?UTF-8?q?=E6=8E=A7=E5=88=B6=E6=9D=A1=EF=BC=8C=E5=8F=AA=E7=9C=8B=E6=AD=8C?=
+ =?UTF-8?q?=E8=AF=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+原来只有点胶囊本身能收起，而「想只看歌词」的时候人多半会去点画面空白处。
+现在播放页 + 触摸时，落点在控制条之外的 pointerdown 也会收起：
+排除控制条内部与任何面板/菜单/弹窗，避免和正在操作的 UI 打架。
+
+顺带把「暂停就强制展开」这条在触摸设备上让位给 touchExpanded —— 否则收起后
+一暂停又自己弹开，且此时点背景改了状态却没有视觉效果（点起来像坏了）。
+实测：播放中/暂停都能一次点收；点胶囊展开；点进度条 seek 与切歌箭头都不会误收。
+---
+ src/components/FloatingPlayerControls.tsx | 32 ++++++++++++++++++++++-
+ 1 file changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/src/components/FloatingPlayerControls.tsx b/src/components/FloatingPlayerControls.tsx
+index 2a855c5..4b3c9de 100644
+--- a/src/components/FloatingPlayerControls.tsx
++++ b/src/components/FloatingPlayerControls.tsx
+@@ -168,9 +168,39 @@ const FloatingPlayerControls: React.FC<FloatingPlayerControlsProps> = ({
+     // 表现成点了没反应。不能悬停的设备走下面的 touchExpanded 分支。
+     const showExpanded = isPositioning
+         || (canHover && isHovered)
+-        || (canAutoExpand && playerState !== PlayerState.PLAYING && currentView !== 'home')
++        // 触摸 + 播放页时展开与否完全由 touchExpanded 说了算：这里不再叠加「暂停就强制展开」，
++        // 否则收起后一暂停又自己弹开，而且此时点背景是收不掉的（状态改了但没有视觉效果）。
++        || (canAutoExpand && playerState !== PlayerState.PLAYING && currentView !== 'home' && !touchExpandable)
+         || (touchExpandable && touchExpanded);
+ 
++    /*
++     * 想只看歌词时，点背景（歌词/可视化区域）也应该收起控制条，不必先去找到那条胶囊。
++     * 只在「播放页 + 触摸 + 当前展开」时挂：落点在控制条内部、或任何面板/菜单/弹窗里时不动，
++     * 免得和正在操作的 UI 打架。用捕获阶段的 pointerdown，比 click 早，收起手感干脆。
++     */
++    useEffect(() => {
++        if (!touchExpandable || !touchExpanded || isPositioning) {
++            return;
++        }
++
++        const collapseOnBackgroundTap = (event: PointerEvent) => {
++            const target = event.target;
++            if (!(target instanceof Element)) {
++                return;
++            }
++            if (target.closest('[data-ponder="player-bar"]')) {
++                return;
++            }
++            if (target.closest('[role="dialog"], [role="menu"], .bravais-seam-sheet-host, .bravais-seam-menu')) {
++                return;
++            }
++            setTouchExpanded(false);
++        };
++
++        document.addEventListener('pointerdown', collapseOnBackgroundTap, true);
++        return () => document.removeEventListener('pointerdown', collapseOnBackgroundTap, true);
++    }, [isPositioning, touchExpandable, touchExpanded]);
++
+     // 上限依赖视口高度，窗口变矮时要跟着收，否则虚线框会画到屏幕外。
+     useEffect(() => {
+         if (!isPositioning) {

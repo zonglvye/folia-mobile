@@ -1,0 +1,178 @@
+From 337332c10e5dccab21422b17ca0041fb36d6aa3a Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 20:44:12 +0800
+Subject: [PATCH 46/90] =?UTF-8?q?=E5=9C=A8=E7=BA=BF=E9=9F=B3=E9=A2=91?=
+ =?UTF-8?q?=E6=94=B9=E8=B5=B0=E5=A3=B3=E4=BB=A3=E7=90=86=E5=8F=96=E5=9B=9E?=
+ =?UTF-8?q?=E5=90=8E=E4=BB=A5=E5=90=8C=E6=BA=90=20blob=20=E6=92=AD?=
+ =?UTF-8?q?=E6=94=BE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+问题：网易对网页客户端下发的是带 authSecret / cdntag=mark=os_web 的签名地址，
+这类地址任何 Origin 都不返回 Access-Control-Allow-Origin，而页面里的
+audio crossOrigin=anonymous（可视化/均衡器要 WebAudio 分析）必须要 CORS，
+于是加载即失败、有进度条没声音。
+
+做法：services/shellOnlineAudio.ts 在鸿蒙壳里把远程音频按 1MiB 分块经 /api/lyric-proxy
+取回（壳走系统网络栈，不受 CORS 限制），拼成 Blob 后以 blob: 地址交给播放器 —— 同源、
+无 CORS 问题，WebAudio 分析照常。只影响壳内在线播放，失败自动回退原地址。
+
+实测：relayed 10579 KiB，AudioContext 图建成，进度正常推进。
+---
+ src/services/onlinePlayback.ts   |  16 ++++-
+ src/services/shellOnlineAudio.ts | 101 +++++++++++++++++++++++++++++++
+ 2 files changed, 114 insertions(+), 3 deletions(-)
+ create mode 100644 src/services/shellOnlineAudio.ts
+
+diff --git a/src/services/onlinePlayback.ts b/src/services/onlinePlayback.ts
+index 0d203ed..ee7e616 100644
+--- a/src/services/onlinePlayback.ts
++++ b/src/services/onlinePlayback.ts
+@@ -21,6 +21,7 @@ import { classifyMissingAudioUrl, classifyPlaybackError } from './playbackRecove
+ import { resolvePlaybackFailurePolicy, sleepForPlaybackRetry } from './playbackRecovery/playbackFailurePolicy';
+ import { getProviderPlaybackCooldown, noteProviderFailure } from './playbackRecovery/providerPlaybackCooldown';
+ import { isCachedSongAudioDistrusted } from './playbackRecovery/mediaCacheGuard';
++import { materializeShellAudioSource } from './shellOnlineAudio';
+ 
+ export interface LoadOnlineAudioSourceOptions {
+     stage?: 'resolve-url' | 'refresh' | 'restore';
+@@ -67,9 +68,12 @@ export async function loadOnlineSongAudioSource(
+     }
+ 
+     if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt)) {
++        // 鸿蒙壳里远程地址要先换成同源 blob（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
++        const playable = await materializeShellAudioSource(prefetched.audioUrl);
+         return {
+             kind: 'ok',
+-            audioSrc: prefetched.audioUrl,
++            audioSrc: playable.audioSrc,
++            ...(playable.blobUrl ? { blobUrl: playable.blobUrl } : {}),
+             replayGain: song.replayGain ?? prefetched.replayGain,
+         };
+     }
+@@ -108,9 +112,15 @@ export async function loadOnlineSongAudioSource(
+             const url = toPlayableAudioUrl(source?.url);
+             if (url) {
+                 const replayGain = applyOnlineAudioSourceMetadata(song, source?.replayGain).replayGain;
+-                // 预取条目只在成功时更新；失败永不回写。
++                // 预取条目只在成功时更新；失败永不回写。预取里存的是**远程**地址（缓存给下次用）。
+                 updatePrefetchedAudioUrl(song, url, audioQuality, replayGain);
+-                return { kind: 'ok', audioSrc: url, replayGain };
++                const playable = await materializeShellAudioSource(url);
++                return {
++                    kind: 'ok',
++                    audioSrc: playable.audioSrc,
++                    ...(playable.blobUrl ? { blobUrl: playable.blobUrl } : {}),
++                    replayGain,
++                };
+             }
+             failure = classifyMissingAudioUrl(source?.url, { stage, providerId });
+             console.warn('[OnlinePlayback] Provider returned no playable audio URL', failure.reason);
+diff --git a/src/services/shellOnlineAudio.ts b/src/services/shellOnlineAudio.ts
+new file mode 100644
+index 0000000..f65a6c5
+--- /dev/null
++++ b/src/services/shellOnlineAudio.ts
+@@ -0,0 +1,101 @@
++// src/services/shellOnlineAudio.ts
++//
++// 把在线音频的**远程地址**换成同源 `blob:` 地址，再交给播放器。
++//
++// 为什么需要：鸿蒙壳里页面的 `<audio>` 带 `crossOrigin="anonymous"`（可视化/均衡器要 WebAudio
++// 分析音频，必须要 CORS）。而网易对“网页客户端”下发的是带 `authSecret` / `cdntag=mark=os_web`
++// 的签名地址，这类地址**任何 Origin 都不返回 Access-Control-Allow-Origin**，于是元素加载即失败、
++// 表现为「有进度条但没有声音」。谱面上的 CORS 报错见壳体日志的 `console:` 行。
++//
++// 做法：壳的同源代理（`/api/lyric-proxy`）走的是系统网络栈，不受 CORS 限制。这里按 1MiB 分块
++// 把音频取回来（分块是为了不让几十 MB 的 base64 一次性过 JS↔ArkTS 桥），拼成 Blob 之后用
++// `blob:` 地址播放 —— 同源、无 CORS 问题，WebAudio 分析照常。
++//
++// 只在鸿蒙壳里生效：浏览器部署形态不需要它（那台机器上的音频地址本来就带 CORS）。
++
++import { isShellNowPlayingSupported } from './shellNowPlaying';
++import { retireBlobUrl } from './playbackBlobUrls';
++
++/** 同源代理路径：与壳里 HttpProxy 的路线一致。 */
++const PROXY_PATH = '/api/lyric-proxy';
++/** 每块大小。1MiB 的 base64 约 1.4MB，过桥稳定，又不至于块数太多拖慢起播。 */
++const CHUNK_BYTES = 1024 * 1024;
++/** 单曲上限，防止一个坏地址把内存吃干。 */
++const MAX_TOTAL_BYTES = 96 * 1024 * 1024;
++/** 已转换过的地址（远程 URL → blob URL）。重试/重播同一首不必再取一遍。 */
++const blobUrlByRemoteUrl = new Map<string, string>();
++const BLOB_URL_CACHE_LIMIT = 4;
++
++/** 这个地址要不要经过壳代理：远程 http(s) 才需要，blob:/data: 本来就没有跨域问题。 */
++export const needsShellAudioRelay = (url: string | null | undefined): boolean => {
++    if (!url) return false;
++    if (!/^https?:/i.test(url)) return false;
++    return isShellNowPlayingSupported();
++};
++
++const rememberBlobUrl = (remoteUrl: string, blobUrl: string): void => {
++    blobUrlByRemoteUrl.set(remoteUrl, blobUrl);
++    if (blobUrlByRemoteUrl.size <= BLOB_URL_CACHE_LIMIT) return;
++    // 超出上限就先丢最早的一条；真正的回收交给 retireBlobUrl，它会避开还在出声的 deck。
++    const oldest = blobUrlByRemoteUrl.keys().next();
++    if (!oldest.done) {
++        blobUrlByRemoteUrl.delete(oldest.value);
++    }
++};
++
++/** 取一块（range 由壳转成上游的 `Range` 头）；返回该块的字节。 */
++const fetchChunk = async (remoteUrl: string, start: number, end: number): Promise<ArrayBuffer> => {
++    const query = new URLSearchParams({ url: remoteUrl, range: `${start}-${end}` });
++    const response = await fetch(`${PROXY_PATH}?${query.toString()}`, { cache: 'no-store' });
++    if (!response.ok) {
++        throw new Error(`audio proxy returned HTTP ${response.status}`);
++    }
++    return response.arrayBuffer();
++};
++
++/**
++ * 把远程音频地址变成同源 blob 地址。
++ *
++ * 失败时**回退到原地址**：让原有播放链路自己报错，比在这里伪装成功更好排查。
++ */
++export const materializeShellAudioSource = async (
++    url: string,
++): Promise<{ audioSrc: string; blobUrl?: string }> => {
++    if (!needsShellAudioRelay(url)) {
++        return { audioSrc: url };
++    }
++
++    const cached = blobUrlByRemoteUrl.get(url);
++    if (cached) {
++        return { audioSrc: cached, blobUrl: cached };
++    }
++
++    try {
++        const chunks: BlobPart[] = [];
++        let offset = 0;
++        for (;;) {
++            const buffer = await fetchChunk(url, offset, offset + CHUNK_BYTES - 1);
++            const received = buffer.byteLength;
++            if (received === 0) break;
++            chunks.push(buffer);
++            offset += received;
++            if (offset > MAX_TOTAL_BYTES) {
++                throw new Error(`audio larger than ${MAX_TOTAL_BYTES} bytes`);
++            }
++            // 上游忽略 Range、一次给回整首时也会走到这里：块不满就不再继续问。
++            if (received < CHUNK_BYTES) break;
++        }
++        if (chunks.length === 0) {
++            throw new Error('audio proxy returned no bytes');
++        }
++
++        const blobUrl = URL.createObjectURL(new Blob(chunks, { type: 'audio/mpeg' }));
++        rememberBlobUrl(url, blobUrl);
++        retireBlobUrl(blobUrl);
++        console.log(`[ShellAudio] relayed ${Math.round(offset / 1024)} KiB through the shell proxy for same-origin playback`);
++        return { audioSrc: blobUrl, blobUrl };
++    } catch (error) {
++        console.warn('[ShellAudio] falling back to the remote audio URL', error);
++        return { audioSrc: url };
++    }
++};

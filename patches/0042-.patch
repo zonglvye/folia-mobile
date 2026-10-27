@@ -1,0 +1,62 @@
+From 634a3bed47bf0ce608c6c913d37ed8362fd27c34 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 00:00:09 +0800
+Subject: [PATCH 42/90] =?UTF-8?q?=E8=A1=A5=E4=B8=8A=E3=80=8C=E7=9B=B4?=
+ =?UTF-8?q?=E5=87=BA=E6=A8=A1=E5=BC=8F=E3=80=8D=E6=BC=8F=E6=8E=89=E7=9A=84?=
+ =?UTF-8?q?=E8=AE=BE=E7=BD=AE=E6=AE=B5=E8=90=BD=E7=99=BB=E8=AE=B0=E4=B8=8E?=
+ =?UTF-8?q?=E4=BB=A3=E7=A0=81=E9=94=AE=E5=BF=AB=E7=85=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+直出模式那次改动加了 <SettingsAnchor anchorId="directOutputSettings"> 却
+没在 SETTINGS_ANCHOR_DEFINITIONS 里登记，于是设置侧边栏少了这一段跳转目标，
+settingsAnchorCoverage 与 storeContract 两个守卫都在报。
+
+- settingsAnchorModel：登记 directOutputSettings -> playback，并放在渲染顺序
+  里真正的位置上（scrobbleSettings 之后、TransitionSettingsSection 之前）
+- settingsAnchorCoverage：把新段落写进「渲染顺序 = 导航顺序」的对照表
+- storeContract 快照：补 folia_direct_output_enabled
+---
+ src/components/modal/settings/navigation/settingsAnchorModel.ts | 2 ++
+ test/unit/settings/settingsAnchorCoverage.test.ts               | 1 +
+ test/unit/stores/__snapshots__/storeContract.test.ts.snap       | 1 +
+ 3 files changed, 4 insertions(+)
+
+diff --git a/src/components/modal/settings/navigation/settingsAnchorModel.ts b/src/components/modal/settings/navigation/settingsAnchorModel.ts
+index 7f8b73d..cba2f74 100644
+--- a/src/components/modal/settings/navigation/settingsAnchorModel.ts
++++ b/src/components/modal/settings/navigation/settingsAnchorModel.ts
+@@ -34,6 +34,8 @@ export const SETTINGS_ANCHOR_DEFINITIONS = {
+     // PlaybackSettingsSubview (TransitionSettingsSection renders inside it)
+     queueSettings: { section: 'playback', labelKey: 'options.queueSettings' },
+     scrobbleSettings: { section: 'playback', labelKey: 'options.scrobbleSettings' },
++    // 直出模式：绕开 Web Audio 直接把 <audio> 接到输出。手机上 Web Audio 的渲染线程停摆时这是唯一的出路。
++    directOutputSettings: { section: 'playback', labelKey: 'options.directOutput' },
+     transitionSettings: { section: 'playback', labelKey: 'options.transitionSettings' },
+     replayGainSettings: { section: 'playback', labelKey: 'options.replayGainSettings' },
+     lyrics: { section: 'playback', labelKey: 'options.lyrics' },
+diff --git a/test/unit/settings/settingsAnchorCoverage.test.ts b/test/unit/settings/settingsAnchorCoverage.test.ts
+index ceeef86..db44cfb 100644
+--- a/test/unit/settings/settingsAnchorCoverage.test.ts
++++ b/test/unit/settings/settingsAnchorCoverage.test.ts
+@@ -49,6 +49,7 @@ describe('settings section anchors', () => {
+         const renderedOrder = [
+             ['queueSettings', 'anchorId="queueSettings"'],
+             ['scrobbleSettings', 'anchorId="scrobbleSettings"'],
++            ['directOutputSettings', 'anchorId="directOutputSettings"'],
+             ['transitionSettings', '<TransitionSettingsSection'],
+             ['replayGainSettings', 'anchorId="replayGainSettings"'],
+             ['lyrics', 'anchorId="lyrics"'],
+diff --git a/test/unit/stores/__snapshots__/storeContract.test.ts.snap b/test/unit/stores/__snapshots__/storeContract.test.ts.snap
+index bec873a..d940407 100644
+--- a/test/unit/stores/__snapshots__/storeContract.test.ts.snap
++++ b/test/unit/stores/__snapshots__/storeContract.test.ts.snap
+@@ -26,6 +26,7 @@ exports[`store contract > keeps every localStorage key the stores read or write
+   "folia_automix_model_reminder_muted",
+   "folia_cache_size",
+   "folia_crossfade_max_sec",
++  "folia_direct_output_enabled",
+   "folia_enable_media_cache",
+   "folia_enable_transcode_fallback",
+   "folia_last_seen_ponder_onboarding_version",

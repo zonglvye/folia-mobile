@@ -330,6 +330,10 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
+        // qishui-music-api 是给 Node 写的 CJS 包，里面 require('node:crypto')。打包时把它指到
+        // 我们那份用 @noble/curves 实现的 P-256 替身（见该文件的文件头说明），这样同一个包
+        // 在 WebView 里也能跑，且不需要 fork 上游代码。
+        'node:crypto': path.resolve(__dirname, './src/services/onlineMusic/qishui/qishuiNodeCrypto.ts'),
       }
     }
   };

@@ -1,0 +1,265 @@
+From 9a0f5c205581b42511224aaf79046da07a1fd63d Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 12:10:31 +0800
+Subject: [PATCH 32/90] =?UTF-8?q?=E4=BF=AE=E5=A4=8D=E8=93=9D=E7=89=99?=
+ =?UTF-8?q?=E8=B7=AF=E7=94=B1=E5=88=87=E6=8D=A2=E5=90=8E=20AudioContext=20?=
+ =?UTF-8?q?=E5=81=9C=E5=9C=A8=20interrupted=20=E6=97=B6=E3=80=8C=E6=8C=89?=
+ =?UTF-8?q?=E6=92=AD=E6=94=BE=E6=B2=A1=E5=8F=8D=E5=BA=94=E3=80=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+0.6.5 只给 resume() 加了期限（1.2s 后继续走 play()），但调用处判断的是
+`context.state === 'suspended'`。安卓上被系统收走（蓝牙路由切换、来电、别的应用抢焦点）的
+AudioContext 停在 'interrupted'，这个条件直接跳过 —— 一次 resume 都不发。后果不是「没声音」而是
+整条链路停住：节点图不推进，挂进图的 <audio> 被它一起拖着，play() 永不决议、currentTime 不动，
+界面上就是进度条不动 + 没声音，而且再点播放走的还是同一条死路。
+
+- 新增 services/playback/audioContextRecovery：needsAudioResume（只有 running 算在走）+ keepAudioContextAwake
+  （用户手势唤醒，以及状态掉出 running 后补一次 400ms 的重试；幂等，占 context.onstatechange）；
+- usePlaybackAudioBridge 建 context 时装上这两条通道；应用自己从不 suspend context
+  （全仓没有 .suspend( 调用），所以非 running 只可能是被系统收走，唤醒不会让暂停的曲子自己响；
+- usePlaybackTransportController：resume 判定改成「不是 running 就拉」；play() 超时且 context 不在 running
+  时补发一次；play() 起来了但 context 还不在 running（进度走没声音）时也补一次。
+
+验证：typecheck 通过；playback 26 个文件 416 条用例通过（新增 8 条）；单测全量 7862 通过，
+唯一失败仍是 modSignature 的 Windows 符号链接 EPERM。
+---
+ src/hooks/usePlaybackAudioBridge.ts           |  5 ++
+ src/hooks/usePlaybackTransportController.ts   | 17 +++-
+ src/services/playback/audioContextRecovery.ts | 58 ++++++++++++++
+ .../playback/audioContextRecovery.test.ts     | 78 +++++++++++++++++++
+ 4 files changed, 154 insertions(+), 4 deletions(-)
+ create mode 100644 src/services/playback/audioContextRecovery.ts
+ create mode 100644 test/unit/playback/audioContextRecovery.test.ts
+
+diff --git a/src/hooks/usePlaybackAudioBridge.ts b/src/hooks/usePlaybackAudioBridge.ts
+index fdc7b84..09d04c4 100644
+--- a/src/hooks/usePlaybackAudioBridge.ts
++++ b/src/hooks/usePlaybackAudioBridge.ts
+@@ -8,6 +8,7 @@ import { calculateReplayGain } from '../utils/replayGain';
+ import { applyAudioEqualizerSettings } from '../services/audioEqualizerGraph';
+ import { type AudioEffectChain } from '../services/audioEffects/effectChain';
+ import { buildPlaybackGraph } from '../services/playbackGraph';
++import { keepAudioContextAwake } from '../services/playback/audioContextRecovery';
+ import { cachePlayedTrackAssets } from '../services/playedTrackCache';
+ import { registerPlaybackFadeGraph } from '../services/playbackFade';
+ import { rampGain, type AutomixDeckChain } from '../services/automix/crossfadeGraph';
+@@ -140,6 +141,10 @@ export function usePlaybackAudioBridge({
+             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+             const ctx = new AudioContextClass();
+             audioContextRef.current = ctx;
++            // 被系统收走（蓝牙路由切换 / 来电 / 别的应用抢焦点）之后，安卓上这个 context 会停在
++            // 'interrupted'：节点图不推进，挂进来的 <audio> 也被拖着，表现为「按了播放没反应、进度条不动」。
++            // 手势唤醒与状态重试都在这里装（见 audioContextRecovery 的文件头）。
++            keepAudioContextAwake(ctx);
+ 
+             const analyser = ctx.createAnalyser();
+             analyser.fftSize = 2048;
+diff --git a/src/hooks/usePlaybackTransportController.ts b/src/hooks/usePlaybackTransportController.ts
+index 5a70c3c..ac6b98b 100644
+--- a/src/hooks/usePlaybackTransportController.ts
++++ b/src/hooks/usePlaybackTransportController.ts
+@@ -11,6 +11,7 @@ import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
+ import { getPlaybackFailureMessage, isPlaybackFailureStatus } from '../services/playbackRecovery/playbackFailurePolicy';
+ import type { OnlineRecoveryOptions, OnlineRecoveryResult, PlaybackFailure } from '../types/playbackFailure';
+ import { AUDIO_START_TIMEOUT_MS, recordAudioStart } from '../services/playback/audioStartupProbe';
++import { needsAudioResume } from '../services/playback/audioContextRecovery';
+ import { settleWithin } from '../utils/settleWithin';
+ 
+ // src/hooks/usePlaybackTransportController.ts
+@@ -123,7 +124,10 @@ export function usePlaybackTransportController({
+         // 第一行状态写入就在它们后面，卡住时界面上只表现为「按了没反应」。超时不取消原 promise。
+         const startedAt = performance.now();
+         const context = audioContextRef.current;
+-        if (context && context.state === 'suspended') {
++        // 只要不是 running 就拉。安卓上被系统收走（蓝牙路由切换 / 来电 / 别的应用抢焦点）的 context 停在
++        // 'interrupted' 而不是 'suspended'，只判断后者会一次 resume 都不发：节点图不推进，挂进来的 <audio>
++        // 也被拖着，play() 永不决议、进度条不动 —— 蓝牙耳机那个「按了没反应」正是这条路径。
++        if (context && needsAudioResume(context.state)) {
+             const resumed = await settleWithin(context.resume(), AUDIO_START_TIMEOUT_MS.resume);
+             recordAudioStart('resume', resumed.status, startedAt, context, audio);
+             if (resumed.status === 'rejected') {
+@@ -159,13 +163,16 @@ export function usePlaybackTransportController({
+             : null;
+         try {
+             // play() 按规范在真正开始播放时才决议，所以「一直不决议」就是音频链路没起来 —— 安卓壳上
+-            // 连蓝牙耳机时正是这个表现。给它一个期限只为两件事：把结局记进 HUD 的 audio 行，以及在
+-            // 它迟到地起来时把界面补正（否则这一页就永久停在「按了没反应」）。
++            // 连蓝牙耳机时正是这个表现。给它一个期限只为两件事：把结局记进 audioStartupProbe（诊断用），
++            // 以及在它迟到地起来时把界面补正（否则这一页就永久停在「按了没反应」）。
+             const playPromise = audio.play();
+             const played = await settleWithin(playPromise, AUDIO_START_TIMEOUT_MS.play);
+             recordAudioStart('play', played.status, startedAt, context, audio);
+             if (played.status === 'rejected') throw played.error;
+             if (played.status === 'timeout') {
++                // 元素没起来，而 context 也不在 running：多半是它拖着元素。补发一次（手势通道在
++                // audioContextRecovery 里，这里只管这一次）。
++                if (context && needsAudioResume(context.state)) void context.resume().catch(() => {});
+                 void playPromise.then(() => {
+                     if (!isCurrent()) {
+                         playbackFade.abortFadeIn(fadeToken);
+@@ -176,12 +183,14 @@ export function usePlaybackTransportController({
+                     setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? null : prev));
+                 }).catch(() => {
+                     // 迟到的拒绝：界面状态上面已经不再动它（元素自己的 onError 会走既有的失败路径），
+-                    // 只把结局改记成 rejected，HUD 才不会一直说「超时」。
++                    // 只把结局改记成 rejected，诊断记录才不是一直写着「超时」。
+                     recordAudioStart('play', 'rejected', startedAt, context, audio);
+                 });
+                 return;
+             }
+             if (!isCurrent()) { playbackFade.abortFadeIn(fadeToken); return; }
++            // 元素起来了但 context 还不在 running：进度会走而没有声音，这里再唤醒一次（跑完就返回，不影响正常路径）。
++            if (context && needsAudioResume(context.state)) void context.resume().catch(() => {});
+             playbackFade.runFadeIn(fadeToken);
+             setPlayerState(PlayerState.PLAYING);
+             // Playback is back, so a leftover playback-failure toast goes too: its two buttons are
+diff --git a/src/services/playback/audioContextRecovery.ts b/src/services/playback/audioContextRecovery.ts
+new file mode 100644
+index 0000000..2e01dba
+--- /dev/null
++++ b/src/services/playback/audioContextRecovery.ts
+@@ -0,0 +1,58 @@
++// src/services/playback/audioContextRecovery.ts
++// 把被系统收走的 AudioContext 拉回来的两条通道（Android WebView 上蓝牙耳机反复失效的那个问题）。
++//
++// 背景：蓝牙路由切换、来电、别的应用抢音频焦点之后，Chromium 会把 AudioContext 停在非 running 状态。
++// 安卓上是 'interrupted'，桌面上常见 'suspended'。这个状态的后果比「没声音」更糟：节点图不推进，
++// 而挂进图的 <audio> 元素被它一起拖着 —— play() 永不决议、currentTime 不走，界面上就是
++// 「按了播放毫无反应、进度条不动」。
++//
++// 0.6.5 只给 resume() 加了 1.2s 期限（避免它不决议时整段卡住），但调用处只判断 state === 'suspended'，
++// 停在 'interrupted' 时一次 resume 都不会发，那条兜底也就无从触发。这里补两条通道：
++// - 任何一次用户手势（指针按下 / 按键）都试一次。安卓上这是唯一稳定可靠的时机，而用户此刻正在点「播放」；
++// - 状态自己掉出 running（播放中被路由切换、被来电打断）时补一次迟到的重试，免得必须再点一下。
++//
++// 都尽量安静：running 时只是一次属性读取就返回，不改状态、不打日志、不排队。
++
++/** 只有 running 才是「音频真的在走」。'suspended' / 'interrupted'（安卓）/ 'closed' 都要重新拉。 */
++export const needsAudioResume = (state: AudioContextState | string): boolean => state !== 'running';
++
++/** 掉出 running 之后多久补一次重试：给系统把路由切完的时间。只补一次，不和平台抢。 */
++const STATE_RETRY_DELAY_MS = 400;
++
++/** 同一个 context 只装一次（StrictMode 下 setup 会跑两遍，setupAudioAnalyzer 自己也只建一次）。 */
++const watched = new WeakSet<AudioContext>();
++
++/**
++ * 给这个 context 装上「手势唤醒 + 状态重试」。幂等：同一个 context 重复调用无副作用。
++ *
++ * 会占用 context.onstatechange（当前没有别处用它；以后要用就改成一个订阅表）。
++ */
++export const keepAudioContextAwake = (context: AudioContext): void => {
++    if (typeof window === 'undefined') return;
++    if (watched.has(context)) return;
++    watched.add(context);
++
++    const awake = () => {
++        if (!needsAudioResume(context.state)) return;
++        void context.resume().catch(() => {
++            // 拉不起来就算了：下一次手势、或者元素自己的失败路径会再走一遍，这里不做重试风暴。
++        });
++    };
++
++    // 捕获阶段 + passive：不拦事件、不改任何事件的走向，这一层只在旁边看。
++    window.addEventListener('pointerdown', awake, { capture: true, passive: true });
++    window.addEventListener('keydown', awake, { capture: true, passive: true });
++
++    let retry: ReturnType<typeof setTimeout> | null = null;
++    context.onstatechange = () => {
++        if (retry !== null) {
++            clearTimeout(retry);
++            retry = null;
++        }
++        if (!needsAudioResume(context.state)) return;
++        retry = setTimeout(() => {
++            retry = null;
++            awake();
++        }, STATE_RETRY_DELAY_MS);
++    };
++};
+diff --git a/test/unit/playback/audioContextRecovery.test.ts b/test/unit/playback/audioContextRecovery.test.ts
+new file mode 100644
+index 0000000..dda284f
+--- /dev/null
++++ b/test/unit/playback/audioContextRecovery.test.ts
+@@ -0,0 +1,78 @@
++// @vitest-environment jsdom
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { keepAudioContextAwake, needsAudioResume } from '../../../src/services/playback/audioContextRecovery';
++
++// test/unit/playback/audioContextRecovery.test.ts
++// 蓝牙耳机反复失效的那个问题的守卫：安卓上被系统收走的 context 停在 'interrupted' 而不是 'suspended'，
++// 所以判定不能只认 'suspended'；唤醒要发生在用户手势上，且 running 时不能有任何多余动作。
++
++const fakeContext = (state: string) => {
++    const resume = vi.fn(async () => {
++        context.state = 'running';
++    });
++    const context = { state, resume } as unknown as AudioContext & { state: string };
++    return { context, resume };
++};
++
++const gesture = () => window.dispatchEvent(new Event('pointerdown', { bubbles: true }));
++
++describe('needsAudioResume', () => {
++    it('只认 running 是「在走」', () => {
++        expect(needsAudioResume('running')).toBe(false);
++    });
++
++    it('安卓被系统收走时的 interrupted 也要重新拉', () => {
++        expect(needsAudioResume('interrupted')).toBe(true);
++    });
++
++    it('suspended 与 closed 都要重新拉', () => {
++        expect(needsAudioResume('suspended')).toBe(true);
++        expect(needsAudioResume('closed')).toBe(true);
++    });
++});
++
++describe('keepAudioContextAwake', () => {
++    afterEach(() => {
++        vi.useRealTimers();
++    });
++
++    it('手势会把停在 interrupted 的 context 叫醒', () => {
++        const { context, resume } = fakeContext('interrupted');
++        keepAudioContextAwake(context);
++        gesture();
++        expect(resume).toHaveBeenCalledTimes(1);
++    });
++
++    it('running 时手势什么也不做', () => {
++        const { context, resume } = fakeContext('running');
++        keepAudioContextAwake(context);
++        gesture();
++        gesture();
++        expect(resume).not.toHaveBeenCalled();
++    });
++
++    it('同一个 context 装两次也只发一次 resume', () => {
++        const { context, resume } = fakeContext('suspended');
++        keepAudioContextAwake(context);
++        keepAudioContextAwake(context);
++        gesture();
++        expect(resume).toHaveBeenCalledTimes(1);
++    });
++
++    it('状态掉出 running 之后自己补一次重试，不必等下一次手势', () => {
++        vi.useFakeTimers();
++        const { context, resume } = fakeContext('running');
++        keepAudioContextAwake(context);
++        context.state = 'interrupted';
++        context.onstatechange!(new Event('statechange'));
++        expect(resume).not.toHaveBeenCalled();
++        vi.advanceTimersByTime(500);
++        expect(resume).toHaveBeenCalledTimes(1);
++    });
++
++    it('resume 失败不外抛（下次手势还会再试）', () => {
++        const context = { state: 'interrupted', resume: vi.fn(async () => { throw new Error('no route'); }) } as unknown as AudioContext;
++        keepAudioContextAwake(context);
++        expect(() => gesture()).not.toThrow();
++    });
++});

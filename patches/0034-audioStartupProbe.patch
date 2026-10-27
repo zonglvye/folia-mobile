@@ -1,0 +1,49 @@
+From 8681534f0097edd3af4fc313bc03f8ac9621028c Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 13:15:46 +0800
+Subject: [PATCH 34/90] =?UTF-8?q?=E6=92=AD=E6=94=BE=E5=8D=A1=E4=BD=8F?=
+ =?UTF-8?q?=E6=97=B6=E6=8A=8A=20audioStartupProbe=20=E7=9A=84=E7=BB=93?=
+ =?UTF-8?q?=E8=AE=BA=E6=98=BE=E7=A4=BA=E5=87=BA=E6=9D=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+蓝牙那个「按了播放没反应、进度条不动」在 0.6.6 上仍然复现，而左上角长按的浮层已经按用户要求删掉了——
+这台设备没有 adb，界面是唯一的取证通道。play() 超时那一刻原本什么都不显示（状态还是 PAUSED），
+现在把 audioStartupProbe 的结论直接写成一条状态提示：
+
+    play:timeout · suspended · 4000 ms · rs 4/2
+
+左到右分别是：卡在哪一步、context 当时的状态、等了多久、元素的 readyState/networkState。
+一句话就能分出「resume 没起来」「play 没起来」「context 被系统收走」这几种，不必再猜。
+
+只在超时那条分支写；已有的播放失败提示（带重试/跳过）不会被它盖掉。
+---
+ src/hooks/usePlaybackTransportController.ts | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/hooks/usePlaybackTransportController.ts b/src/hooks/usePlaybackTransportController.ts
+index ac6b98b..b28d30c 100644
+--- a/src/hooks/usePlaybackTransportController.ts
++++ b/src/hooks/usePlaybackTransportController.ts
+@@ -10,7 +10,7 @@ import { markProgrammaticPause, playbackFade, type PlaybackFadeSettleReason } fr
+ import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
+ import { getPlaybackFailureMessage, isPlaybackFailureStatus } from '../services/playbackRecovery/playbackFailurePolicy';
+ import type { OnlineRecoveryOptions, OnlineRecoveryResult, PlaybackFailure } from '../types/playbackFailure';
+-import { AUDIO_START_TIMEOUT_MS, recordAudioStart } from '../services/playback/audioStartupProbe';
++import { AUDIO_START_TIMEOUT_MS, describeAudioStart, readAudioStart, recordAudioStart } from '../services/playback/audioStartupProbe';
+ import { needsAudioResume } from '../services/playback/audioContextRecovery';
+ import { settleWithin } from '../utils/settleWithin';
+ 
+@@ -173,6 +173,11 @@ export function usePlaybackTransportController({
+                 // 元素没起来，而 context 也不在 running：多半是它拖着元素。补发一次（手势通道在
+                 // audioContextRecovery 里，这里只管这一次）。
+                 if (context && needsAudioResume(context.state)) void context.resume().catch(() => {});
++                // 卡在这一步时界面上原本什么也没有（状态还是 PAUSED，进度条不动），而这台设备没有 adb，
++                // 屏幕是唯一的取证通道。把 audioStartupProbe 的结论直接示出来：
++                // `play:timeout · suspended · 4000 ms · rs 4/2` 就说明了卡在哪一步、context 停在什么状态。
++                const report = describeAudioStart(readAudioStart());
++                if (report) setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text: report }));
+                 void playPromise.then(() => {
+                     if (!isCurrent()) {
+                         playbackFade.abortFadeIn(fadeToken);

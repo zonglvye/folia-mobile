@@ -1,0 +1,52 @@
+From e09d173086522f86ed9025bacbe8b43b3d87022a Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:26:52 +0800
+Subject: [PATCH 68/90] =?UTF-8?q?chore(kugou):=20=E7=99=BB=E5=BD=95?=
+ =?UTF-8?q?=E6=88=90=E5=8A=9F=E4=B8=8E=E8=B4=A6=E5=8F=B7=E7=8A=B6=E6=80=81?=
+ =?UTF-8?q?=E5=90=84=E7=95=99=E4=B8=80=E6=9D=A1=E4=B8=8D=E5=90=AB=E5=87=AD?=
+ =?UTF-8?q?=E6=8D=AE=E7=9A=84=E6=97=A5=E5=BF=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+登录成功后记 userid 与 hasToken（不记 token 本体），匿名模式查账号时记
+hasUser/hasNickname/hasAvatar。这样真机登录那一刻，壳日志里就能直接看到
+「登录成功 → 资料取回」这条链路，不必靠猜。
+---
+ src/services/onlineMusic/kugouProvider.ts | 9 ++++++++-
+ src/services/onlineMusic/kugouWebAuth.ts  | 2 ++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/src/services/onlineMusic/kugouProvider.ts b/src/services/onlineMusic/kugouProvider.ts
+index be33978..c750c36 100644
+--- a/src/services/onlineMusic/kugouProvider.ts
++++ b/src/services/onlineMusic/kugouProvider.ts
+@@ -1303,7 +1303,14 @@ export const kugouProvider: OnlineMusicProvider = {
+             // 匿名公开模式没有实例，但登录态可以有：手机号验证码登录把 token/userid 存在 provider 存储里，
+             // 这里直接用它们在页面里查账号资料（见 kugouWebAuth）。
+             if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
+-                return fetchKugouWebUser();
++                // 登录态与资料都在这条通道里，日志只记「有没有」和 id，不记 token。
++                const webUser = await fetchKugouWebUser();
++                console.info('[KugouProvider] web login status', {
++                    hasUser: Boolean(webUser),
++                    hasNickname: Boolean(webUser?.nickname),
++                    hasAvatar: Boolean(webUser?.avatarUrl),
++                });
++                return webUser;
+             }
+             const userId = readProviderSessionValue('kugou', 'userid');
+             const hasElectronTransport = typeof window !== 'undefined' && Boolean(window.electron?.kugouRequest);
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index e3f90ac..2ce3c01 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -325,6 +325,8 @@ export const loginKugouWithCode = async (mobile: string, code: string): Promise<
+     writeProviderSessionValue('kugou', TOKEN_KEY, session.token);
+     writeProviderSessionValue('kugou', USERID_KEY, session.userid);
+     writeProviderSessionValue('kugou', DFID_KEY, dfid);
++    // 只记结论，不记 token 本体（日志会进诊断报告）。
++    console.info('[KugouAuth] login ok', { userid: session.userid, hasToken: session.token.length > 0 });
+     return session;
+ };
+ 

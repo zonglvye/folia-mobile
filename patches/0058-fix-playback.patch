@@ -1,0 +1,520 @@
+From 0cca979f889f32d5d4347d6d31450ef6de877f28 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 13:10:26 +0800
+Subject: [PATCH 58/90] =?UTF-8?q?fix(playback):=20=E6=96=AD=E7=BD=91?=
+ =?UTF-8?q?=E6=81=A2=E5=A4=8D=E5=90=8E=E8=87=AA=E5=8A=A8=E7=BB=AD=E6=92=AD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 playbackRecovery/networkReconnect：网络类失败在网络恢复（online）后自动重试；点歌失败优先于播放中旧元素顺带报出的网络错误。
+- 离线时跳过 1s/3s 静默重试，失败提示即时出现，文案换成「网络已断开，恢复后会自动继续播放」。
+- 壳内音频改为整首 fetch 成 Blob 再交给 <audio>：媒体元素对 /api/media-proxy 的非零 Range 请求在 ArkWeb 上拿不到有效响应，会卡在已缓冲的 1 MiB 上。
+- shellFetchProxy 离线时直接抛失败，不再等壳里的中继超时。
+---
+ src/App.tsx                                   |  6 ++
+ .../createOnlineRecoveryController.ts         |  6 +-
+ .../app/playback/handleOnlineMediaFailure.ts  |  9 ++
+ .../app/playback/presentPlaybackFailure.ts    | 38 +++++++-
+ src/i18n/locales/en.ts                        |  1 +
+ src/i18n/locales/in.ts                        |  1 +
+ src/i18n/locales/zh-CN.ts                     |  1 +
+ src/services/onlinePlayback.ts                |  8 +-
+ .../playbackRecovery/networkReconnect.ts      | 92 +++++++++++++++++++
+ .../playbackRecovery/playbackFailurePolicy.ts | 14 +++
+ src/services/shellFetchProxy.ts               |  5 +
+ src/services/shellOnlineAudio.ts              | 57 ++++++++++--
+ src/types/playbackFailure.ts                  |  2 +-
+ 13 files changed, 223 insertions(+), 17 deletions(-)
+ create mode 100644 src/services/playbackRecovery/networkReconnect.ts
+
+diff --git a/src/App.tsx b/src/App.tsx
+index d7c02f4..bde5097 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -50,6 +50,7 @@ import { useLyricWordSegmentation } from './hooks/useLyricWordSegmentation';
+ import { useIcuFoliaSegmentation } from './hooks/useIcuFoliaSegmentation';
+ import { createOnlineRecoveryController } from './components/app/playback/createOnlineRecoveryController';
+ import { handleOnlineMediaFailure } from './components/app/playback/handleOnlineMediaFailure';
++import { installNetworkReconnect } from './services/playbackRecovery/networkReconnect';
+ import { persistPlaybackCache } from './components/app/playback/persistPlaybackCache';
+ import { useAppOverlaysModel } from './components/app/overlays/useAppOverlaysModel';
+ import { resolveNextUpTrack } from './components/app/overlays/now-playing-toast/resolveNextUpTrack';
+@@ -331,6 +332,11 @@ export default function App() {
+         (window as any).__folia_current_time = currentTime;
+     }, []);
+ 
++    // 断网重连：`online` 事件一到就重试因网络失败停下来的那次播放（见 playbackRecovery/networkReconnect）。
++    useEffect(() => {
++        installNetworkReconnect();
++    }, []);
++
+     // Progress Bar State
+     // Removed isDragging and sliderValue as they are handled by ProgressBar component
+ 
+diff --git a/src/components/app/playback/createOnlineRecoveryController.ts b/src/components/app/playback/createOnlineRecoveryController.ts
+index 8448e56..d80f734 100644
+--- a/src/components/app/playback/createOnlineRecoveryController.ts
++++ b/src/components/app/playback/createOnlineRecoveryController.ts
+@@ -1,6 +1,7 @@
+ import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from 'react';
+ import { applyOnlineAudioSourceMetadata, loadOnlineSongAudioSource } from '../../../services/onlinePlayback';
+ import { classifyPlaybackError } from '../../../services/playbackRecovery/onlinePlaybackFailure';
++import { consumeNetworkRestored } from '../../../services/playbackRecovery/networkReconnect';
+ import type { SongResult } from '../../../types';
+ import type { AudioQualityPreference } from '../../../types/onlineMusic';
+ import type { OnlineRecoveryOptions, OnlineRecoveryResult } from '../../../types/playbackFailure';
+@@ -115,7 +116,10 @@ export const createOnlineRecoveryController = ({
+ 
+         const normalizedFailedSrc = getOnlineRecoveryKey(failedSrc || audioElement.currentSrc || audioSrc || null);
+         // A manual retry (force) is the listener asking again, so it may refresh the same file once more.
+-        if (!force && normalizedFailedSrc && lastAudioRecoverySourceRef.current === normalizedFailedSrc) {
++        // 网络恢复后也让一次：断网期间那次刷新不能把恢复后的第一次刷新挡在外面。
++        const networkRestored = consumeNetworkRestored();
++        if (!force && networkRestored !== true
++            && normalizedFailedSrc && lastAudioRecoverySourceRef.current === normalizedFailedSrc) {
+             return { status: 'not-attempted' };
+         }
+ 
+diff --git a/src/components/app/playback/handleOnlineMediaFailure.ts b/src/components/app/playback/handleOnlineMediaFailure.ts
+index 3c838e7..ca76c18 100644
+--- a/src/components/app/playback/handleOnlineMediaFailure.ts
++++ b/src/components/app/playback/handleOnlineMediaFailure.ts
+@@ -6,6 +6,7 @@ import type {
+     PlaybackFailureSkipOptions,
+ } from '../../../types/playbackFailure';
+ import { distrustCachedSongAudio } from '../../../services/playbackRecovery/mediaCacheGuard';
++import { isNetworkOffline } from '../../../services/playbackRecovery/networkReconnect';
+ import { classifyMediaPlaybackFailure } from '../../../services/playbackRecovery/onlinePlaybackFailure';
+ import { getOnlineProviderIdForSong, getPlaybackSongKey } from '../../../utils/appPlaybackGuards';
+ 
+@@ -61,9 +62,17 @@ export const handleOnlineMediaFailure = async ({
+             });
+     };
+ 
++    // 明确离线时不要去刷音源：壳里的中继请求会等到 20s 超时再退回系统栈、再来 30s，最后仍然失败，
++    // 用户只会看到更久的卡顿。直接按网络失败展示，并把这次重试交给断网重连（网络恢复后自动重跑）。
++    if (isNetworkOffline()) {
++        skipAfterPlaybackFailure(mediaFailure, { failedSongKey, failedGeneration, retry });
++        return;
++    }
++
+     const result = await recoverOnlinePlaybackSource({ failedSrc, resumeAt, autoplay, bypassMediaCache: isBlob });
+     if (result.status === 'recovered' || result.status === 'stale') return;
+ 
++
+     // not-attempted：同一个媒体文件刷新过仍然出错，或不适用刷新，只能按媒体错误码给出原因。
+     const failure = result.status === 'failed' ? result.failure : mediaFailure;
+     skipAfterPlaybackFailure(failure, { failedSongKey, failedGeneration, retry });
+diff --git a/src/components/app/playback/presentPlaybackFailure.ts b/src/components/app/playback/presentPlaybackFailure.ts
+index dcd7d36..d8e6c08 100644
+--- a/src/components/app/playback/presentPlaybackFailure.ts
++++ b/src/components/app/playback/presentPlaybackFailure.ts
+@@ -2,7 +2,16 @@ import { PlayerState, type SongResult, type StatusMessage } from '../../../types
+ import type { SkipPromptMessageKey } from '../../../types/appPlayback';
+ import type { PlaybackFailure, PlaybackFailureContext } from '../../../types/playbackFailure';
+ import type { StatusSetter } from '../../../stores/useStatusMessageStore';
+-import { buildPlaybackFailureStatus, resolvePlaybackFailurePolicy } from '../../../services/playbackRecovery/playbackFailurePolicy';
++import {
++    buildPlaybackFailureStatus,
++    isReconnectableFailure,
++    resolvePlaybackFailurePolicy,
++} from '../../../services/playbackRecovery/playbackFailurePolicy';
++import {
++    clearNetworkRetry,
++    isNetworkOffline,
++    registerNetworkRetry,
++} from '../../../services/playbackRecovery/networkReconnect';
+ import type { PlaybackFailedNotice } from '../../../services/hostExtensionHooks';
+ 
+ // src/components/app/playback/presentPlaybackFailure.ts
+@@ -43,7 +52,11 @@ export const presentPlaybackFailure = (input: PlaybackFailurePresentation, deps:
+     const { failure, song, context, isCurrent, skipCount, retry, skip } = input;
+     if (!isCurrent()) return;
+ 
+-    const policy = resolvePlaybackFailurePolicy(failure, context, { autoSkipUnplayable: deps.getAutoSkipUnplayable() });
++    const policy = resolvePlaybackFailurePolicy(failure, context, {
++        autoSkipUnplayable: deps.getAutoSkipUnplayable(),
++        // 离线时换一句「恢复后会自动继续」，与下面的自动重试对应；网络类以外的失败不受影响。
++        offline: isNetworkOffline(),
++    });
+     deps.setIsLyricsLoading(false);
+ 
+     // 该原因原本的处理：按策略停播，再给出它自己的消息与按钮。不倒计时时直接走这里，倒计时被取消时也退回这里。
+@@ -56,8 +69,10 @@ export const presentPlaybackFailure = (input: PlaybackFailurePresentation, deps:
+ 
+         // 按钮可能在用户切歌之后才被点：先确认仍是这次请求，再清掉消息、执行动作。
+         // 陈旧时不执行动作，但仍收起这条常驻消息（只收起自己那条，期间换上的新消息不动），否则它关不掉。
++        // 用户一旦点了消息上的任何按钮，就说明不打算等网络自动重试了，登记一并取消。
+         let built: StatusMessage | null = null;
+         const wrap = (action?: () => void) => action && (() => {
++            clearNetworkRetry();
+             if (!isCurrent()) {
+                 deps.setStatusMsg(current => (current === built ? null : current));
+                 return;
+@@ -66,12 +81,29 @@ export const presentPlaybackFailure = (input: PlaybackFailurePresentation, deps:
+             action();
+         });
+ 
++        const retryAction = wrap(retry);
+         built = buildPlaybackFailureStatus(policy, deps.t, {
+-            retry: wrap(retry),
++            retry: retryAction,
+             skip: wrap(skip),
+             dismiss: () => deps.setStatusMsg(null),
+         });
+         deps.setStatusMsg(built);
++
++        // 网络类失败：网络一恢复就自动重试，不用用户点。其他原因（登录、会员、地区…）重试也不会变好，
++        // 顺手取消上一条登记，免得恢复后替用户点了一次已经过时的重试。
++        if (retryAction && policy.actions.includes('retry') && isReconnectableFailure(failure)) {
++            registerNetworkRetry({
++                run: () => {
++                    clearNetworkRetry();
++                    retryAction();
++                },
++                isCurrent,
++                // 点歌失败是用户刚表达过的意图，优先于播放中旧元素顺带报出的网络错误。
++                priority: context === 'play' ? 2 : 1,
++            });
++        } else {
++            clearNetworkRetry();
++        }
+     };
+ 
+     // 只有 taken-down 会走到倒计时；次数用尽或没有下一首时落到下面的普通消息。
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index c82b94a..14da1f7 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -378,6 +378,7 @@ export default {
+     "songTemporarilyUnavailableMaybeMembership": "Can't play this song right now. A membership may be required for the full track.",
+     "songTemporarilyUnavailableMaybeRegion": "Can't play this song right now. It may be restricted in your region.",
+     "songNetworkFailed": "Couldn't connect to load this song. Check your network and try again.",
++    "songWaitingForNetwork": "You're offline. Playback will resume when the network is back.",
+     "songRequestTimedOut": "Loading this song timed out. Please try again.",
+     "songRetrying": "Connection failed. Retrying…",
+     "songServiceUnavailable": "The music service is unavailable right now. Please try again later.",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index 09634dd..556a562 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -376,6 +376,7 @@ export default {
+     "songTemporarilyUnavailableMaybeMembership": "Lagu ini belum dapat diputar saat ini. Pemutaran penuh mungkin memerlukan keanggotaan.",
+     "songTemporarilyUnavailableMaybeRegion": "Lagu ini belum dapat diputar saat ini. Lagu ini mungkin dibatasi di wilayah Anda.",
+     "songNetworkFailed": "Gagal terhubung untuk memuat lagu ini. Periksa jaringan Anda lalu coba lagi.",
++    "songWaitingForNetwork": "Anda sedang offline. Pemutaran akan dilanjutkan saat jaringan kembali.",
+     "songRequestTimedOut": "Waktu memuat lagu ini habis. Silakan coba lagi.",
+     "songRetrying": "Koneksi gagal. Mencoba lagi…",
+     "songServiceUnavailable": "Layanan musik sedang tidak tersedia. Silakan coba lagi nanti.",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index 0ec2594..6a2c37a 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -378,6 +378,7 @@ export default {
+     "songTemporarilyUnavailableMaybeMembership": "暂时无法播放这首歌，完整播放可能需要会员",
+     "songTemporarilyUnavailableMaybeRegion": "暂时无法播放这首歌，可能受所在地区限制",
+     "songNetworkFailed": "连接失败，无法获取这首歌，请检查网络后重试",
++    "songWaitingForNetwork": "网络已断开，恢复后会自动继续播放",
+     "songRequestTimedOut": "获取歌曲超时，请稍后重试",
+     "songRetrying": "连接失败，正在重试…",
+     "songServiceUnavailable": "音源服务暂时不可用，请稍后重试",
+diff --git a/src/services/onlinePlayback.ts b/src/services/onlinePlayback.ts
+index ee7e616..5136186 100644
+--- a/src/services/onlinePlayback.ts
++++ b/src/services/onlinePlayback.ts
+@@ -21,6 +21,7 @@ import { classifyMissingAudioUrl, classifyPlaybackError } from './playbackRecove
+ import { resolvePlaybackFailurePolicy, sleepForPlaybackRetry } from './playbackRecovery/playbackFailurePolicy';
+ import { getProviderPlaybackCooldown, noteProviderFailure } from './playbackRecovery/providerPlaybackCooldown';
+ import { isCachedSongAudioDistrusted } from './playbackRecovery/mediaCacheGuard';
++import { isNetworkOffline } from './playbackRecovery/networkReconnect';
+ import { materializeShellAudioSource } from './shellOnlineAudio';
+ 
+ export interface LoadOnlineAudioSourceOptions {
+@@ -67,8 +68,9 @@ export async function loadOnlineSongAudioSource(
+         }
+     }
+ 
+-    if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt)) {
++    if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt) && !isNetworkOffline()) {
+         // 鸿蒙壳里远程地址要先换成同源 blob（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
++        // 离线时跳过这条：预取到的签名地址这时也取不回来，交给下面的 provider 失败路径（文案与自动重连都按网络处理）。
+         const playable = await materializeShellAudioSource(prefetched.audioUrl);
+         return {
+             kind: 'ok',
+@@ -128,7 +130,9 @@ export async function loadOnlineSongAudioSource(
+ 
+         noteProviderFailure(failure);
+ 
+-        const delays = resolvePlaybackFailurePolicy(failure, 'play').autoRetryDelaysMs;
++        // 明确离线时不做这几次静默重试：请求一定发不出去，只会把失败提示推迟 4 秒。
++        // 网络恢复后的重试交给 playbackRecovery/networkReconnect。
++        const delays = isNetworkOffline() ? [] : resolvePlaybackFailurePolicy(failure, 'play').autoRetryDelaysMs;
+         const retry = options.retry;
+         if (retry && attempt < delays.length && retry.isCurrent()) {
+             retry.onRetrying?.(failure, attempt + 1);
+diff --git a/src/services/playbackRecovery/networkReconnect.ts b/src/services/playbackRecovery/networkReconnect.ts
+new file mode 100644
+index 0000000..984faab
+--- /dev/null
++++ b/src/services/playbackRecovery/networkReconnect.ts
+@@ -0,0 +1,92 @@
++// src/services/playbackRecovery/networkReconnect.ts
++// 断网重连：网络恢复（window 的 `online` 事件）后，自动重试因此停下来的那次播放。
++//
++// 为什么需要：网络断开时 `<audio>` 会拿到 MEDIA_ERR_NETWORK，或音源请求直接失败，播放器按策略停播并给出
++// 「重试 / 跳过」。此前网络恢复后没有任何东西会再试一次，用户只能自己点「重试」——真机实测断网再恢复，
++// 播放会一直停在那里。这里把「恢复后要做什么」登记下来，`online` 一到就执行。
++//
++// 只处理**网络类**失败（network / timeout）：登录、会员、地区这些重试不会变好，交给用户决定。
++// `isCurrent` 由调用方给，歌曲已切换或重新点播时旧任务什么都不做。
++
++export type NetworkRetry = {
++    /** 执行重试；由调用方包好（会先收起失败消息）。 */
++    run: () => void;
++    /** 这次失败是否仍属于当前播放：歌曲没换、也重新点播过。 */
++    isCurrent: () => boolean;
++    /**
++     * 优先级：点歌失败（用户刚点了下一首/某首歌）高于播放中媒体元素失败。
++     * 断网时点「下一首」，旧元素也会顺带报 MEDIA_ERR_NETWORK；没有这个优先级，
++     * 后登记的旧元素会盖掉用户真正想要的那次重试，恢复后播回上一首。
++     */
++    priority?: number;
++};
++
++/** 网络恢复后等一小会儿再重试：刚拿到地址时 DNS/连接常还没就绪。 */
++const ONLINE_RETRY_DELAY_MS = 800;
++
++let pending: NetworkRetry | null = null;
++let timer: ReturnType<typeof setTimeout> | null = null;
++let installed = false;
++let restoredSinceLastCheck = false;
++
++/** 当前是否明确离线。`navigator.onLine` 只在平台给出确定答案时才是 false。 */
++export const isNetworkOffline = (): boolean => (
++    typeof navigator !== 'undefined' && navigator.onLine === false
++);
++
++/** 登记一次「网络恢复后自动重试」。同一时刻只留最后一次失败，低优先级不能盖掉高优先级。 */
++export const registerNetworkRetry = (retry: NetworkRetry): void => {
++    const nextPriority = retry.priority ?? 1;
++    const pendingPriority = pending?.priority ?? 1;
++    if (pending && nextPriority < pendingPriority) return;
++    pending = retry;
++};
++
++/** 取消登记（用户重试 / 跳过 / 换歌 / 换成非网络类失败时调用）。 */
++export const clearNetworkRetry = (): void => {
++    pending = null;
++    if (timer !== null) {
++        clearTimeout(timer);
++        timer = null;
++    }
++};
++
++/**
++ * 自上次调用以来网络是否恢复过。
++ *
++ * 音源刷新的去重（同一媒体文件只刷新一次）在网络恢复后要让一次：断网期间刷新过的那次不能把恢复后的
++ * 第一次刷新也挡掉。调用即消费。
++ */
++export const consumeNetworkRestored = (): boolean => {
++    if (!restoredSinceLastCheck) return false;
++    restoredSinceLastCheck = false;
++    return true;
++};
++
++/** 装上 `online` / `offline` 监听；幂等，应用启动时调一次。 */
++export const installNetworkReconnect = (): void => {
++    if (installed || typeof window === 'undefined') return;
++    installed = true;
++
++    window.addEventListener('online', () => {
++        restoredSinceLastCheck = true;
++        const retry = pending;
++        if (!retry) return;
++        if (timer !== null) clearTimeout(timer);
++        timer = setTimeout(() => {
++            timer = null;
++            // 期间用户点了重试/跳过，或换了一首歌：登记已不是这一条，什么都不做。
++            if (pending !== retry) return;
++            pending = null;
++            if (retry.isCurrent()) retry.run();
++        }, ONLINE_RETRY_DELAY_MS);
++    });
++
++    window.addEventListener('offline', () => {
++        // 离线时不重试，等下一次 online；已排的时间也不用留着。
++        if (timer !== null) {
++            clearTimeout(timer);
++            timer = null;
++        }
++    });
++};
+diff --git a/src/services/playbackRecovery/playbackFailurePolicy.ts b/src/services/playbackRecovery/playbackFailurePolicy.ts
+index d63443b..29b3ba4 100644
+--- a/src/services/playbackRecovery/playbackFailurePolicy.ts
++++ b/src/services/playbackRecovery/playbackFailurePolicy.ts
+@@ -19,8 +19,15 @@ const NO_RETRY: readonly number[] = [];
+ export interface PlaybackFailurePolicyOptions {
+     /** 「无法播放时自动跳过」：受限类与原因不明的失败也倒计时跳歌。默认关。 */
+     autoSkipUnplayable?: boolean;
++    /** 当前明确离线：网络类失败换用「网络恢复后自动继续」的文案。 */
++    offline?: boolean;
+ }
+ 
++/** 断网重连负责的原因：网络/超时，恢复后重试确实可能成功。 */
++export const isReconnectableFailure = (failure: PlaybackFailure): boolean => (
++    failure.reason === 'network' || failure.reason === 'timeout'
++);
++
+ /** 「无法播放时自动跳过」打开时倒计时用的文案；不说原因，只说放不了、几秒后跳过。 */
+ export const UNPLAYABLE_SKIP_PROMPT_KEY = 'status.songUnplayableSkipPrompt' as const;
+ 
+@@ -140,6 +147,12 @@ export const resolvePlaybackFailurePolicy = (
+         policy = { ...policy, actions: ['skip'] };
+     }
+ 
++    // 明确离线：告诉用户网络恢复后会自动继续（见 playbackRecovery/networkReconnect），
++    // 而不是让他去检查网络再手动点一次。
++    if (options.offline && failure.reason === 'network') {
++        policy = { ...policy, messageKey: 'status.songWaitingForNetwork' };
++    }
++
+     if (options.autoSkipUnplayable && policy.autoSkip === 'none' && isUnplayableAutoSkipCandidate(failure)) {
+         policy = { ...policy, autoSkip: 'countdown', countdownKey: UNPLAYABLE_SKIP_PROMPT_KEY };
+     }
+@@ -175,6 +188,7 @@ const MESSAGE_KEY_REGISTRY: Record<PlaybackFailureMessageKey, true> = {
+     'status.songRegionRestricted': true,
+     'status.songUnavailable': true,
+     'status.songNetworkFailed': true,
++    'status.songWaitingForNetwork': true,
+     'status.songRequestTimedOut': true,
+     'status.songServiceUnavailable': true,
+     'status.songServiceNotConfigured': true,
+diff --git a/src/services/shellFetchProxy.ts b/src/services/shellFetchProxy.ts
+index 4c40b27..400809c 100644
+--- a/src/services/shellFetchProxy.ts
++++ b/src/services/shellFetchProxy.ts
+@@ -100,6 +100,11 @@ export const installShellFetchProxy = (): boolean => {
+      * 同步方法在这个桥上是确定可用的，所以把它拆成"发起 + 取结果"两步。
+      */
+     const runProxy = async (absolute: string): Promise<ShellProxyResult> => {
++        // 明确离线时不要往壳里送：壳会先等中继页 20 秒超时、再退回系统网络栈 30 秒，
++        // 用户要等将近一分钟才看到失败。这里直接按浏览器联网失败抛，上层按 network 处理。
++        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
++            throw new TypeError('Failed to fetch');
++        }
+         const id = proxyStart(absolute);
+         const deadline = Date.now() + POLL_TIMEOUT_MS;
+         while (Date.now() < deadline) {
+diff --git a/src/services/shellOnlineAudio.ts b/src/services/shellOnlineAudio.ts
+index 8a8140b..4bc5ee6 100644
+--- a/src/services/shellOnlineAudio.ts
++++ b/src/services/shellOnlineAudio.ts
+@@ -8,9 +8,10 @@
+ // 表现为「有进度条但没有声音」。
+ //
+ // 两条通道，优先第一条：
+-//   1. 壳内存直出（`mediaPrepare` / `mediaStatus` → `/api/media-proxy?token=…`）：
+-//      壳用系统网络栈把整首取成 ArrayBuffer，拦截器同步交回给 ArkWeb —— 二进制不过 JS 字符串，
+-//      页面侧零解码开销。这是快的那条。
++//   1. 壳内存 + 页面取成 Blob（`mediaPrepare` / `mediaStatus` → `/api/media-proxy?token=…`）：
++//      壳用系统网络栈把整首取成 ArrayBuffer，页面整首 fetch 回来再 `createObjectURL`。二进制不过
++//      JS 字符串、没有 base64 解码开销。**不能把这个地址直接给 `<audio>`**：媒体元素会发非零起始的
++//      Range，ArkWeb 的拦截器对那种 206 在真机上不生效（元素卡在已缓冲的 1MB 上）。
+ //   2. 回退：按 1 MiB 分块经 `/api/lyric-proxy` 取回、拼成 Blob。慢（一次 1.4MB base64 字符串×N），
+ //      只在壳不支持新桥方法时才会走到。
+ //
+@@ -55,10 +56,9 @@ export const needsShellAudioRelay = (url: string | null | undefined): boolean =>
+ const sleep = (ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); });
+ 
+ /**
+- * 快通道：让壳把整首取进内存，然后返回同源地址。
+- * 返回 null 表示这条路不可用（壳没有新桥方法 / 取失败 / 超时），调用方走回退。
++ * 等壳把整首取进内存，返回 token；不可用（壳没有新桥方法 / 取失败 / 超时）返回 null。
+  */
+-const shellMemorySource = async (url: string, bridge: ShellMediaBridge): Promise<string | null> => {
++const prepareToken = async (url: string, bridge: ShellMediaBridge): Promise<number | null> => {
+     const prepare = bridge.mediaPrepare;
+     const status = bridge.mediaStatus;
+     if (!prepare || !status) return null;
+@@ -79,7 +79,7 @@ const shellMemorySource = async (url: string, bridge: ShellMediaBridge): Promise
+     const deadline = Date.now() + BRIDGE_WAIT_MS;
+     while (Date.now() < deadline) {
+         const state = status.call(bridge, token);
+-        if (state === 'ready') return `${MEDIA_PATH}?token=${token}`;
++        if (state === 'ready') return token;
+         if (state === 'failed' || state === 'missing') {
+             tokenByRemoteUrl.delete(url);
+             return null;
+@@ -90,6 +90,39 @@ const shellMemorySource = async (url: string, bridge: ShellMediaBridge): Promise
+     return null;
+ };
+ 
++/**
++ * 把壳内存里的音频**在页面里取成 Blob**，而不是把 `/api/media-proxy` 地址直接交给 `<audio>`。
++ *
++ * 为什么不直接给元素：媒体元素会按 ~1MB 发 `Range: bytes=1048576-` 这类请求，而 ArkWeb 的
++ * `onInterceptRequest` 对「非零起始的 206」在真机上不生效 —— 元素反复重发同一个 Range，播到
++ * 已缓冲的 26 秒就 MEDIA_ERR_NETWORK。整首一次 GET 是好的（真机实测 14.8MB 正常取回），
++ * 所以在这里整首取回、拼成 blob: 地址。blob 可 seek、离线可放，也不再经过媒体元素的 Range。
++ */
++const shellBlobSource = async (
++    url: string,
++    bridge: ShellMediaBridge,
++): Promise<{ audioSrc: string; blobUrl: string } | null> => {
++    const cached = blobUrlByRemoteUrl.get(url);
++    if (cached) return { audioSrc: cached, blobUrl: cached };
++
++    const token = await prepareToken(url, bridge);
++    if (token === null) return null;
++
++    const response = await fetch(`${MEDIA_PATH}?token=${token}`, { cache: 'no-store' });
++    if (!response.ok) {
++        console.warn(`[ShellAudio] media blob fetch failed: HTTP ${response.status}`);
++        return null;
++    }
++    const raw = await response.blob();
++    if (raw.size === 0) return null;
++    const blob = /^audio\//i.test(raw.type) ? raw : new Blob([raw], { type: 'audio/mpeg' });
++    const blobUrl = URL.createObjectURL(blob);
++    rememberBlobUrl(url, blobUrl);
++    retireBlobUrl(blobUrl);
++    console.log(`[ShellAudio] relayed ${Math.round(blob.size / 1024)} KiB (blob path)`);
++    return { audioSrc: blobUrl, blobUrl };
++};
++
+ const rememberBlobUrl = (remoteUrl: string, blobUrl: string): void => {
+     blobUrlByRemoteUrl.set(remoteUrl, blobUrl);
+     if (blobUrlByRemoteUrl.size <= BLOB_URL_CACHE_LIMIT) return;
+@@ -147,9 +180,13 @@ export const materializeShellAudioSource = async (
+ 
+     const bridge = shellBridge();
+     if (bridge) {
+-        const viaMemory = await shellMemorySource(url, bridge);
+-        if (viaMemory) {
+-            return { audioSrc: viaMemory };
++        try {
++            const viaBlob = await shellBlobSource(url, bridge);
++            if (viaBlob) {
++                return { audioSrc: viaBlob.audioSrc, blobUrl: viaBlob.blobUrl };
++            }
++        } catch (error) {
++            console.warn('[ShellAudio] blob path failed, trying the chunked proxy', error);
+         }
+     }
+ 
+diff --git a/src/types/playbackFailure.ts b/src/types/playbackFailure.ts
+index 419efb2..710548b 100644
+--- a/src/types/playbackFailure.ts
++++ b/src/types/playbackFailure.ts
+@@ -44,7 +44,7 @@ export type PlaybackFailureMessageKey =
+     | 'status.songLoginRequired' | 'status.loginExpired'
+     | 'status.songMembershipRequired' | 'status.songPurchaseRequired' | 'status.songEntitlementRequired'
+     | 'status.songPreviewOnly' | 'status.songRegionRestricted' | 'status.songUnavailable'
+-    | 'status.songNetworkFailed' | 'status.songRequestTimedOut'
++    | 'status.songNetworkFailed' | 'status.songRequestTimedOut' | 'status.songWaitingForNetwork'
+     | 'status.songServiceUnavailable' | 'status.songServiceNotConfigured'
+     | 'status.songRateLimited' | 'status.songRateLimitedNoWait'
+     | 'status.songTemporarilyUnavailable' | 'status.songTemporarilyUnavailableSignInHint'

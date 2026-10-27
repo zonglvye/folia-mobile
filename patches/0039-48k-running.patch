@@ -1,0 +1,280 @@
+From 6d8c1e9a32173c6f5dc90b3820e30782459a9944 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 22:04:27 +0800
+Subject: [PATCH 39/90] =?UTF-8?q?=E6=92=A4=E6=8E=89=E8=87=AA=E5=B7=B1?=
+ =?UTF-8?q?=E5=BC=95=E8=BF=9B=E7=9A=84=2048k=20=E5=8F=96=E6=A0=B7=E7=8E=87?=
+ =?UTF-8?q?=EF=BC=8C=E5=B9=B6=E5=9C=A8=E3=80=8C=E5=81=87=20running?=
+ =?UTF-8?q?=E3=80=8D=E6=97=B6=E8=87=AA=E5=8A=A8=E6=95=91=E4=B8=80=E6=AC=A1?=
+ =?UTF-8?q?=E9=9F=B3=E9=A2=91=E6=B8=B2=E6=9F=93?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机读数（`el:stalled · rs 4/1 · p 0 · +0.00s`）：数据齐（readyState 4）、网络已停（1）、没人暂停（0）、
+而 1.5 秒里 currentTime 一米没走。三者同时成立只能指向一件事：**音频渲染线程没在拉这个元素**，
+context 报的 running 是假的 —— `createMediaElementSource` 把元素交给了这份图，图不推进，元素就冻住，
+而且那条元素回不到直出。
+
+- 撤回 0.6.8 给安卓加的 `sampleRate: 48000` + `latencyHint: 'playback'`：那是当时错误地怪蓝牙引进的，
+  也是这条路径上唯一由自己塞进去的变量。现在回到 `new AudioContext()`，取样率交给平台按设备自己谈。
+- 新增 audioContextRecovery 的两件事：`isAudioContextZombie`（readyState ≥ 2 且没暂停 —— 从元素身上认，
+  不信 state）与 `bounceAudioContext`（suspend → resume，让 Chromium 关掉再重开输出流）。
+- 侦测到这一状态时自动救一次，1.5s 后再测元素时钟：救活就收掉提示，救不活就把提示改成 `<原行> · bounce failed`，
+  两种情况都写进会话日志（`[Playback] context revival: …`）。
+---
+ src/hooks/usePlaybackAudioBridge.ts           |  7 +-
+ src/hooks/usePlaybackTransportController.ts   | 23 ++++-
+ src/services/playback/audioContextRecovery.ts | 49 ++++++-----
+ .../playback/audioContextRecovery.test.ts     | 85 ++++++++++---------
+ 4 files changed, 95 insertions(+), 69 deletions(-)
+
+diff --git a/src/hooks/usePlaybackAudioBridge.ts b/src/hooks/usePlaybackAudioBridge.ts
+index 1bc35c9..7997fe8 100644
+--- a/src/hooks/usePlaybackAudioBridge.ts
++++ b/src/hooks/usePlaybackAudioBridge.ts
+@@ -8,7 +8,7 @@ import { calculateReplayGain } from '../utils/replayGain';
+ import { applyAudioEqualizerSettings } from '../services/audioEqualizerGraph';
+ import { type AudioEffectChain } from '../services/audioEffects/effectChain';
+ import { buildPlaybackGraph } from '../services/playbackGraph';
+-import { createPlaybackAudioContext, keepAudioContextAwake } from '../services/playback/audioContextRecovery';
++import { keepAudioContextAwake } from '../services/playback/audioContextRecovery';
+ import { cachePlayedTrackAssets } from '../services/playedTrackCache';
+ import { registerPlaybackFadeGraph } from '../services/playbackFade';
+ import { rampGain, type AutomixDeckChain } from '../services/automix/crossfadeGraph';
+@@ -139,7 +139,10 @@ export function usePlaybackAudioBridge({
+         if (!audioRef.current || audioContextRef.current) return;
+         try {
+             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+-            const ctx = createPlaybackAudioContext(AudioContextClass);
++            // 不传任何参数：0.6.8 那版曾给安卓显式开 48k（当时错误地怪蓝牙），而真机后来抓到的
++            // 「假 running」（`rs 4/1 · p 0 · +0.00s`）里，它是唯一被自己引进这条路径的变量，已撤回。
++            // 取样率交给平台按当前输出设备自己谈。
++            const ctx = new AudioContextClass();
+             audioContextRef.current = ctx;
+             // 被系统收走（蓝牙路由切换 / 来电 / 别的应用抢焦点）之后，安卓上这个 context 会停在
+             // 'interrupted'：节点图不推进，挂进来的 <audio> 也被拖着，表现为「按了播放没反应、进度条不动」。
+diff --git a/src/hooks/usePlaybackTransportController.ts b/src/hooks/usePlaybackTransportController.ts
+index 727e28a..68439cc 100644
+--- a/src/hooks/usePlaybackTransportController.ts
++++ b/src/hooks/usePlaybackTransportController.ts
+@@ -11,8 +11,8 @@ import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
+ import { getPlaybackFailureMessage, isPlaybackFailureStatus } from '../services/playbackRecovery/playbackFailurePolicy';
+ import type { OnlineRecoveryOptions, OnlineRecoveryResult, PlaybackFailure } from '../types/playbackFailure';
+ import { AUDIO_START_TIMEOUT_MS, describeAudioStart, readAudioStart, recordAudioStart } from '../services/playback/audioStartupProbe';
+-import { PLAYBACK_START_WATCHDOG_MS, describePlaybackStart, judgePlaybackStart } from '../services/playback/playbackStartWatchdog';
+-import { needsAudioResume } from '../services/playback/audioContextRecovery';
++import { PLAYBACK_START_WATCHDOG_MS, PLAYBACK_POSITION_TOLERANCE_SEC, describePlaybackStart, judgePlaybackStart } from '../services/playback/playbackStartWatchdog';
++import { bounceAudioContext, isAudioContextZombie, needsAudioResume } from '../services/playback/audioContextRecovery';
+ import { settleWithin } from '../utils/settleWithin';
+ 
+ // src/hooks/usePlaybackTransportController.ts
+@@ -272,6 +272,25 @@ export function usePlaybackTransportController({
+                 // 同一行也写进会话日志（设置 → 开发者 → 运行日志），这样截日志也能取证，不必只靠提示。
+                 console.warn(`[Playback] start watchdog: ${text} (src ${(element?.currentSrc || element?.getAttribute('src') || 'none').slice(0, 64)})`);
+                 setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text }));
++                // 「假 running」：数据齐、没人暂停、时钟却不动 —— 音频渲染线程没在拉这个元素。
++                // 救一次（suspend → resume 会让 Chromium 关掉再重开输出流），再测一次时钟；
++                // 救活了就把提示收掉，救不活就把结论改成带后续标记的那一版。
++                if (verdict.kind === 'element-stalled' && isAudioContextZombie(element)) {
++                    void bounceAudioContext(context).then(() => {
++                        const resample = setTimeout(() => {
++                            startWatchdogTimer.current = null;
++                            if (!isCurrent()) return;
++                            const revived = (audioRef.current?.currentTime ?? 0) > positionAtStart + PLAYBACK_POSITION_TOLERANCE_SEC;
++                            console.warn(`[Playback] context bounce: ${revived ? 'revived' : 'still frozen'}`);
++                            if (revived) {
++                                setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : null));
++                                return;
++                            }
++                            setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text: `${text} · bounce failed` }));
++                        }, PLAYBACK_START_WATCHDOG_MS);
++                        startWatchdogTimer.current = resample;
++                    });
++                }
+             }, PLAYBACK_START_WATCHDOG_MS);
+             // Playback is back, so a leftover playback-failure toast goes too: its two buttons are
+             // retry and skip, with no close control. Countdowns and every other toast stay.
+diff --git a/src/services/playback/audioContextRecovery.ts b/src/services/playback/audioContextRecovery.ts
+index 0ba3790..3551ca4 100644
+--- a/src/services/playback/audioContextRecovery.ts
++++ b/src/services/playback/audioContextRecovery.ts
+@@ -13,39 +13,42 @@
+ //
+ // 都尽量安静：running 时只是一次属性读取就返回，不改状态、不打日志、不排队。
+ //
+-// 第二件事（2026-10，0.6.8）：context 的构造参数。用户实测的分界很干净 ——
+-// 「先外放播、再连蓝牙」能放（context 早就在扬声器上跑起来了，蓝牙只是把已有的输出流改路由），
+-// 「一直连着蓝牙、直接按播放」不能放（context 是在蓝牙的那个 sink 上现开的）。
+-// 安卓上这一档取样率由输出设备决定，A2DP 只给 48k，而 Chromium 的 WebView 默认按 44.1k 开——
+-// 开到蓝牙 sink 上就拿不到输出流：context 停在非 running，节点图不推进，静音但元素照走。
+-// 因此安卓壳上显式开 48k + 'playback' 延迟档（大缓冲对蓝牙也更稳）；构造失败仍退回默认参数。
+-// 桌面 Electron 不动：44.1k 素材不引入重采样。
++// 有一条**已经撤回**的改动记在这里（2026-10，0.6.12）：0.6.8 曾给安卓壳显式开
++// `sampleRate: 48000` + `latencyHint: 'playback'`，理由是「A2DP 只给 48k，默认 44.1k 开不到蓝牙 sink 上」。
++// 那个推断是错的：真机后来的读数（`el:stalled · rs 4/1 · p 0 · +0.00s`，context 报 running 而元素时钟
++// 一动不动）指向的正是「context 假 running」——取样率由调用方硬点，是当时唯一被自己引进这条路径的变量。
++// 现在回到平台默认：`new AudioContext()`，一个参数都不传（见 usePlaybackAudioBridge 的注释）。
+ 
+ /** 只有 running 才是「音频真的在走」。'suspended' / 'interrupted'（安卓）/ 'closed' 都要重新拉。 */
+ export const needsAudioResume = (state: AudioContextState | string): boolean => state !== 'running';
+ 
+ /**
+- * context 的构造参数。纯函数，只看 UA：安卓（WebView 壳）要显式定档，其它平台返回 null 表示「按默认建」。
++ * 「假 running」：state 说 running，但音频渲染线程并没有在拉元素。
++ *
++ * 判据只能从元素身上取：data 齐了（readyState ≥ 2）、没人暂停（paused === false），
++ * 而 currentTime 在这段时间里一米都没走。三者同时成立时，节点图再报 running 也不算数。
+  */
+-export const buildAudioContextOptions = (userAgent: string | undefined): AudioContextOptions | null => {
+-    if (!userAgent || !/Android/i.test(userAgent)) return null;
+-    return { latencyHint: 'playback', sampleRate: 48000 };
+-};
++export const isAudioContextZombie = (element: HTMLAudioElement | null): boolean => (
++    Boolean(element) && element!.readyState >= 2 && !element!.paused
++);
+ 
+ /**
+- * 按上面的参数建 context；构造被拒（老 WebView 不认这两个字段）就退回无参构造，不让它变成「播不了」。
++ * 把「假 running」的 context 救一次：suspend → resume。Chromium 借这一次会关掉再重开输出流，
++ * 死去的那条音频渲染线程通常就这么回来了。返回是否发出去了（能不能救回来由调用方再测一次时钟）。
+  */
+-export const createPlaybackAudioContext = (AudioContextClass: typeof AudioContext): AudioContext => {
+-    const userAgent = typeof navigator === 'undefined' ? undefined : navigator.userAgent;
+-    const options = buildAudioContextOptions(userAgent);
+-    if (options) {
+-        try {
+-            return new AudioContextClass(options);
+-        } catch {
+-            // 落到下面按默认建。
+-        }
++export const bounceAudioContext = async (context: AudioContext | null): Promise<boolean> => {
++    if (!context) return false;
++    try {
++        await context.suspend();
++    } catch {
++        // suspend 被打断无所谓，下面照样 resume。
++    }
++    try {
++        await context.resume();
++        return true;
++    } catch {
++        return false;
+     }
+-    return new AudioContextClass();
+ };
+ 
+ /** 掉出 running 之后多久补一次重试：给系统把路由切完的时间。只补一次，不和平台抢。 */
+diff --git a/test/unit/playback/audioContextRecovery.test.ts b/test/unit/playback/audioContextRecovery.test.ts
+index f80f6ed..af0c37b 100644
+--- a/test/unit/playback/audioContextRecovery.test.ts
++++ b/test/unit/playback/audioContextRecovery.test.ts
+@@ -1,12 +1,11 @@
+ // @vitest-environment jsdom
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+-import { buildAudioContextOptions, createPlaybackAudioContext, keepAudioContextAwake, needsAudioResume } from '../../../src/services/playback/audioContextRecovery';
++import { bounceAudioContext, isAudioContextZombie, keepAudioContextAwake, needsAudioResume } from '../../../src/services/playback/audioContextRecovery';
+ 
+ // test/unit/playback/audioContextRecovery.test.ts
+ // 蓝牙耳机反复失效的那个问题的守卫：安卓上被系统收走的 context 停在 'interrupted' 而不是 'suspended'，
+ // 所以判定不能只认 'suspended'；唤醒要发生在用户手势上，且 running 时不能有任何多余动作。
+-// 另外钉住构造参数那一档：只有安卓壳显式定 48k / 'playback'，桌面按默认建（不引入重采样），
+-// 构造被拒时退回无参构造。
++// 另外钉住「假 running」的两件事：怎么从元素身上认出来（readyState ≥ 2 且没暂停），以及救它的那一跳。
+ 
+ const fakeContext = (state: string) => {
+     const resume = vi.fn(async () => {
+@@ -79,53 +78,55 @@ describe('keepAudioContextAwake', () => {
+     });
+ });
+ 
+-describe('buildAudioContextOptions', () => {
+-    const ANDROID_WEBVIEW = 'Mozilla/5.0 (Linux; Android 15; Pura 90 Pro Max Build/HUAWEI; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/141.0.0.0 Mobile Safari/537.36';
++describe('isAudioContextZombie', () => {
++    const element = (readyState: number, paused: boolean) => ({ readyState, paused }) as unknown as HTMLAudioElement;
+ 
+-    it('安卓壳显式定 48k 与 playback 延迟档', () => {
+-        expect(buildAudioContextOptions(ANDROID_WEBVIEW)).toEqual({ latencyHint: 'playback', sampleRate: 48000 });
++    it('数据齐了、没人暂停 —— 只要时钟不在走就是这个状态', () => {
++        expect(isAudioContextZombie(element(4, false))).toBe(true);
++        expect(isAudioContextZombie(element(2, false))).toBe(true);
+     });
+ 
+-    it('桌面按默认建，不引入重采样', () => {
+-        expect(buildAudioContextOptions('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Folia/0.7.20 Chrome/141.0.0.0 Electron/38.0.0 Safari/537.36')).toBeNull();
++    it('还在等数据的（readyState < 2）不算：那是没数据，不是假 running', () => {
++        expect(isAudioContextZombie(element(1, false))).toBe(false);
++        expect(isAudioContextZombie(element(0, false))).toBe(false);
+     });
+ 
+-    it('没有 UA 时按默认建', () => {
+-        expect(buildAudioContextOptions(undefined)).toBeNull();
++    it('被暂停的、没有元素的都不算', () => {
++        expect(isAudioContextZombie(element(4, true))).toBe(false);
++        expect(isAudioContextZombie(null)).toBe(false);
+     });
+ });
+ 
+-describe('createPlaybackAudioContext', () => {
+-    const originalUserAgent = navigator.userAgent;
++describe('bounceAudioContext', () => {
++    it('先 suspend 再 resume，顺序不能反（这一跳就是关掉再重开输出流）', async () => {
++        const calls: string[] = [];
++        const context = {
++            suspend: vi.fn(async () => { calls.push('suspend'); }),
++            resume: vi.fn(async () => { calls.push('resume'); }),
++        } as unknown as AudioContext;
++        await expect(bounceAudioContext(context)).resolves.toBe(true);
++        expect(calls).toEqual(['suspend', 'resume']);
++    });
++
++    it('suspend 被拒也照样 resume', async () => {
++        const resume = vi.fn(async () => undefined);
++        const context = {
++            suspend: vi.fn(async () => { throw new Error('cannot suspend'); }),
++            resume,
++        } as unknown as AudioContext;
++        await expect(bounceAudioContext(context)).resolves.toBe(true);
++        expect(resume).toHaveBeenCalledTimes(1);
++    });
+ 
+-    afterEach(() => {
+-        Object.defineProperty(navigator, 'userAgent', { value: originalUserAgent, configurable: true });
+-    });
+-
+-    const setUserAgent = (value: string) => {
+-        Object.defineProperty(navigator, 'userAgent', { value, configurable: true });
+-    };
+-
+-    it('安卓上把参数递给构造器', () => {
+-        setUserAgent('Linux; Android 15; wv');
+-        const created: unknown[] = [];
+-        class FakeContext {
+-            constructor(options?: AudioContextOptions) { created.push(options); }
+-        }
+-        createPlaybackAudioContext(FakeContext as unknown as typeof AudioContext);
+-        expect(created).toEqual([{ latencyHint: 'playback', sampleRate: 48000 }]);
+-    });
+-
+-    it('构造被拒时退回无参构造，不让它变成「播不了」', () => {
+-        setUserAgent('Linux; Android 15; wv');
+-        const created: unknown[] = [];
+-        class FakeContext {
+-            constructor(options?: AudioContextOptions) {
+-                if (options) throw new DOMException('unsupported', 'NotSupportedError');
+-                created.push(options ?? 'default');
+-            }
+-        }
+-        expect(() => createPlaybackAudioContext(FakeContext as unknown as typeof AudioContext)).not.toThrow();
+-        expect(created).toEqual(['default']);
++    it('resume 也失败时返回 false（由调用方收尾），且不外抛', async () => {
++        const context = {
++            suspend: vi.fn(async () => undefined),
++            resume: vi.fn(async () => { throw new Error('no output'); }),
++        } as unknown as AudioContext;
++        await expect(bounceAudioContext(context)).resolves.toBe(false);
++    });
++
++    it('没有 context 时直接 false', async () => {
++        await expect(bounceAudioContext(null)).resolves.toBe(false);
+     });
+ });

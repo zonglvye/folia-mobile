@@ -1,0 +1,59 @@
+From 98da8de769af5881e534350f44adae78a91fae36 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 23:32:58 +0800
+Subject: [PATCH 57/90] =?UTF-8?q?=E7=BD=91=E6=98=93=E6=9B=B2=E7=9B=AE?=
+ =?UTF-8?q?=E8=A1=A5=E4=B8=8A=20peak=EF=BC=9AReplayGain=20=E7=9A=84?=
+ =?UTF-8?q?=E5=B3=B0=E5=80=BC=E9=99=90=E5=B9=85=E4=B9=8B=E5=89=8D=E6=B0=B8?=
+ =?UTF-8?q?=E8=BF=9C=E4=B8=8D=E7=94=9F=E6=95=88?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`/song/url/v1` 的响应里 gain 和 peak 是成对给的（`gain:-6.76, peak:1`），但 provider 只取了
+gain 就丢掉 peak，于是：
+- `calculateReplayGain` 里「正增益时按峰值限幅」那段永远走不到；
+- 日志一路是 `peak=n/a`，看不出是「没有峰值数据」还是「有但没传」。
+
+现在两样都带上（peak ≤ 0 视为没有）。真机验证：日志从 `peak=n/a` 变成 `peak=1`。
+
+注意：真机上 gain 恒为 0（见下），所以这条改动本身不会改变听感 —— 它修的是数据丢失，
+等 gain 恢复真实值之后才会真正起作用。
+
+顺带把排查结论记在这里，免得下次重新查：
+同一批曲目、同一份 cookie（从真机 ArkWeb 罐里导出）、同样的 payload 与 crypto，
+在电脑上用参考实现打同一条 eapi 拿到 `gain=-6.7611`，真机页面内 fetch 拿到 `gain=0`；
+两边 `peak` 一致。也就是说 gain 被「页面里发」这条通道降级了，不是我们算错。
+---
+ src/services/onlineMusic/neteaseProvider.ts | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/services/onlineMusic/neteaseProvider.ts b/src/services/onlineMusic/neteaseProvider.ts
+index 85df88c..60d52b3 100644
+--- a/src/services/onlineMusic/neteaseProvider.ts
++++ b/src/services/onlineMusic/neteaseProvider.ts
+@@ -1,4 +1,4 @@
+-import type { SongResult, UnifiedSong } from '../../types';
++import type { ReplayGainInfo, SongResult, UnifiedSong } from '../../types';
+ import { OnlineProviderError } from '../../types/onlineMusic';
+ import type {
+     AudioQualityPreference,
+@@ -341,11 +341,18 @@ export const neteaseProvider: OnlineMusicProvider = {
+             const rawUrl = raw?.url;
+             if (!rawUrl) return null;
+             const trackGain = toFiniteNumber(raw?.gain);
++            // 峰值也要带上：没有它，calculateReplayGain 里那段「正增益时按峰值限幅」永远不生效，
++            // 日志里会一路显示 peak=n/a。网易给的 peak 是线性峰值（1 / 0.9875 这种）。
++            const trackPeak = toFiniteNumber(raw?.peak);
++            const replayGain: ReplayGainInfo = {
++                ...(trackGain === undefined ? {} : { trackGain }),
++                ...(trackPeak === undefined || trackPeak <= 0 ? {} : { trackPeak }),
++            };
+             return {
+                 url: String(rawUrl).replace(/^http:/, 'https:'),
+                 fetchedAt: Date.now(),
+                 quality,
+-                ...(trackGain === undefined ? {} : { replayGain: { trackGain } }),
++                ...(trackGain === undefined && trackPeak === undefined ? {} : { replayGain }),
+             };
+         },
+         getAvailability(song): ProviderSongAvailability {

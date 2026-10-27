@@ -24,6 +24,9 @@ import { useVisualizerAssetStore } from './useVisualizerAssetStore';
 import { normalizeLumiereTuning } from '../utils/lumiereTuning';
 import { RANDOM_VISUALIZER_MODES_STORAGE_KEY, readStoredRandomVisualizerModes } from './visualizerSettingsPersistence';
 import { normalizeRandomVisualizerModes, type RandomVisualizerMode } from '../utils/randomVisualizerModes';
+import { HANABI_TUNING_STORAGE_KEY, readStoredHanabiTuning } from './visualizerSettingsPersistence';
+import { DEFAULT_HANABI_TUNING, type HanabiTuning } from '../components/visualizer/hanabi/types';
+import { normalizeHanabiTuning } from '../components/visualizer/hanabi/hanabiTuning';
 
 /**
  * 切样式时可以带的两件事：
@@ -64,6 +67,7 @@ export type VisualizerSettingsState = {
     sonnetTuning: SonnetTuning;
     temperaTuning: TemperaTuning;
     lumiereTuning: LumiereTuning;
+    hanabiTuning: HanabiTuning;
     handleToggleDisableVisualizerVignette: (disable: boolean) => void;
     handleToggleDisableVisualizerGeometricBackground: (disable: boolean) => void;
     handleSetBackgroundOpacity: (opacity: number) => void;
@@ -114,6 +118,8 @@ export type VisualizerSettingsState = {
     handleResetTemperaTuning: () => void;
     handleSetLumiereTuning: (patch: Partial<LumiereTuning>) => void;
     handleResetLumiereTuning: () => void;
+    handleSetHanabiTuning: (patch: Partial<HanabiTuning>) => void;
+    handleResetHanabiTuning: () => void;
     handleUploadMonetBackgroundImage: (files: File[]) => Promise<{ ok: boolean; error?: string; }>;
     handleClearMonetBackgroundImage: () => Promise<void>;
     handleUploadMonetPortraitImage: (files: File[]) => Promise<{ ok: boolean; error?: string; }>;
@@ -157,6 +163,7 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set, 
     sonnetTuning: readStoredSonnetTuning(),
     temperaTuning: readStoredTemperaTuning(),
     lumiereTuning: readStoredLumiereTuning(),
+    hanabiTuning: readStoredHanabiTuning(),
     handleToggleDisableVisualizerVignette: (disable) => {
         setStoredBoolean('disable_visualizer_vignette', disable);
         set({ disableVisualizerVignette: disable });
@@ -557,6 +564,19 @@ export const useVisualizerSettingsStore = create<VisualizerSettingsState>((set, 
         set({ lumiereTuning: DEFAULT_LUMIERE_TUNING });
         setStatusMessage({ type: 'info', text: i18n.t('notifications.lumiereReset') });
     },
+    handleSetHanabiTuning: (patch: Partial<HanabiTuning>) => {
+        // 合并再归一化：滑块拖动、导入、同步、Folium 走同一套钳位。
+        const next = normalizeHanabiTuning({ ...get().hanabiTuning, ...patch });
+        if (typeof window !== 'undefined') localStorage.setItem(HANABI_TUNING_STORAGE_KEY, JSON.stringify(next));
+        set({ hanabiTuning: next });
+    },
+    handleResetHanabiTuning: () => {
+        if (typeof window !== 'undefined') {
+            localStorage.setItem(HANABI_TUNING_STORAGE_KEY, JSON.stringify(DEFAULT_HANABI_TUNING));
+        }
+        set({ hanabiTuning: DEFAULT_HANABI_TUNING });
+        setStatusMessage({ type: 'info', text: i18n.t('notifications.hanabiReset') });
+    },
     handleSetCappellaTuning: (patch) => {
         const requestedCustomWithoutPack = patch.emojiPackSource === 'custom' && useVisualizerAssetStore.getState().storedCappellaEmojiPack.length === 0;
         if (requestedCustomWithoutPack) {
@@ -888,6 +908,9 @@ export const selectVisualizerSettingsSnapshot = (state: VisualizerSettingsState)
     handleResetFumeTuning: state.handleResetFumeTuning,
     handleResetLatentBackgroundTuning: state.handleResetLatentBackgroundTuning,
     handleResetLumiereTuning: state.handleResetLumiereTuning,
+    hanabiTuning: state.hanabiTuning,
+    handleSetHanabiTuning: state.handleSetHanabiTuning,
+    handleResetHanabiTuning: state.handleResetHanabiTuning,
     handleResetMonetBackgroundTuning: state.handleResetMonetBackgroundTuning,
     handleResetMonetTuning: state.handleResetMonetTuning,
     handleResetNomandBackgroundTuning: state.handleResetNomandBackgroundTuning,

@@ -6,6 +6,7 @@ import { neteaseProvider } from './neteaseProvider';
 import { kugouProvider } from './kugouProvider';
 import { qqProvider } from './qqProvider';
 import { bodianProvider } from './bodianProvider';
+import { qishuiProvider } from './qishui/qishuiProvider';
 
 // src/services/onlineMusic/providerRegistry.ts
 
@@ -82,3 +83,6 @@ registerOnlineMusicProvider(neteaseProvider);
 registerOnlineMusicProvider(kugouProvider);
 registerOnlineMusicProvider(qqProvider);
 registerOnlineMusicProvider(bodianProvider);
+// 汽水（qishui）：手机壳里唯一一个「协议包直接跑在页面里」的 provider，见 services/onlineMusic/qishui/。
+// 桌面版走主进程 IPC；网页版没有同源代理，availability 会报 runtime-unavailable。
+registerOnlineMusicProvider(qishuiProvider);

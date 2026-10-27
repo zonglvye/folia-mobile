@@ -1,0 +1,62 @@
+From 6ee4feaeeccaaa3cea71658f2849e41ff14e7378 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:15:56 +0800
+Subject: [PATCH 64/90] =?UTF-8?q?fix(kugou):=20=E8=B4=A6=E5=8F=B7=E8=B5=84?=
+ =?UTF-8?q?=E6=96=99=E8=AF=B7=E6=B1=82=E6=8C=89=E5=AE=98=E6=96=B9=E5=BD=A2?=
+ =?UTF-8?q?=E7=8A=B6=E8=B5=B0=E7=BD=91=E5=85=B3=20+=20x-router?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+对照 KuGouMusicApi 的 user_detail 转储：它打 gateway.kugou.com，用 x-router 头指向
+usercenter，并把 token/userid 放进 query 一起签名。原来直接打 usercenter 且没带这两个
+参数，登录后取资料大概率失败。同时：服务端回错误码时返回 null（未登录），不再往外抛。
+
+实测（假 token）：200 {"error_code":20018}，说明参数、签名、RSA 都被接受，只差真 token。
+---
+ src/services/onlineMusic/kugouWebAuth.ts | 21 +++++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index 8a151b6..d3ec56c 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -327,21 +327,34 @@ export const loginKugouWithCode = async (mobile: string, code: string): Promise<
+ export const fetchKugouWebUser = async (): Promise<ProviderUser | null> => {
+     const session = readKugouWebSession();
+     if (!session) return null;
++    // 与官方客户端一致：打网关、用 x-router 头指到 usercenter；token/userid 同时进 query 参与签名。
+     const clienttime = Math.floor(Date.now() / 1000);
+     const payload = JSON.stringify({
+         visit_time: clienttime,
+         usertype: 1,
+-        p: rsaEncrypt(JSON.stringify({ token: session.token, clienttime })).toUpperCase(),
++        p: rsaEncrypt(JSON.stringify({ token: session.token, clienttime })),
+         userid: Number(session.userid) || 0,
+     });
+-    const params: Record<string, string | number> = { ...commonParams(), plat: 1 };
+-    const target = `https://usercenter.kugou.com/v3/get_my_info?${query({ ...params, signature: sign(params, payload) })}`;
++    const params: Record<string, string | number> = {
++        ...commonParams(),
++        clienttime,
++        token: session.token,
++        userid: session.userid,
++        plat: 1,
++    };
++    const target = `https://gateway.kugou.com/v3/get_my_info?${query({ ...params, signature: sign(params, payload) })}`;
+     const json = await proxyJson(target, {
+         method: 'POST',
+         body: payload,
+-        headers: clientHeaders({ 'Content-Type': 'application/json', 'x-router': 'usercenter.kugou.com', 'User-Agent': LOGIN_UA }),
++        headers: clientHeaders({
++            'Content-Type': 'application/json',
++            'x-router': 'usercenter.kugou.com',
++            'User-Agent': 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi',
++        }),
+     });
+     const data = dataOf(json) ?? {};
++    // 没登录时服务端回的是错误码而不是 data：这里返回 null，让账户层走「未登录」而不是报错。
++    if (Number(json?.status) === 0 || Number(json?.error_code)) return null;
+     const userid = String(data.userid ?? data.user_id ?? session.userid ?? '');
+     if (!userid) return null;
+     return {

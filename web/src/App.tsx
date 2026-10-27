@@ -76,6 +76,7 @@ import { useNeteaseLibrary } from './hooks/useNeteaseLibrary';
 import { useKugouLibrary } from './hooks/useKugouLibrary';
 import { useQqLibrary } from './hooks/useQqLibrary';
 import { useBodianLibrary } from './hooks/useBodianLibrary';
+import { useQishuiLibrary } from './hooks/useQishuiLibrary';
 import { useLibraryAccountController } from './library/app/useLibraryAccountController';
 import { createLibraryAccountSwitchCleanupPort } from './library/app/createLibraryAccountPort';
 import { useAppWallToolsHost } from './components/app/wall-tools/useAppWallToolsHost';
@@ -758,18 +759,23 @@ export default function App() {
         logout: logoutQqLibrary,
     } = useQqLibrary();
     const { refresh: refreshBodianLibrary, logout: logoutBodianLibrary } = useBodianLibrary();
+    // 汽水：没有自建后端，没有会话就是游客态（检索/播放/歌词照常），所以它也有一个刷新器——
+    // 切换过去时把账号落成 anonymous，否则首页会一直停在「解析中」。
+    const { refresh: refreshQishuiLibrary, logout: logoutQishuiLibrary } = useQishuiLibrary();
     const onlineProviderRefreshers = useMemo<Partial<Record<OnlineProviderId, () => Promise<unknown>>>>(() => ({
         netease: refreshUserData,
         kugou: refreshKugouLibrary,
         qq: refreshQqLibrary,
         bodian: refreshBodianLibrary,
-    }), [refreshKugouLibrary, refreshQqLibrary, refreshBodianLibrary, refreshUserData]);
+        qishui: refreshQishuiLibrary,
+    }), [refreshBodianLibrary, refreshKugouLibrary, refreshQishuiLibrary, refreshQqLibrary, refreshUserData]);
     const onlineProviderLogouts = useMemo<Partial<Record<OnlineProviderId, () => Promise<void>>>>(() => ({
         netease: handleLogout,
         kugou: logoutKugouLibrary,
         qq: logoutQqLibrary,
         bodian: logoutBodianLibrary,
-    }), [handleLogout, logoutKugouLibrary, logoutQqLibrary, logoutBodianLibrary]);
+        qishui: logoutQishuiLibrary,
+    }), [handleLogout, logoutBodianLibrary, logoutKugouLibrary, logoutQishuiLibrary, logoutQqLibrary]);
 
     // 在线账户 controller（Library v2 · A4）：扫码登录、选平台、切换确认与登出都在 core，App 只交出 per-provider 的
     // 刷新与登出，以及确认切换后的播放清理端口。端口读的三样（audio / automix 句柄、歌词写入）都是稳定引用，建一次。
@@ -2649,7 +2655,15 @@ export default function App() {
             onLoadedMetadata={(e) => {
                 const audioElement = e.currentTarget;
                 if (!automix.isActiveDeck(audioElement)) return;
-                setDuration(audioElement.duration);
+                // 流式播放（MediaSource）在整首收完之前 duration 是 Infinity：没有总长，进度条填充算不出来、
+                // 也拖不动。先用歌曲自带的时长兜底，条子立刻可用；浏览器把真实长度算出来时会补一次
+                // durationchange（见上面的监听），再纠正成精确值。
+                const elementDuration = audioElement.duration;
+                const knownDurationMs = currentSong?.durationMs ?? 0;
+                const fallbackDuration = !Number.isFinite(elementDuration) && knownDurationMs > 0
+                    ? knownDurationMs / 1000
+                    : elementDuration;
+                setDuration(fallbackDuration);
                 // While the picture is held, this deck is the track ARRIVING: its length and its
                 // position belong to a song the listener cannot see yet, and writing either here
                 // would snap the bar to zero mid-blend. `duration` above is still set because the

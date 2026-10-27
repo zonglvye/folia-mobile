@@ -1,0 +1,125 @@
+From 0c6345e2b331454151767156c67f0e8dd23c09b2 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 18:10:40 +0800
+Subject: [PATCH 45/90] =?UTF-8?q?=E7=BD=91=E6=98=93=E4=BA=91=E6=89=AB?=
+ =?UTF-8?q?=E7=A0=81=E7=99=BB=E5=BD=95=EF=BC=9AQR=20=E9=82=A3=E4=B8=80?=
+ =?UTF-8?q?=E5=AF=B9=E6=94=B9=E8=B5=B0=20api=20=E6=A1=A3=EF=BC=88=E6=98=8E?=
+ =?UTF-8?q?=E6=96=87=E8=A1=A8=E5=8D=95=20+=20=E6=A1=8C=E9=9D=A2=E5=AE=A2?=
+ =?UTF-8?q?=E6=88=B7=E7=AB=AF=20UA=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机证据（HarmonyOS 壳，手机与 PC 同一局域网、同一出口 IP）：
+- eapi（iPhone 指纹）申请 type=3 二维码：App 拒绝确认，轮询永远 801
+- weapi（Chrome 指纹）：App 能确认（802），但下一步被判 8821「环境风险」
+- 同一套 weapi 协议在 PC 上用参考实现（Node/axios）跑同一个账号：803 登录成功
+
+结论：协议本身是对的，被拦的是壳里系统网络栈声称浏览器时的环境指纹。
+这一版把 QR 两条路由改成参考实现的默认档 `api`（明文表单 + NeteaseMusicDesktop UA），
+壳那边也同步把连接改成 keep-alive、补 Accept-Encoding/Accept。
+
+未解决：真机仍返回 8821，登录还没通。
+---
+ .../onlineMusic/neteaseEapiTransport.ts       | 24 +++++++++++++++++++
+ src/services/onlineMusic/neteaseLocalApi.ts   | 19 +++++++++++----
+ 2 files changed, 38 insertions(+), 5 deletions(-)
+
+diff --git a/src/services/onlineMusic/neteaseEapiTransport.ts b/src/services/onlineMusic/neteaseEapiTransport.ts
+index d8a1d80..974beeb 100644
+--- a/src/services/onlineMusic/neteaseEapiTransport.ts
++++ b/src/services/onlineMusic/neteaseEapiTransport.ts
+@@ -36,6 +36,8 @@ const WEAPI_ORIGIN = 'https://music.163.com';
+ /** 参考实现对 eapi 用的是 iPhone 档 UA，weapi 是桌面 Chrome 档，两者不能混用。 */
+ const EAPI_USER_AGENT = 'NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)';
+ const WEAPI_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0';
++/** api 档是桌面客户端，UA 与参考实现的 `userAgentMap.api.pc` 逐字一致。 */
++const API_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117';
+ 
+ const VERSION_CODE = '140';
+ const RESOLUTION = '1920x1080';
+@@ -199,3 +201,25 @@ export const callNeteaseWeapi = async (
+     const target = `${WEAPI_ORIGIN}/weapi/${uri.replace(/^\/api\//, '')}`;
+     return postThroughShell(target, body, encodeCookieHeader(buildProcessedCookie(session)), WEAPI_USER_AGENT, WEAPI_ORIGIN);
+ };
++
++/**
++ * api：明文表单直发 `music.163.com/api/...`，身份只靠 Cookie，UA 是**桌面客户端**那一档。
++ *
++ * 参考实现把这一档设为默认（`request.js` 里 `crypto === '' → 'api'`），大量真实请求走的就是它。
++ * 对扫码登录尤其重要：非浏览器的 HTTP 栈（壳里是系统网络栈）声称自己是 Chrome，会同时踩到
++ * TLS/头部一致性检查；而声称自己是网易桌面客户端没有任何可被比对的地方，正是这一档的默认假设。
++ */
++export const callNeteaseApi = async (
++    session: NeteaseSession,
++    uri: string,
++    payload: Record<string, unknown>,
++): Promise<NeteaseTransportResult> => {
++    const form = new URLSearchParams();
++    for (const [key, value] of Object.entries(payload)) {
++        if (value !== undefined && value !== null) {
++            form.set(key, String(value));
++        }
++    }
++    const target = `${WEAPI_ORIGIN}${uri}`;
++    return postThroughShell(target, form.toString(), encodeCookieHeader(buildProcessedCookie(session)), API_USER_AGENT, WEAPI_ORIGIN);
++};
+diff --git a/src/services/onlineMusic/neteaseLocalApi.ts b/src/services/onlineMusic/neteaseLocalApi.ts
+index 9e6e65b..c8b13f0 100644
+--- a/src/services/onlineMusic/neteaseLocalApi.ts
++++ b/src/services/onlineMusic/neteaseLocalApi.ts
+@@ -4,6 +4,7 @@ import { readProviderSessionValue, removeProviderSessionValue, writeProviderSess
+ import { adoptNeteaseDeviceId, createNeteaseDeviceId, resolveNeteaseDeviceProfile } from './neteaseDeviceProfile';
+ import { buildNeteaseQrLoginUrl, renderNeteaseQrDataUrl } from './neteaseQrImage';
+ import {
++    callNeteaseApi,
+     callNeteaseEapi,
+     callNeteaseWeapi,
+     type NeteaseCookieJar,
+@@ -37,8 +38,8 @@ const ANONYMOUS_COOKIE_KEY = 'anonymous_cookie';
+ const ANONYMOUS_ID_XOR_KEY = '3go8&$8*3*3h0k(2)2';
+ 
+ type NeteaseRoute = {
+-    /** 上游加密方式。 */
+-    mode: 'eapi' | 'weapi';
++    /** 上游加密方式。`api` 是明文表单 + 桌面客户端 UA（参考实现的默认档）。 */
++    mode: 'eapi' | 'weapi' | 'api';
+     /**
+      * 上游路径，含 `/api/` 前缀——它是 eapi 签名材料的一部分。
+      *
+@@ -235,16 +236,22 @@ const ROUTES: Record<string, NeteaseRoute> = {
+         shape: data => rewriteSongUrlProtocols(data),
+     },
+     // 实例在这里把上游 body 包一层：`{data: {code, unikey}, code: 200}`。provider 读的是 `data.unikey`。
++    //
++    // 扫码这一对走 `api` 档（明文表单 + 网易桌面客户端 UA）：`type: 3` 在网易侧等于“网页端二维码”，
++    // 而真机实测 —— eapi（iPhone 指纹）会让 App 拒绝确认、轮询永远停在 801；weapi（Chrome 指纹）
++    // 能让 App 确认，但最后一步被判 `8821 环境风险`。原因是壳里是系统网络栈，声称自己是浏览器就要
++    // 过 TLS/头部一致性检查，而声称自己是桌面客户端没有可被比对的地方，这正是参考实现默认走它的理由。
+     '/login/qr/key': {
+-        mode: 'eapi',
++        mode: 'api',
+         uri: '/api/login/qrcode/unikey',
+         payload: () => ({ type: 3 }),
+         shape: data => ({ code: 200, data }),
+         needsAnonymous: false,
+     },
+     // 实例把 Set-Cookie 拉平后塞进 `cookie` 字段，provider 靠它落盘登录态。
++    // 必须和申请 unikey 时同一档（`api`）：这一跳是风控判定“环境”的最后一关。
+     '/login/qr/check': {
+-        mode: 'eapi',
++        mode: 'api',
+         uri: '/api/login/qrcode/client/login',
+         payload: query => ({ key: query.get('key'), type: 3 }),
+         shape: (data, cookie) => ({ ...data, cookie }),
+@@ -470,7 +477,9 @@ export const requestLocalNetease = async (endpoint: string): Promise<any> => {
+         session.profile = resolveNeteaseDeviceProfile();
+     }
+ 
+-    const call = route.mode === 'weapi' ? callNeteaseWeapi : callNeteaseEapi;
++    const call = route.mode === 'weapi'
++        ? callNeteaseWeapi
++        : route.mode === 'api' ? callNeteaseApi : callNeteaseEapi;
+     const { data, cookies } = await call(session, resolveRouteUri(route, query), payload);
+ 
+     session.jar = mergeSetCookies(session.jar, cookies);

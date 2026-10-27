@@ -1,0 +1,575 @@
+From e788b00ec0cd0d698eb54f0e92802cb93e878a00 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 13:38:32 +0800
+Subject: [PATCH 35/90] =?UTF-8?q?=E4=BF=AE=E5=A4=8D=E6=89=8B=E6=9C=BA?=
+ =?UTF-8?q?=E4=B8=8A=E9=9D=A2=E6=9D=BF=E8=A2=AB=E5=BA=95=E9=83=A8=E6=92=AD?=
+ =?UTF-8?q?=E6=94=BE=E6=9D=A1=E7=9B=96=E4=BD=8F=EF=BC=8C=E5=B9=B6=E7=BB=99?=
+ =?UTF-8?q?=E3=80=8C=E6=9C=89=E8=BF=9B=E5=BA=A6=E6=B2=A1=E5=A3=B0=E9=9F=B3?=
+ =?UTF-8?q?=E3=80=8D=E8=A1=A5=E4=B8=8A=E5=8F=96=E8=AF=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+「⋯」菜单（2026-10 用户实测：点开来只有屏幕变暗，什么都没有）
+- 面板原来 portal 到 stage 根节点。`.lattice-root` 带 `isolation: isolate`，它自己就是一个层叠上下文，
+  而在应用外壳里它是按 DOM 顺序画的（z-index: auto）——库里任何带 z-index 的兄弟节点都整块压得住它。
+  底部播放条是 `absolute z-60`（FloatingPlayerControls），面板是 bottom: 10px、高 101px，正好整个落在
+  它后面；遮罩同样被压住，所以只看得见「屏幕暗了」。
+- 改挂到 document.body，外面再套一层 fixed 宿主（z-index: 130，高于播放条与库页面 chrome，低于命令面板
+  150 与对话框）。遮罩与面板同在这层里，不可能再被拆开；面板本身改成 absolute，相对宿主定位。
+- 用例补一条回归守卫：造一个同层级的假播放条（absolute z-60）压在面板位置上，确认面板仍是最上层。
+
+蓝牙（「一直连着蓝牙、直接按播放」没声也没提示）
+- AudioContext 构造：安卓壳上显式 48k + 'playback' 延迟档。分界很干净——先外放再连蓝牙能放（context 早在
+  扬声器上跑起来了，蓝牙只改路由），直接连蓝牙不能放（context 是在 A2DP sink 上现开的，而 A2DP 只给 48k）。
+  构造被拒退回无参构造；桌面不动，不引入重采样。
+- 新增 playbackStartWatchdog：起步 1.5s 后看一眼读数。`ctx:interrupted · el 3.2s`（元素在走、context 不在
+  running —— 声音被 Web Audio 卡住）与 `el:stalled · ctx:running`（元素自己没动）指向完全不同的修法。
+  这一档原来一条提示都没有：play() 既然决议了，超时分支就走不到。
+---
+ src/hooks/usePlaybackAudioBridge.ts           |  4 +-
+ src/hooks/usePlaybackTransportController.ts   | 35 ++++++++++-
+ .../suites/bravais/BravaisSeamMenuSheet.tsx   | 32 +++++-----
+ .../suites/bravais/bravaisCollection.css      | 29 ++++++++--
+ src/services/playback/audioContextRecovery.ts | 32 ++++++++++
+ .../playback/playbackStartWatchdog.ts         | 58 +++++++++++++++++++
+ test/component/bravaisSeamMenuSheet.spec.ts   | 35 ++++++++++-
+ .../playback/audioContextRecovery.test.ts     | 55 +++++++++++++++++-
+ .../playback/playbackStartWatchdog.test.ts    | 56 ++++++++++++++++++
+ 9 files changed, 308 insertions(+), 28 deletions(-)
+ create mode 100644 src/services/playback/playbackStartWatchdog.ts
+ create mode 100644 test/unit/playback/playbackStartWatchdog.test.ts
+
+diff --git a/src/hooks/usePlaybackAudioBridge.ts b/src/hooks/usePlaybackAudioBridge.ts
+index 09d04c4..1bc35c9 100644
+--- a/src/hooks/usePlaybackAudioBridge.ts
++++ b/src/hooks/usePlaybackAudioBridge.ts
+@@ -8,7 +8,7 @@ import { calculateReplayGain } from '../utils/replayGain';
+ import { applyAudioEqualizerSettings } from '../services/audioEqualizerGraph';
+ import { type AudioEffectChain } from '../services/audioEffects/effectChain';
+ import { buildPlaybackGraph } from '../services/playbackGraph';
+-import { keepAudioContextAwake } from '../services/playback/audioContextRecovery';
++import { createPlaybackAudioContext, keepAudioContextAwake } from '../services/playback/audioContextRecovery';
+ import { cachePlayedTrackAssets } from '../services/playedTrackCache';
+ import { registerPlaybackFadeGraph } from '../services/playbackFade';
+ import { rampGain, type AutomixDeckChain } from '../services/automix/crossfadeGraph';
+@@ -139,7 +139,7 @@ export function usePlaybackAudioBridge({
+         if (!audioRef.current || audioContextRef.current) return;
+         try {
+             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+-            const ctx = new AudioContextClass();
++            const ctx = createPlaybackAudioContext(AudioContextClass);
+             audioContextRef.current = ctx;
+             // 被系统收走（蓝牙路由切换 / 来电 / 别的应用抢焦点）之后，安卓上这个 context 会停在
+             // 'interrupted'：节点图不推进，挂进来的 <audio> 也被拖着，表现为「按了播放没反应、进度条不动」。
+diff --git a/src/hooks/usePlaybackTransportController.ts b/src/hooks/usePlaybackTransportController.ts
+index b28d30c..5efcc98 100644
+--- a/src/hooks/usePlaybackTransportController.ts
++++ b/src/hooks/usePlaybackTransportController.ts
+@@ -11,6 +11,7 @@ import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
+ import { getPlaybackFailureMessage, isPlaybackFailureStatus } from '../services/playbackRecovery/playbackFailurePolicy';
+ import type { OnlineRecoveryOptions, OnlineRecoveryResult, PlaybackFailure } from '../types/playbackFailure';
+ import { AUDIO_START_TIMEOUT_MS, describeAudioStart, readAudioStart, recordAudioStart } from '../services/playback/audioStartupProbe';
++import { PLAYBACK_START_WATCHDOG_MS, describePlaybackStart, judgePlaybackStart } from '../services/playback/playbackStartWatchdog';
+ import { needsAudioResume } from '../services/playback/audioContextRecovery';
+ import { settleWithin } from '../utils/settleWithin';
+ 
+@@ -72,10 +73,18 @@ export function usePlaybackTransportController({
+     const duration = usePlaybackStore(state => state.duration);
+     const transportRevision = useRef(0);
+     const wantsPlayback = useRef(false);
++    // 起步观测的那一次读数（playbackStartWatchdog）。每次按键先撤掉上一次的，免得两条提示互相盖。
++    const startWatchdogTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
++    const clearStartWatchdog = useCallback(() => {
++        if (startWatchdogTimer.current === null) return;
++        clearTimeout(startWatchdogTimer.current);
++        startWatchdogTimer.current = null;
++    }, []);
+     useEffect(() => () => {
+         transportRevision.current++;
+         wantsPlayback.current = false;
+-    }, []);
++        clearStartWatchdog();
++    }, [clearStartWatchdog]);
+ 
+     const resumePlayback = useCallback(async () => {
+         if (isNowPlayingStageActive) {
+@@ -83,6 +92,8 @@ export function usePlaybackTransportController({
+         }
+         const revision = ++transportRevision.current;
+         wantsPlayback.current = true;
++        // 上一次按键留下的起步观测作废（它自己也认 revision，这里只是不白留一个定时器）。
++        clearStartWatchdog();
+ 
+         if (activePlaybackContext === 'stage' && stageActiveEntryKind === 'lyrics' && !audioSrc) {
+             const currentSyntheticTime = getSyntheticStageLyricsTime();
+@@ -198,6 +209,23 @@ export function usePlaybackTransportController({
+             if (context && needsAudioResume(context.state)) void context.resume().catch(() => {});
+             playbackFade.runFadeIn(fadeToken);
+             setPlayerState(PlayerState.PLAYING);
++            // 「元素在走、却没有声音」这一档上面两条提示都抓不到（play() 已经决议了，没有超时也没有拒绝），
++            // 而它正是蓝牙那条路径上的表现：context 停在 interrupted，元素照常推进、界面照常进 PLAYING，
++            // 于是既没提示也没声音。起步后看一眼读数，把结论直接示出来（playbackStartWatchdog 的文件头）。
++            clearStartWatchdog();
++            const positionAtStart = audio.currentTime;
++            startWatchdogTimer.current = setTimeout(() => {
++                startWatchdogTimer.current = null;
++                if (!isCurrent()) return;
++                const verdict = judgePlaybackStart({
++                    contextState: context ? context.state : 'absent',
++                    positionBeforeSec: positionAtStart,
++                    positionNowSec: audioRef.current?.currentTime ?? -1,
++                });
++                const text = describePlaybackStart(verdict);
++                if (!text) return;
++                setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text }));
++            }, PLAYBACK_START_WATCHDOG_MS);
+             // Playback is back, so a leftover playback-failure toast goes too: its two buttons are
+             // retry and skip, with no close control. Countdowns and every other toast stay.
+             setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? null : prev));
+@@ -238,7 +266,7 @@ export function usePlaybackTransportController({
+             setPlayerState(PlayerState.PAUSED);
+             throw error;
+         }
+-    }, [activePlaybackContext, audioContextRef, audioRef, audioSrc, currentTime, duration, getSyntheticStageLyricsTime, getTargetPlaybackVolume, isNowPlayingStageActive, isTransitionAudible, recoverOnlinePlaybackSource, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldRefreshCurrentOnlineAudioSource, stageActiveEntryKind, stageLyricsClockRef, syncOutputGain, syncStageLyricsClock, t]);
++    }, [activePlaybackContext, audioContextRef, audioRef, audioSrc, clearStartWatchdog, currentTime, duration, getSyntheticStageLyricsTime, getTargetPlaybackVolume, isNowPlayingStageActive, isTransitionAudible, recoverOnlinePlaybackSource, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldRefreshCurrentOnlineAudioSource, stageActiveEntryKind, stageLyricsClockRef, syncOutputGain, syncStageLyricsClock, t]);
+ 
+     const pausePlayback = useCallback(() => {
+         if (isNowPlayingStageActive) {
+@@ -246,6 +274,7 @@ export function usePlaybackTransportController({
+         }
+         transportRevision.current++;
+         wantsPlayback.current = false;
++        clearStartWatchdog();
+ 
+         if (activePlaybackContext === 'stage' && stageActiveEntryKind === 'lyrics' && !audioSrc) {
+             const currentSyntheticTime = getSyntheticStageLyricsTime();
+@@ -314,7 +343,7 @@ export function usePlaybackTransportController({
+         if (settlePause()) {
+             setPlayerState(PlayerState.PAUSED);
+         }
+-    }, [activePlaybackContext, audioRef, audioSrc, currentTime, duration, getSyntheticStageLyricsTime, getTargetPlaybackVolume, isNowPlayingStageActive, isTransitionAudible, pauseDuringTransition, setPlayerState, stageActiveEntryKind, stageLyricsClockRef, syncOutputGain, syncStageLyricsClock]);
++    }, [activePlaybackContext, audioRef, audioSrc, clearStartWatchdog, currentTime, duration, getSyntheticStageLyricsTime, getTargetPlaybackVolume, isNowPlayingStageActive, isTransitionAudible, pauseDuringTransition, setPlayerState, stageActiveEntryKind, stageLyricsClockRef, syncOutputGain, syncStageLyricsClock]);
+ 
+     return {
+         resumePlayback,
+diff --git a/src/library/suites/bravais/BravaisSeamMenuSheet.tsx b/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+index 5a937b8..70897da 100644
+--- a/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
++++ b/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+@@ -11,8 +11,12 @@ import type { bravaisPopMotion } from './bravaisSeamMotion';
+ // 为什么：窄视口上缝本身只有 300px（BRAVAIS_SEAM_FULL_WIDTH），从缝里弹出的菜单会往墙上伸出两百多像素。
+ // 用户实测「点进歌单后封面显示不全」——量出来的菜单是 241×92、x 从 285 到 526，正好压在墙中央那张封面上。
+ //
+-// 面板用 portal 挂到 stage 根节点（账户的平台列表挂的也是这里），不留在缝里：缝的内容层带着变换，
+-// `position: fixed` 会被那个变换当成包含块，底部面板就落不到屏幕底。窄视口下再铺一层遮罩，点它收起。
++// 面板用 portal 挂到 `document.body`，**不能**挂在 stage 根节点上：`.lattice-root` 带 `isolation: isolate`，
++// 它自己就是一个层叠上下文，而它在应用外壳里是按 DOM 顺序画的（z-index: auto）——库里任何带 z-index 的
++// 元素都整块压在 stage 之上，面板里的 z-index 再大也出不去。手机上「点开菜单只有屏幕变暗、面板什么都没有」
++// 就是这条：底部播放条是 `absolute z-60`（FloatingPlayerControls），面板（bottom: 10px，高 101px）恰好整个
++// 落在它后面；遮罩也一起被压住，所以只看得见「屏幕暗了」。挂到 body 后用一个 fixed 的宿主层顶住层级
++// （见 bravaisCollection.css 的 .bravais-seam-sheet-host），遮罩与面板都在这层里，二者不可能再被拆开。
+ //
+ // 两条约束：菜单的 DOM 标记（data-bravais-seam-menu / role / data-bravais-seam-action）保持不变，用例按它找；
+ // 事件照旧按 React 树冒泡（portal 不改变这一点），所以缝上的 onKeyDown（Esc 收起）仍然收得到菜单里的按键。
+@@ -46,19 +50,18 @@ const useNarrowViewport = (): boolean => {
+     return narrow;
+ };
+ 
+-/** 面板的挂载点：bravais 的 stage 根节点（拿不到时退回 body）。 */
+-const useSheetHost = (active: boolean): HTMLElement | null => {
+-    const [host, setHost] = useState<HTMLElement | null>(null);
+-    useEffect(() => {
+-        if (!active) return;
+-        setHost(document.querySelector<HTMLElement>('[data-library-stage="bravais"]') ?? document.body);
+-    }, [active]);
+-    return host;
+-};
++/**
++ * 面板的挂载点：`document.body`。
++ *
++ * 只用 body，不查 `[data-library-stage="bravais"]`：stage 带 `isolation: isolate`，整块在应用外壳里按 DOM
++ * 顺序作画，底部播放条（z-60）压在它上面，面板就跟着被压在下面（见文件头）。挂到 body 之后再套一层
++ * 定级 fixed 宿主，层级只由那一层决定。
++ */
++const sheetHost = (): HTMLElement | null => (typeof document === 'undefined' ? null : document.body);
+ 
+ export const BravaisSeamMenu: React.FC<BravaisSeamMenuProps> = ({ open, isHome, pop, reduced = false, ariaLabel, children }) => {
+     const narrow = useNarrowViewport();
+-    const host = useSheetHost(narrow && open);
++    const host = narrow ? sheetHost() : null;
+     const className = `bravais-seam-menu${isHome ? ' is-home' : ''}${narrow ? ' is-sheet' : ''}`;
+     // 窄视口从底部升起：位移小、时长与宽视口的弹出同一档（bravaisPopMotion 的量级）。
+     const sheetMotion = narrow ? {
+@@ -78,11 +81,12 @@ export const BravaisSeamMenu: React.FC<BravaisSeamMenuProps> = ({ open, isHome,
+         </AnimatePresence>
+     );
+     if (!host) return menu;
++    // 宿主层一直挂着（pointer-events: none，遮罩只在打开时渲染），这样收起时面板还能放完退场动画。
+     return createPortal(
+-        <>
++        <div className="bravais-seam-sheet-host" data-bravais-seam-menu-host>
+             {open && <div className="bravais-seam-menu-scrim" data-bravais-seam-menu-scrim aria-hidden />}
+             {menu}
+-        </>,
++        </div>,
+         host,
+     );
+ };
+diff --git a/src/library/suites/bravais/bravaisCollection.css b/src/library/suites/bravais/bravaisCollection.css
+index 52e4f87..4d82465 100644
+--- a/src/library/suites/bravais/bravaisCollection.css
++++ b/src/library/suites/bravais/bravaisCollection.css
+@@ -235,14 +235,28 @@
+    阈值只有 BRAVAIS_NARROW_VIEWPORT_PX 一处）——这里不用媒体查询：`max-width: 900px` 会在正好 900px 上命中，
+    而 JS 那一档是 `width < 900`，两边错开一次就会把没挂 portal 的菜单固定到带变换的缝里、飞出屏幕。
+    缝在这一档只有 300px 宽，从缝里弹出的菜单会往墙上伸出两百多像素，正好压住墙中央那张封面
+-   （用户实测：「点进歌单后封面被黑菜单盖住，显示不全」）。 */
+-.bravais-seam-menu.is-sheet {
++   （用户实测：「点进歌单后封面被黑菜单盖住，显示不全」）。
++
++   面板挂在 body 上（BravaisSeamMenuSheet 的 portal），宿主层负责层级：
++   `.lattice-root` 带 `isolation: isolate`，整块在应用外壳里按 DOM 顺序作画，底部播放条（absolute z-60）压得住
++   stage 里的任何 z-index。挂到 body 之后，这一层的 130 才是真正说话的数——它要高于底部播放条与库页面其它
++   chrome（≤ 120），低于命令面板（150）与对话框（136 起）。宿主层常驻、pointer-events: none，遮罩自己接管点击。 */
++.bravais-seam-sheet-host {
+     position: fixed;
++    inset: 0;
++    z-index: 130;
++    pointer-events: none;
++}
++
++.bravais-seam-menu.is-sheet {
++    position: absolute;
+     left: 0;
+     right: 0;
++    /* 先给不带 env() 的一档：env() 若被解析掉，整条声明作废，后面的 calc 里只剩 auto 就等于没定位。 */
++    bottom: 10px;
+     bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+     top: auto;
+-    z-index: 61;
++    z-index: 1;
+     width: min(440px, calc(100vw - 24px));
+     max-height: 62vh;
+     margin-inline: auto;
+@@ -253,6 +267,7 @@
+     /* 面板自己带不透明底与阴影：手机上面板离内容更近，半透明会让下面的封面透上来。 */
+     background: color-mix(in srgb, var(--bg-color, #070707) 96%, var(--text-primary, #f7f4ee));
+     box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 14%, transparent), 0 -8px 32px rgb(0 0 0 / 44%);
++    pointer-events: auto;
+ }
+ 
+ /* 行高收紧：手机横屏视口只有 377px 高，六项菜单要一次放得下。 */
+@@ -264,12 +279,14 @@
+     margin: 4px 6px;
+ }
+ 
+-/* 遮罩：把墙压暗，点它收起（缝自己的「点别处收起」监听会收到这一下）。只在底部面板那一档渲染。 */
++/* 遮罩：把墙压暗，点它收起（缝自己的「点别处收起」监听会收到这一下）。只在底部面板那一档渲染。
++   它跟面板在同一个宿主层里（都是 absolute，相对宿主定位），所以不可能再出现「遮罩在、面板不在」。 */
+ .bravais-seam-menu-scrim {
+-    position: fixed;
++    position: absolute;
+     inset: 0;
+-    z-index: 60;
++    z-index: 0;
+     background: rgb(0 0 0 / 42%);
++    pointer-events: auto;
+ }
+ 
+ /* ---------- 表单态 ---------- */
+diff --git a/src/services/playback/audioContextRecovery.ts b/src/services/playback/audioContextRecovery.ts
+index 2e01dba..0ba3790 100644
+--- a/src/services/playback/audioContextRecovery.ts
++++ b/src/services/playback/audioContextRecovery.ts
+@@ -12,10 +12,42 @@
+ // - 状态自己掉出 running（播放中被路由切换、被来电打断）时补一次迟到的重试，免得必须再点一下。
+ //
+ // 都尽量安静：running 时只是一次属性读取就返回，不改状态、不打日志、不排队。
++//
++// 第二件事（2026-10，0.6.8）：context 的构造参数。用户实测的分界很干净 ——
++// 「先外放播、再连蓝牙」能放（context 早就在扬声器上跑起来了，蓝牙只是把已有的输出流改路由），
++// 「一直连着蓝牙、直接按播放」不能放（context 是在蓝牙的那个 sink 上现开的）。
++// 安卓上这一档取样率由输出设备决定，A2DP 只给 48k，而 Chromium 的 WebView 默认按 44.1k 开——
++// 开到蓝牙 sink 上就拿不到输出流：context 停在非 running，节点图不推进，静音但元素照走。
++// 因此安卓壳上显式开 48k + 'playback' 延迟档（大缓冲对蓝牙也更稳）；构造失败仍退回默认参数。
++// 桌面 Electron 不动：44.1k 素材不引入重采样。
+ 
+ /** 只有 running 才是「音频真的在走」。'suspended' / 'interrupted'（安卓）/ 'closed' 都要重新拉。 */
+ export const needsAudioResume = (state: AudioContextState | string): boolean => state !== 'running';
+ 
++/**
++ * context 的构造参数。纯函数，只看 UA：安卓（WebView 壳）要显式定档，其它平台返回 null 表示「按默认建」。
++ */
++export const buildAudioContextOptions = (userAgent: string | undefined): AudioContextOptions | null => {
++    if (!userAgent || !/Android/i.test(userAgent)) return null;
++    return { latencyHint: 'playback', sampleRate: 48000 };
++};
++
++/**
++ * 按上面的参数建 context；构造被拒（老 WebView 不认这两个字段）就退回无参构造，不让它变成「播不了」。
++ */
++export const createPlaybackAudioContext = (AudioContextClass: typeof AudioContext): AudioContext => {
++    const userAgent = typeof navigator === 'undefined' ? undefined : navigator.userAgent;
++    const options = buildAudioContextOptions(userAgent);
++    if (options) {
++        try {
++            return new AudioContextClass(options);
++        } catch {
++            // 落到下面按默认建。
++        }
++    }
++    return new AudioContextClass();
++};
++
+ /** 掉出 running 之后多久补一次重试：给系统把路由切完的时间。只补一次，不和平台抢。 */
+ const STATE_RETRY_DELAY_MS = 400;
+ 
+diff --git a/src/services/playback/playbackStartWatchdog.ts b/src/services/playback/playbackStartWatchdog.ts
+new file mode 100644
+index 0000000..1df4d71
+--- /dev/null
++++ b/src/services/playback/playbackStartWatchdog.ts
+@@ -0,0 +1,58 @@
++// src/services/playback/playbackStartWatchdog.ts
++// 「界面进了 PLAYING，却一点声音都没有」的取证 —— audioStartupProbe 补不上的那半边。
++//
++// 起因（2026-10 用户实测）：连蓝牙直接按播放时「没反应，也没跳任何东西」。上一版把超时线索挂在了
++// play() 超时那一条分支上，可是这条路径根本走不到：AudioContext 停在 interrupted 时元素照样在走
++// （play() 会决议、currentTime 在涨、进度条在动），只是节点图不推进 —— 于是既没有超时、也没有提示，
++// 而声音是零。也就是说「有没有提示」这件事本身逼着我们去分辨两种沉默：
++//
++//   ctx:interrupted · el 3.2s  → 元素在走、context 不在 running：声音被 Web Audio 这一层卡住
++//   el:stalled · ctx:running   → context 好好跑着，元素自己没动：解码 / 缓冲 / 源的问题
++//
++// 两者要改的地方完全不同，所以判定做成纯函数，单测钉住；读数只在播放真正起步后取一次。
++
++/** 起步之后多久看一次。4s 的 play 期限在它之后，两条取证不会互相盖住。 */
++export const PLAYBACK_START_WATCHDOG_MS = 1500;
++
++/** currentTime 至少要走这么远才算「元素真的在走」：低于它分不清是没动还是刚开始。 */
++export const PLAYBACK_POSITION_TOLERANCE_SEC = 0.12;
++
++export type PlaybackStartVerdict =
++    | { kind: 'ok' }
++    | { kind: 'context-idle'; contextState: string; positionSec: number }
++    | { kind: 'element-stalled'; contextState: string; positionSec: number };
++
++/**
++ * 判一次：元素走了多远、context 在什么状态。
++ *
++ * 元素先判：没动的话 context 状态说什么都是次要的（哪怕 running 也出不来声音）。
++ * context 记为 'absent'（还没建 Web Audio 图，声音走元素直出）不算问题。
++ */
++export const judgePlaybackStart = (input: {
++    contextState: string;
++    positionBeforeSec: number;
++    positionNowSec: number;
++    toleranceSec?: number;
++}): PlaybackStartVerdict => {
++    const toleranceSec = input.toleranceSec ?? PLAYBACK_POSITION_TOLERANCE_SEC;
++    const positionSec = Math.round(input.positionNowSec * 10) / 10;
++    if (input.positionNowSec - input.positionBeforeSec < toleranceSec) {
++        return { kind: 'element-stalled', contextState: input.contextState, positionSec };
++    }
++    if (input.contextState !== 'running' && input.contextState !== 'absent') {
++        return { kind: 'context-idle', contextState: input.contextState, positionSec };
++    }
++    return { kind: 'ok' };
++};
++
++/** 那一行提示文案；没有任何问题时返回空串（调用处据此决定要不要弹）。 */
++export const describePlaybackStart = (verdict: PlaybackStartVerdict): string => {
++    switch (verdict.kind) {
++        case 'context-idle':
++            return `ctx:${verdict.contextState} · el ${verdict.positionSec.toFixed(1)}s`;
++        case 'element-stalled':
++            return `el:stalled · ctx:${verdict.contextState}`;
++        default:
++            return '';
++    }
++};
+diff --git a/test/component/bravaisSeamMenuSheet.spec.ts b/test/component/bravaisSeamMenuSheet.spec.ts
+index 0c071c3..841da2c 100644
+--- a/test/component/bravaisSeamMenuSheet.spec.ts
++++ b/test/component/bravaisSeamMenuSheet.spec.ts
+@@ -63,11 +63,42 @@ test.describe('[bravais-only] the 「⋯」 menu', () => {
+         await openCollectionMenu(mount, page, PHONE);
+ 
+         await expect(menu(page)).toHaveAttribute('data-bravais-seam-menu-sheet', 'true');
+-        // 挂在 stage 根节点上，不在缝里（缝的内容层带变换，留在里面 fixed 会相对缝定位）。
++        // 挂在 body 上、不在缝里也不在 stage 根节点上：stage 带 isolation: isolate，整块按 DOM 顺序画，
++        // 库里带 z-index 的元素（底部播放条 z-60）压得住它里面的任何层级 —— 面板会被整个盖掉。
+         await expect(seam(page).locator('[data-bravais-seam-menu]')).toHaveCount(0);
+-        await expect(stage(page).locator('[data-bravais-seam-menu]')).toHaveCount(1);
++        await expect(stage(page).locator('[data-bravais-seam-menu]')).toHaveCount(0);
++        await expect(page.locator('[data-bravais-seam-menu-host] [data-bravais-seam-menu]')).toHaveCount(1);
+         await expect(page.locator('[data-bravais-seam-menu-scrim]')).toHaveCount(1);
+ 
++        // 宿主层是 body 的直接子节点，且层级高过底部播放条（FloatingPlayerControls 的 z-60）。
++        const hostStacking = await page.evaluate(() => {
++            const host = document.querySelector<HTMLElement>('[data-bravais-seam-menu-host]');
++            return {
++                parent: host?.parentElement?.tagName ?? null,
++                z: host ? Number.parseInt(getComputedStyle(host).zIndex, 10) : Number.NaN,
++            };
++        });
++        expect(hostStacking.parent).toBe('BODY');
++        expect(hostStacking.z).toBeGreaterThan(60);
++
++        // 真机上的那条症状：底部播放条（FloatingPlayerControls，absolute z-60）是 stage 的兄弟节点，
++        // 面板只要还在 stage 里就会被它整块盖住 —— 用户看到的就是「只有屏幕变暗，什么都没有」。
++        // 这里造一个同层级的假播放条压在面板位置上，确认面板仍然在最上面（点得到）。
++        const paintedAbovePlayerBar = await page.evaluate(() => {
++            const shell = document.querySelector('[data-library-stage="bravais"]')?.parentElement;
++            const panel = document.querySelector('[data-bravais-seam-menu]');
++            if (!shell || !panel) return false;
++            const bar = document.createElement('div');
++            bar.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:120px;z-index:60;background:#123;';
++            shell.appendChild(bar);
++            const box = panel.getBoundingClientRect();
++            const at = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
++            const onTop = Boolean(at && at.closest('[data-bravais-seam-menu]'));
++            bar.remove();
++            return onTop;
++        });
++        expect(paintedAbovePlayerBar).toBe(true);
++
+         const box = (await menu(page).boundingBox())!;
+         // 贴底：面板底边离屏幕底 10px 上下（留一点行差给圆角与安全区）。
+         expect(Math.abs((box.y + box.height) - (PHONE.height - 10))).toBeLessThanOrEqual(3);
+diff --git a/test/unit/playback/audioContextRecovery.test.ts b/test/unit/playback/audioContextRecovery.test.ts
+index dda284f..f80f6ed 100644
+--- a/test/unit/playback/audioContextRecovery.test.ts
++++ b/test/unit/playback/audioContextRecovery.test.ts
+@@ -1,10 +1,12 @@
+ // @vitest-environment jsdom
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+-import { keepAudioContextAwake, needsAudioResume } from '../../../src/services/playback/audioContextRecovery';
++import { buildAudioContextOptions, createPlaybackAudioContext, keepAudioContextAwake, needsAudioResume } from '../../../src/services/playback/audioContextRecovery';
+ 
+ // test/unit/playback/audioContextRecovery.test.ts
+ // 蓝牙耳机反复失效的那个问题的守卫：安卓上被系统收走的 context 停在 'interrupted' 而不是 'suspended'，
+ // 所以判定不能只认 'suspended'；唤醒要发生在用户手势上，且 running 时不能有任何多余动作。
++// 另外钉住构造参数那一档：只有安卓壳显式定 48k / 'playback'，桌面按默认建（不引入重采样），
++// 构造被拒时退回无参构造。
+ 
+ const fakeContext = (state: string) => {
+     const resume = vi.fn(async () => {
+@@ -76,3 +78,54 @@ describe('keepAudioContextAwake', () => {
+         expect(() => gesture()).not.toThrow();
+     });
+ });
++
++describe('buildAudioContextOptions', () => {
++    const ANDROID_WEBVIEW = 'Mozilla/5.0 (Linux; Android 15; Pura 90 Pro Max Build/HUAWEI; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/141.0.0.0 Mobile Safari/537.36';
++
++    it('安卓壳显式定 48k 与 playback 延迟档', () => {
++        expect(buildAudioContextOptions(ANDROID_WEBVIEW)).toEqual({ latencyHint: 'playback', sampleRate: 48000 });
++    });
++
++    it('桌面按默认建，不引入重采样', () => {
++        expect(buildAudioContextOptions('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Folia/0.7.20 Chrome/141.0.0.0 Electron/38.0.0 Safari/537.36')).toBeNull();
++    });
++
++    it('没有 UA 时按默认建', () => {
++        expect(buildAudioContextOptions(undefined)).toBeNull();
++    });
++});
++
++describe('createPlaybackAudioContext', () => {
++    const originalUserAgent = navigator.userAgent;
++
++    afterEach(() => {
++        Object.defineProperty(navigator, 'userAgent', { value: originalUserAgent, configurable: true });
++    });
++
++    const setUserAgent = (value: string) => {
++        Object.defineProperty(navigator, 'userAgent', { value, configurable: true });
++    };
++
++    it('安卓上把参数递给构造器', () => {
++        setUserAgent('Linux; Android 15; wv');
++        const created: unknown[] = [];
++        class FakeContext {
++            constructor(options?: AudioContextOptions) { created.push(options); }
++        }
++        createPlaybackAudioContext(FakeContext as unknown as typeof AudioContext);
++        expect(created).toEqual([{ latencyHint: 'playback', sampleRate: 48000 }]);
++    });
++
++    it('构造被拒时退回无参构造，不让它变成「播不了」', () => {
++        setUserAgent('Linux; Android 15; wv');
++        const created: unknown[] = [];
++        class FakeContext {
++            constructor(options?: AudioContextOptions) {
++                if (options) throw new DOMException('unsupported', 'NotSupportedError');
++                created.push(options ?? 'default');
++            }
++        }
++        expect(() => createPlaybackAudioContext(FakeContext as unknown as typeof AudioContext)).not.toThrow();
++        expect(created).toEqual(['default']);
++    });
++});
+diff --git a/test/unit/playback/playbackStartWatchdog.test.ts b/test/unit/playback/playbackStartWatchdog.test.ts
+new file mode 100644
+index 0000000..af747e7
+--- /dev/null
++++ b/test/unit/playback/playbackStartWatchdog.test.ts
+@@ -0,0 +1,56 @@
++import { describe, expect, it } from 'vitest';
++import { PLAYBACK_POSITION_TOLERANCE_SEC, describePlaybackStart, judgePlaybackStart } from '../../../src/services/playback/playbackStartWatchdog';
++
++// test/unit/playback/playbackStartWatchdog.test.ts
++// 「进了 PLAYING 却没声音」那种沉默的判定守卫：同一个「没声音」下面藏着两种完全不同的病，
++// 元素没动和 context 不在 running 要分开报，正常播放必须一个问题都不报。
++
++describe('judgePlaybackStart', () => {
++    it('元素走了、context 在 running：没问题', () => {
++        expect(judgePlaybackStart({ contextState: 'running', positionBeforeSec: 3, positionNowSec: 4.4 }))
++            .toEqual({ kind: 'ok' });
++    });
++
++    it('没建 Web Audio（absent）时声音走元素直出，也不算问题', () => {
++        expect(judgePlaybackStart({ contextState: 'absent', positionBeforeSec: 0, positionNowSec: 1.5 }))
++            .toEqual({ kind: 'ok' });
++    });
++
++    it('元素在走、context 停在 interrupted：声音被 Web Audio 那一层卡住', () => {
++        expect(judgePlaybackStart({ contextState: 'interrupted', positionBeforeSec: 3, positionNowSec: 4.44 }))
++            .toEqual({ kind: 'context-idle', contextState: 'interrupted', positionSec: 4.4 });
++    });
++
++    it('元素自己没动：比 context 状态更靠前的问题', () => {
++        expect(judgePlaybackStart({ contextState: 'running', positionBeforeSec: 3, positionNowSec: 3 }))
++            .toEqual({ kind: 'element-stalled', contextState: 'running', positionSec: 3 });
++    });
++
++    it('走不到容差就算没动（差一点点不算起步）', () => {
++        expect(judgePlaybackStart({
++            contextState: 'running',
++            positionBeforeSec: 3,
++            positionNowSec: 3 + PLAYBACK_POSITION_TOLERANCE_SEC / 2,
++        }).kind).toBe('element-stalled');
++    });
++
++    it('没有元素（-1）也算没动', () => {
++        expect(judgePlaybackStart({ contextState: 'running', positionBeforeSec: -1, positionNowSec: -1 }).kind).toBe('element-stalled');
++    });
++});
++
++describe('describePlaybackStart', () => {
++    it('正常时不弹任何东西', () => {
++        expect(describePlaybackStart({ kind: 'ok' })).toBe('');
++    });
++
++    it('context 那一档带上状态与元素位置', () => {
++        expect(describePlaybackStart({ kind: 'context-idle', contextState: 'suspended', positionSec: 4.44 }))
++            .toBe('ctx:suspended · el 4.4s');
++    });
++
++    it('元素那一档写明是元素没动', () => {
++        expect(describePlaybackStart({ kind: 'element-stalled', contextState: 'running', positionSec: 0 }))
++            .toBe('el:stalled · ctx:running');
++    });
++});

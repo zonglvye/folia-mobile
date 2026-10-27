@@ -1,0 +1,66 @@
+From 9b04fedf3cd21861d79fda0c57aba9c57b5f31f5 Mon Sep 17 00:00:00 2001
+From: zonglvye <zonglvye@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 17:41:35 +0800
+Subject: [PATCH 75/90] fix(playback): show the real duration once a streamed
+ source finishes
+
+MediaSource reports Infinity until the whole thing has been appended, so
+loadedmetadata arrives with duration Infinity and the existing guard (write only
+a finite value) simply skipped it: the progress bar read 'Infinity:NaN' and the
+track could not be scrubbed. Listen for durationchange on the active element -
+the browser sends it once endOfStream() has let it compute the length - and
+render nothing at all while the length is still unknown.
+---
+ src/App.tsx                    | 24 ++++++++++++++++++++++++
+ src/components/ProgressBar.tsx |  3 +++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/src/App.tsx b/src/App.tsx
+index e491bac..bc7f6a6 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1364,6 +1364,30 @@ export default function App() {
+         }
+     }, [audioSrc, audioRef, setDuration]);
+ 
++    /*
++     * 长度为 Infinity 的源：壳里的 MediaSource 就是这种。
++     *
++     * MP3 边下边播时，`loadedmetadata` 在收到第一块数据时就到，那会儿 `duration` 还是 Infinity，
++     * 于是上面那段「有限才写」的守卫只是跳过，`duration` 一直停在 0（或 Infinity），
++     * 进度条右边就成了 "Infinity:NaN"，进度也拖不动。整首收完、`endOfStream()` 之后浏览器把
++     * 真实长度算出来并补发一次 `durationchange` —— 这里接住它。
++     */
++    useEffect(() => {
++        const element = audioRef.current;
++        if (!element) return undefined;
++        const publishFiniteDuration = () => {
++            if (Number.isFinite(element.duration) && element.duration > 0) {
++                setDuration(element.duration);
++            }
++        };
++        element.addEventListener('durationchange', publishFiniteDuration);
++        element.addEventListener('ended', publishFiniteDuration);
++        return () => {
++            element.removeEventListener('durationchange', publishFiniteDuration);
++            element.removeEventListener('ended', publishFiniteDuration);
++        };
++    }, [audioRef, setDuration]);
++
+     const { setupAudioAnalyzer, cacheSongAssets, cacheSongAssetsFor, adoptActiveDeckSource } = usePlaybackAudioBridge({
+         audioRef,
+         localSongs,
+diff --git a/src/components/ProgressBar.tsx b/src/components/ProgressBar.tsx
+index 1cc36e3..a58da93 100644
+--- a/src/components/ProgressBar.tsx
++++ b/src/components/ProgressBar.tsx
+@@ -25,6 +25,9 @@ interface ProgressBarProps {
+ 
+ 
+ const formatTime = (time: number) => {
++    // 流式播放（MediaSource）在收完之前 duration 是 Infinity，直接算会得到
++    // "Infinity:NaN"。长度未知时留空——比在播放器上挂一串乱码好，长度一到就自己补上。
++    if (!Number.isFinite(time)) return '';
+     if (isNaN(time)) return "00:00";
+     const minutes = Math.floor(time / 60);
+     const seconds = Math.floor(time % 60);

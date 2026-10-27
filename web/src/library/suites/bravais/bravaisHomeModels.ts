@@ -120,6 +120,11 @@ export type BravaisHomeAccount = {
     onSelect: (providerId: string) => void;
     /** B10：登出（只对能登出、且没有登出在途的那一行）。 */
     onLogout: (providerId: string) => void;
+    /**
+     * 当前平台能当游客用（汽水）、还没登录时，从列表里主动去扫码登录。
+     * 这种平台选它不会再拦登录（canSwitchToProviderDirectly），所以登录入口得单独给一个。
+     */
+    onLogin: (providerId: string) => void;
 };
 
 /** 首页层在缝里的那一部分（BravaisSeamModel.home）。 */

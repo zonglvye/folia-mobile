@@ -1,0 +1,49 @@
+From 859d5caa99999f18a868b70c24fd43e1e0f35326 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 21:00:11 +0800
+Subject: [PATCH 48/90] =?UTF-8?q?=E4=BF=AE=E3=80=8C=E2=8B=AF=E3=80=8D?=
+ =?UTF-8?q?=E8=8F=9C=E5=8D=95=E5=9C=A8=E6=89=8B=E6=9C=BA=E6=A8=AA=E5=B1=8F?=
+ =?UTF-8?q?=E4=B8=8A=E7=82=B9=E4=BA=86=E6=B2=A1=E5=8F=8D=E5=BA=94?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+原因：窄视口下 onMore 走的是「先请求展开缝、再打开菜单」的两步路径
+（setBravaisHomeOpenRequest + onExpand），而 open 又要求 !compact ——
+展开那一步在真机上没兑现，菜单永远不会打开，用户看到的就是「点进去啥都没有」。
+
+改成窄视口也直接 setBravaisHomePopover('menu')：BravaisSeamMenu 在窄视口本来就是
+portal 到底部的升起面板，不依赖缝的宽度。
+---
+ src/library/suites/bravais/BravaisSeamHomeTools.tsx | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/src/library/suites/bravais/BravaisSeamHomeTools.tsx b/src/library/suites/bravais/BravaisSeamHomeTools.tsx
+index 21521d6..4e2506e 100644
+--- a/src/library/suites/bravais/BravaisSeamHomeTools.tsx
++++ b/src/library/suites/bravais/BravaisSeamHomeTools.tsx
+@@ -84,7 +84,10 @@ const BravaisSeamHomeTools: React.FC<{
+     const local = home.menu ?? [];
+     const jumps = menuShortcuts ?? [];
+     const hasMenu = jumps.length > 0 || page.length > 0 || local.length > 0 || app.length > 0;
+-    const open = menuOpen && hasMenu && !compact;
++    // 窄视口（手机横屏）也直接把菜单开出来：原先的写法是「书脊/窄缝上先展开、再打开」，
++    // 而展开那一步在真机上没兑现，用户看到的就是「点 ⋯ 什么都没出现」。
++    // BravaisSeamMenu 在窄视口本来就是底部升起的 portal 面板，不依赖缝的宽度。
++    const open = menuOpen && hasMenu;
+     const reduced = useBravaisReducedTransitions();
+     const pop = bravaisPopMotion('above', reduced);
+ 
+@@ -131,11 +134,7 @@ const BravaisSeamHomeTools: React.FC<{
+     };
+ 
+     const onMore = () => {
+-        if (compact) {
+-            setBravaisHomeOpenRequest('menu');
+-            onExpand();
+-            return;
+-        }
++        // 不再区分宽窄：窄视口上「先展开缝再开菜单」在真机上打不开（见 open 的注释）。
+         setBravaisHomePopover(menuOpen ? null : 'menu');
+     };
+ 

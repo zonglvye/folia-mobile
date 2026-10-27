@@ -1,0 +1,262 @@
+From 6f6932306b2f6a7d90153b60dcaa7e68f344d437 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 21:34:44 +0800
+Subject: [PATCH 50/90] =?UTF-8?q?=E5=9C=A8=E7=BA=BF=E9=9F=B3=E9=A2=91?=
+ =?UTF-8?q?=E6=94=B9=E8=B5=B0=E3=80=8C=E5=A3=B3=E5=86=85=E5=AD=98=E7=9B=B4?=
+ =?UTF-8?q?=E5=87=BA=E3=80=8D=EF=BC=8C=E5=B9=B6=E6=8A=8A=E9=9F=B3=E8=B4=A8?=
+ =?UTF-8?q?=E5=B0=81=E9=A1=B6=E5=88=B0=20exhigh/mp3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机性能问题（都是这几处带来的）：
+1. /song/url/v1 固定 encodeType=flac，用户音质设成无损时单曲要 50538 KiB，
+   整首经代理搬一遍就是近十秒的切歌等待；
+2. 分块通道每条 1.4MB base64 字符串都在页面主线程上解码，播放/可视化期间持续发卡；
+3. 中继页停在网易云首页，1×1 也在后台解码封面与轮播。
+
+改动：
+- 音质封顶：lossless/hires → exhigh，encodeType 显式 mp3（该接口不带 encodeType 会 400）。
+  单曲体积 50538 KiB → 8878 KiB。
+- services/shellOnlineAudio.ts 增加快通道：mediaPrepare/mediaStatus → /api/media-proxy?token=…
+  壳用系统网络栈一次取成 ArrayBuffer，二进制不过 JS 字符串；失败自动回退到原来的分块 blob。
+- 壳侧配套（另见 harmony 仓库）：MediaCache + 拦截器支持 Range/206。
+
+实测：media ready: 9090656 bytes audio/mpeg token=1，无 fallback 分块日志。
+---
+ src/services/onlineMusic/neteaseLocalApi.ts |  19 ++-
+ src/services/shellOnlineAudio.ts            | 145 ++++++++++++++------
+ 2 files changed, 117 insertions(+), 47 deletions(-)
+
+diff --git a/src/services/onlineMusic/neteaseLocalApi.ts b/src/services/onlineMusic/neteaseLocalApi.ts
+index c8b13f0..74327b6 100644
+--- a/src/services/onlineMusic/neteaseLocalApi.ts
++++ b/src/services/onlineMusic/neteaseLocalApi.ts
+@@ -228,11 +228,20 @@ const ROUTES: Record<string, NeteaseRoute> = {
+     '/song/url/v1': {
+         mode: 'eapi',
+         uri: '/api/song/enhance/player/url/v1',
+-        payload: query => ({
+-            ids: `[${query.get('id')}]`,
+-            level: query.get('level') || 'exhigh',
+-            encodeType: 'flac',
+-        }),
++        payload: (query) => {
++            // 音质封顶 exhigh（320k mp3），并且**不要** flac：壳里这首歌要整首经同源代理搬一遍
++            // （见 services/shellOnlineAudio.ts），实测一首无损被搬了 50538 KiB、切歌要等近十秒。
++            // exhigh 的一条大约 6.5 MB，一块 1 MiB 十几到几十毫秒，切歌才等得住。
++            const requested = query.get('level') || 'exhigh';
++            const level = requested === 'lossless' || requested === 'hires' ? 'exhigh' : requested;
++            return {
++                ids: `[${query.get('id')}]`,
++                level,
++                // 上游这个接口**必须**带 encodeType（不带就 400 参数错误）；显式要 mp3，
++                // 免得以后有人把 level 放开到无损时又悄悄变成几十 MB 的 flac。
++                encodeType: 'mp3',
++            };
++        },
+         shape: data => rewriteSongUrlProtocols(data),
+     },
+     // 实例在这里把上游 body 包一层：`{data: {code, unikey}, code: 200}`。provider 读的是 `data.unikey`。
+diff --git a/src/services/shellOnlineAudio.ts b/src/services/shellOnlineAudio.ts
+index f65a6c5..8a8140b 100644
+--- a/src/services/shellOnlineAudio.ts
++++ b/src/services/shellOnlineAudio.ts
+@@ -1,49 +1,103 @@
+ // src/services/shellOnlineAudio.ts
+ //
+-// 把在线音频的**远程地址**换成同源 `blob:` 地址，再交给播放器。
++// 把在线音频的**远程地址**换成同源地址，再交给播放器。
+ //
+ // 为什么需要：鸿蒙壳里页面的 `<audio>` 带 `crossOrigin="anonymous"`（可视化/均衡器要 WebAudio
+ // 分析音频，必须要 CORS）。而网易对“网页客户端”下发的是带 `authSecret` / `cdntag=mark=os_web`
+ // 的签名地址，这类地址**任何 Origin 都不返回 Access-Control-Allow-Origin**，于是元素加载即失败、
+-// 表现为「有进度条但没有声音」。谱面上的 CORS 报错见壳体日志的 `console:` 行。
++// 表现为「有进度条但没有声音」。
+ //
+-// 做法：壳的同源代理（`/api/lyric-proxy`）走的是系统网络栈，不受 CORS 限制。这里按 1MiB 分块
+-// 把音频取回来（分块是为了不让几十 MB 的 base64 一次性过 JS↔ArkTS 桥），拼成 Blob 之后用
+-// `blob:` 地址播放 —— 同源、无 CORS 问题，WebAudio 分析照常。
++// 两条通道，优先第一条：
++//   1. 壳内存直出（`mediaPrepare` / `mediaStatus` → `/api/media-proxy?token=…`）：
++//      壳用系统网络栈把整首取成 ArrayBuffer，拦截器同步交回给 ArkWeb —— 二进制不过 JS 字符串，
++//      页面侧零解码开销。这是快的那条。
++//   2. 回退：按 1 MiB 分块经 `/api/lyric-proxy` 取回、拼成 Blob。慢（一次 1.4MB base64 字符串×N），
++//      只在壳不支持新桥方法时才会走到。
+ //
+ // 只在鸿蒙壳里生效：浏览器部署形态不需要它（那台机器上的音频地址本来就带 CORS）。
+ 
+ import { isShellNowPlayingSupported } from './shellNowPlaying';
+ import { retireBlobUrl } from './playbackBlobUrls';
+ 
+-/** 同源代理路径：与壳里 HttpProxy 的路线一致。 */
++/** 同源代理路径：与壳里 HttpProxy 的路线一致（回退通道用）。 */
+ const PROXY_PATH = '/api/lyric-proxy';
+-/** 每块大小。1MiB 的 base64 约 1.4MB，过桥稳定，又不至于块数太多拖慢起播。 */
++/** 壳内存直出的路径，与 Index.ets 的 MEDIA_PATH 一致。 */
++const MEDIA_PATH = '/api/media-proxy';
++/** 回退通道每块大小。 */
+ const CHUNK_BYTES = 1024 * 1024;
+ /** 单曲上限，防止一个坏地址把内存吃干。 */
+ const MAX_TOTAL_BYTES = 96 * 1024 * 1024;
+-/** 已转换过的地址（远程 URL → blob URL）。重试/重播同一首不必再取一遍。 */
++/** 等壳把整首取进内存的上限（一首 320k mp3 约 8 MB）。 */
++const BRIDGE_WAIT_MS = 30000;
++
++/** 已转换过的地址（远程 URL → 壳 token）。重试/重播同一首不必再取一遍。 */
++const tokenByRemoteUrl = new Map<string, number>();
++/** blob 回退通道的缓存。 */
+ const blobUrlByRemoteUrl = new Map<string, string>();
+-const BLOB_URL_CACHE_LIMIT = 4;
++const BLOB_URL_CACHE_LIMIT = 2;
++
++type ShellMediaBridge = {
++    mediaPrepare?: (url: string) => number;
++    mediaStatus?: (token: number) => string;
++};
++
++const shellBridge = (): ShellMediaBridge | undefined => (
++    typeof window === 'undefined' ? undefined : (window as { foliaAndroid?: ShellMediaBridge }).foliaAndroid
++);
+ 
+-/** 这个地址要不要经过壳代理：远程 http(s) 才需要，blob:/data: 本来就没有跨域问题。 */
++/** 这个地址要不要经过壳：远程 http(s) 才需要，blob:/data: 本来就没有跨域问题。 */
+ export const needsShellAudioRelay = (url: string | null | undefined): boolean => {
+     if (!url) return false;
+     if (!/^https?:/i.test(url)) return false;
+     return isShellNowPlayingSupported();
+ };
+ 
++const sleep = (ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); });
++
++/**
++ * 快通道：让壳把整首取进内存，然后返回同源地址。
++ * 返回 null 表示这条路不可用（壳没有新桥方法 / 取失败 / 超时），调用方走回退。
++ */
++const shellMemorySource = async (url: string, bridge: ShellMediaBridge): Promise<string | null> => {
++    const prepare = bridge.mediaPrepare;
++    const status = bridge.mediaStatus;
++    if (!prepare || !status) return null;
++
++    let token = tokenByRemoteUrl.get(url);
++    if (token === undefined) {
++        const created = prepare.call(bridge, url);
++        if (typeof created !== 'number' || created < 0) return null;
++        token = created;
++        tokenByRemoteUrl.set(url, token);
++        if (tokenByRemoteUrl.size > 4) {
++            // 壳内部只留最近两条，这里只管别让映射表无限长。
++            const oldest = tokenByRemoteUrl.keys().next();
++            if (!oldest.done) tokenByRemoteUrl.delete(oldest.value);
++        }
++    }
++
++    const deadline = Date.now() + BRIDGE_WAIT_MS;
++    while (Date.now() < deadline) {
++        const state = status.call(bridge, token);
++        if (state === 'ready') return `${MEDIA_PATH}?token=${token}`;
++        if (state === 'failed' || state === 'missing') {
++            tokenByRemoteUrl.delete(url);
++            return null;
++        }
++        await sleep(60);
++    }
++    console.warn('[ShellAudio] shell media prepare timed out, falling back to the chunked proxy');
++    return null;
++};
++
+ const rememberBlobUrl = (remoteUrl: string, blobUrl: string): void => {
+     blobUrlByRemoteUrl.set(remoteUrl, blobUrl);
+     if (blobUrlByRemoteUrl.size <= BLOB_URL_CACHE_LIMIT) return;
+-    // 超出上限就先丢最早的一条；真正的回收交给 retireBlobUrl，它会避开还在出声的 deck。
+     const oldest = blobUrlByRemoteUrl.keys().next();
+-    if (!oldest.done) {
+-        blobUrlByRemoteUrl.delete(oldest.value);
+-    }
++    if (!oldest.done) blobUrlByRemoteUrl.delete(oldest.value);
+ };
+ 
+-/** 取一块（range 由壳转成上游的 `Range` 头）；返回该块的字节。 */
++/** 回退通道取一块（range 由壳转成上游的 `Range` 头）；返回该块的字节。 */
+ const fetchChunk = async (remoteUrl: string, start: number, end: number): Promise<ArrayBuffer> => {
+     const query = new URLSearchParams({ url: remoteUrl, range: `${start}-${end}` });
+     const response = await fetch(`${PROXY_PATH}?${query.toString()}`, { cache: 'no-store' });
+@@ -53,8 +107,34 @@ const fetchChunk = async (remoteUrl: string, start: number, end: number): Promis
+     return response.arrayBuffer();
+ };
+ 
++/** 回退通道：分块取回 → Blob → blob: 地址。 */
++const shellChunkedSource = async (url: string): Promise<{ audioSrc: string; blobUrl?: string }> => {
++    const cached = blobUrlByRemoteUrl.get(url);
++    if (cached) return { audioSrc: cached, blobUrl: cached };
++
++    const chunks: BlobPart[] = [];
++    let offset = 0;
++    for (;;) {
++        const buffer = await fetchChunk(url, offset, offset + CHUNK_BYTES - 1);
++        const received = buffer.byteLength;
++        if (received === 0) break;
++        chunks.push(buffer);
++        offset += received;
++        if (offset > MAX_TOTAL_BYTES) throw new Error(`audio larger than ${MAX_TOTAL_BYTES} bytes`);
++        // 上游忽略 Range、一次给回整首时也会走到这里：块不满就不再继续问。
++        if (received < CHUNK_BYTES) break;
++    }
++    if (chunks.length === 0) throw new Error('audio proxy returned no bytes');
++
++    const blobUrl = URL.createObjectURL(new Blob(chunks, { type: 'audio/mpeg' }));
++    rememberBlobUrl(url, blobUrl);
++    retireBlobUrl(blobUrl);
++    console.log(`[ShellAudio] relayed ${Math.round(offset / 1024)} KiB (fallback path)`);
++    return { audioSrc: blobUrl, blobUrl };
++};
++
+ /**
+- * 把远程音频地址变成同源 blob 地址。
++ * 把远程音频地址变成同源地址。
+  *
+  * 失败时**回退到原地址**：让原有播放链路自己报错，比在这里伪装成功更好排查。
+  */
+@@ -65,35 +145,16 @@ export const materializeShellAudioSource = async (
+         return { audioSrc: url };
+     }
+ 
+-    const cached = blobUrlByRemoteUrl.get(url);
+-    if (cached) {
+-        return { audioSrc: cached, blobUrl: cached };
++    const bridge = shellBridge();
++    if (bridge) {
++        const viaMemory = await shellMemorySource(url, bridge);
++        if (viaMemory) {
++            return { audioSrc: viaMemory };
++        }
+     }
+ 
+     try {
+-        const chunks: BlobPart[] = [];
+-        let offset = 0;
+-        for (;;) {
+-            const buffer = await fetchChunk(url, offset, offset + CHUNK_BYTES - 1);
+-            const received = buffer.byteLength;
+-            if (received === 0) break;
+-            chunks.push(buffer);
+-            offset += received;
+-            if (offset > MAX_TOTAL_BYTES) {
+-                throw new Error(`audio larger than ${MAX_TOTAL_BYTES} bytes`);
+-            }
+-            // 上游忽略 Range、一次给回整首时也会走到这里：块不满就不再继续问。
+-            if (received < CHUNK_BYTES) break;
+-        }
+-        if (chunks.length === 0) {
+-            throw new Error('audio proxy returned no bytes');
+-        }
+-
+-        const blobUrl = URL.createObjectURL(new Blob(chunks, { type: 'audio/mpeg' }));
+-        rememberBlobUrl(url, blobUrl);
+-        retireBlobUrl(blobUrl);
+-        console.log(`[ShellAudio] relayed ${Math.round(offset / 1024)} KiB through the shell proxy for same-origin playback`);
+-        return { audioSrc: blobUrl, blobUrl };
++        return await shellChunkedSource(url);
+     } catch (error) {
+         console.warn('[ShellAudio] falling back to the remote audio URL', error);
+         return { audioSrc: url };

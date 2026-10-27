@@ -1,7 +1,7 @@
 From aa78fd41b50b60621c9a95b4c7509a47cd73ecf9 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 22:14:59 +0800
-Subject: [PATCH 22/29] feat(debug): record what happens when the screen goes
+Subject: [PATCH 22/90] feat(debug): record what happens when the screen goes
  black
 
 A black screen on this device is currently unattributable: `body` is #09090b, so

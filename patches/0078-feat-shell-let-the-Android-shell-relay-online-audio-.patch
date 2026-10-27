@@ -1,0 +1,76 @@
+From 71820fef388e64d299cb8f15d301e980e46d959b Mon Sep 17 00:00:00 2001
+From: zonglvye <zonglvye@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 21:19:35 +0800
+Subject: [PATCH 78/90] feat(shell): let the Android shell relay online audio
+ too
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+同一条「壳把音频取进内存、页面按同源地址取回」的路，之前只对鸿蒙壳打开：
+needsShellAudioRelay 问的是 isShellNowPlayingSupported，而后者判的是
+getShellKind()==='harmony'。安卓壳一直没有 getShellKind，于是那边始终把远程地址
+直接交给 <audio crossOrigin>。
+
+判据改成「壳有没有 mediaPrepare/mediaStatus」，也就是这段代码真正依赖的东西：
+
+- 鸿蒙壳：两个方法都在，行为不变（锁屏那套仍由 isShellNowPlayingSupported 单独判）。
+- 安卓壳：0.6.14 起实现了同一组方法（MediaCache + /api/media-proxy），域名解析出来
+  就让壳开始取，页面按 64 KB 起播，不再等整首下完，也不再受签名地址没有 CORS 头影响。
+- 桌面与 PWA：没有 window.foliaAndroid，照旧直连。
+---
+ src/services/onlinePlayback.ts   |  2 +-
+ src/services/shellOnlineAudio.ts | 15 ++++++++++++---
+ 2 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/src/services/onlinePlayback.ts b/src/services/onlinePlayback.ts
+index 5136186..b10295f 100644
+--- a/src/services/onlinePlayback.ts
++++ b/src/services/onlinePlayback.ts
+@@ -69,7 +69,7 @@ export async function loadOnlineSongAudioSource(
+     }
+ 
+     if (prefetched?.audioUrl && prefetched.audioUrl !== 'CACHED_IN_DB' && isUrlValid(prefetched.audioUrlFetchedAt) && !isNetworkOffline()) {
+-        // 鸿蒙壳里远程地址要先换成同源 blob（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
++        // 打包壳里远程地址要先换成同源地址（签名地址没有 CORS 头，见 shellOnlineAudio 的文件头）。
+         // 离线时跳过这条：预取到的签名地址这时也取不回来，交给下面的 provider 失败路径（文案与自动重连都按网络处理）。
+         const playable = await materializeShellAudioSource(prefetched.audioUrl);
+         return {
+diff --git a/src/services/shellOnlineAudio.ts b/src/services/shellOnlineAudio.ts
+index 6cb3e34..9a05c9d 100644
+--- a/src/services/shellOnlineAudio.ts
++++ b/src/services/shellOnlineAudio.ts
+@@ -15,9 +15,9 @@
+ //   2. 回退：按 1 MiB 分块经 `/api/lyric-proxy` 取回、拼成 Blob。慢（一次 1.4MB base64 字符串×N），
+ //      只在壳不支持新桥方法时才会走到。
+ //
+-// 只在鸿蒙壳里生效：浏览器部署形态不需要它（那台机器上的音频地址本来就带 CORS）。
++// 只在打包壳里生效：浏览器部署形态不需要它（那台机器上的音频地址本来就带 CORS）。
++// 两个壳（鸿蒙 / 安卓）实现的是同一组桥方法，页面这边只有一份实现。
+ 
+-import { isShellNowPlayingSupported } from './shellNowPlaying';
+ import { retireBlobUrl } from './playbackBlobUrls';
+ 
+ /** 同源代理路径：与壳里 HttpProxy 的路线一致（回退通道用）。 */
+@@ -47,11 +47,20 @@ const shellBridge = (): ShellMediaBridge | undefined => (
+     typeof window === 'undefined' ? undefined : (window as { foliaAndroid?: ShellMediaBridge }).foliaAndroid
+ );
+ 
++/** 这个壳有没有「把音频取进内存再同源交出」的能力（鸿蒙壳与安卓壳是同一组桥方法）。 */
++const hasShellMediaCache = (): boolean => {
++    const bridge = shellBridge();
++    return typeof bridge?.mediaPrepare === 'function' && typeof bridge?.mediaStatus === 'function';
++};
++
+ /** 这个地址要不要经过壳：远程 http(s) 才需要，blob:/data: 本来就没有跨域问题。 */
+ export const needsShellAudioRelay = (url: string | null | undefined): boolean => {
+     if (!url) return false;
+     if (!/^https?:/i.test(url)) return false;
+-    return isShellNowPlayingSupported();
++    // 判据是「壳能不能中转」，不是「壳是不是鸿蒙」：锁屏那套（isShellNowPlayingSupported）只有
++    // 鸿蒙壳开通了，但两个壳的媒体缓存是一样的，而签名音频地址对谁都不发 CORS 头。
++    // 桌面与 PWA 形态没有 foliaAndroid，于是照旧把远程地址直接交给 <audio>。
++    return hasShellMediaCache();
+ };
+ 
+ const sleep = (ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); });

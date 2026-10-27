@@ -23,12 +23,20 @@ const ownerOf = (providerId: string, userId: MediaId | null | undefined, capable
     capable && userId !== null && userId !== undefined ? { providerId, userId } : null
 );
 
+/**
+ * 游客可用平台的电台归属用的假账户 id：这类平台的私人 FM / 场景不需要账号，
+ * 但首页资源是按「provider + 账户」认领的，没有 id 就一直不读。
+ */
+export const GUEST_FEED_OWNER_ID = 'guest';
+
 type OnlineHomeFeedsAttachment = {
     tab: HomeViewTab;
     providerId: string;
     userId: MediaId | null | undefined;
     canUseAlbums: boolean;
     canUseRadio: boolean;
+    /** 平台未登录也能用（汽水）：电台按游客身份去读。 */
+    guestRadio?: boolean;
 };
 
 /**
@@ -37,10 +45,13 @@ type OnlineHomeFeedsAttachment = {
  */
 export const attachOnlineHomeFeeds = (
     resources: Pick<LibraryHomeResources, 'favoriteAlbums' | 'radioFeed'>,
-    { tab, providerId, userId, canUseAlbums, canUseRadio }: OnlineHomeFeedsAttachment,
+    { tab, providerId, userId, canUseAlbums, canUseRadio, guestRadio = false }: OnlineHomeFeedsAttachment,
 ): void => {
     resources.favoriteAlbums.setOwner(ownerOf(providerId, userId, canUseAlbums));
-    resources.radioFeed.setOwner(ownerOf(providerId, userId, canUseRadio));
+    resources.radioFeed.setOwner(
+        ownerOf(providerId, userId, canUseRadio)
+        ?? (guestRadio ? { providerId, userId: GUEST_FEED_OWNER_ID } : null),
+    );
     if (tab === 'albums') void resources.favoriteAlbums.ensure();
     if (tab === 'radio') void resources.radioFeed.ensure();
 };
@@ -52,6 +63,7 @@ export const useLibraryHomeOnlineFeeds = ({
     userId,
     canUseAlbums,
     canUseRadio,
+    guestRadio,
 }: {
     resources: Pick<LibraryHomeResources, 'favoriteAlbums' | 'radioFeed'>;
     tab: HomeViewTab;
@@ -60,11 +72,13 @@ export const useLibraryHomeOnlineFeeds = ({
     userId: MediaId | null | undefined;
     canUseAlbums: boolean;
     canUseRadio: boolean;
+    /** 平台未登录也能用（汽水）：电台按游客身份去读（收藏专辑仍然要账号）。 */
+    guestRadio?: boolean;
 }) => {
     const { favoriteAlbums, radioFeed } = resources;
     useEffect(() => {
-        attachOnlineHomeFeeds({ favoriteAlbums, radioFeed }, { tab, providerId, userId, canUseAlbums, canUseRadio });
-    }, [canUseAlbums, canUseRadio, favoriteAlbums, providerId, radioFeed, tab, userId]);
+        attachOnlineHomeFeeds({ favoriteAlbums, radioFeed }, { tab, providerId, userId, canUseAlbums, canUseRadio, guestRadio });
+    }, [canUseAlbums, canUseRadio, favoriteAlbums, guestRadio, providerId, radioFeed, tab, userId]);
 
     return {
         favoriteAlbums: useLibraryHomeFeed(favoriteAlbums),

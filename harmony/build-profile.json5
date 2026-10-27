@@ -1,12 +1,27 @@
 {
   "app": {
-    // 签名材料不进仓库：在 DevEco Studio 的 File → Project Structure → Signing Configs 里
-    // 配一次自己的调试/发布证书，DevEco 会把 signingConfigs 写回这个文件（那一份也不该提交）。
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\X\\.ohos\\config\\default_harmony_em6j7k3LG68-Ymx5ALxFWetsY3WpVESHhYo0yK4ZBo4=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001ACF9B6AD57FFDF0CB4483B206E1A4F4FE7B4615F1E6911FE2D66905A332E5E51332B24B893CC8",
+          "profile": "C:\\Users\\X\\.ohos\\config\\default_harmony_em6j7k3LG68-Ymx5ALxFWetsY3WpVESHhYo0yK4ZBo4=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\X\\.ohos\\config\\default_harmony_em6j7k3LG68-Ymx5ALxFWetsY3WpVESHhYo0yK4ZBo4=.p12",
+          "storePassword": "0000001AD1E46884B2413599847F50F7F24F784D3A37DAAAAB9369A049EAE513236E08BB71E5A9E1EA17"
+        }
+      }
+    ],
     "products": [
       {
         "name": "default",
+        "signingConfig": "default",
         // API 26 这一代要的是纯版本号 "26.0.0"：写成 "26.0.0(26)" 会被 hvigor 判成
-        // "api version parameter is illegal"。换了 SDK 就跟着改。
+        // "api version parameter is illegal"（旧写法 "5.0.0(12)" 那种带括号的已经不吃）。
+        // 换了 SDK 就跟着改，否则 hvigor 会报找不到兼容的 SDK。
         "compatibleSdkVersion": "26.0.0",
         "runtimeOS": "HarmonyOS",
         "buildOption": {
@@ -15,6 +30,8 @@
             "useNormalizedOHMUrl": true
           }
         },
+        // DevEco 打开工程时自己加了这个字段，值给成了空串；空串会被 hvigor 当成非法版本。
+        // 与 compatibleSdkVersion 保持一致，那条「没有显式设置 targetSdkVersion」的告警也随之消失。
         "targetSdkVersion": "26.0.0"
       }
     ],

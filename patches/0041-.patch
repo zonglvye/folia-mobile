@@ -1,0 +1,48 @@
+From 46f5f3a93b00903addbd951a0c783f4ebef3ac57 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 23:15:11 +0800
+Subject: [PATCH 41/90] =?UTF-8?q?=E6=95=91=E4=B8=8D=E5=9B=9E=E6=9D=A5?=
+ =?UTF-8?q?=E6=97=B6=E8=87=AA=E5=8A=A8=E8=AE=B0=E4=B8=8B=E7=9B=B4=E5=87=BA?=
+ =?UTF-8?q?=E6=A8=A1=E5=BC=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机结论：鸿蒙自带浏览器（ArkWeb）里连纯 Web Audio 的测试页都没有声音 —— Web Audio 在这台机器上
+根本没把声音送到扬声器，全应用的声音链都经过它，所以必哑。suspend→resume 救不回来就是这一档。
+
+- 侦测到「假 running」（readyState ≥ 2、没暂停、时钟不动）且 bounce 失败时，把 directOutputEnabled
+  写进设置，并在屏幕上提示「请完全退出应用再重新打开」。
+- 写入而不是当场切换：createMediaElementSource 是单向的，图建起来之后元素回不到直出，只能下次启动生效。
+- 代价（没有可视化/均衡/淡入淡出）比不上完全没有声音；而且元素冻着的时候可视化本来也没有数据。
+---
+ src/hooks/usePlaybackTransportController.ts | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/hooks/usePlaybackTransportController.ts b/src/hooks/usePlaybackTransportController.ts
+index 68439cc..874b35b 100644
+--- a/src/hooks/usePlaybackTransportController.ts
++++ b/src/hooks/usePlaybackTransportController.ts
+@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
+ import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from 'react';
+ import { PlayerState } from '../types';
+ import { setStatusMessage as setStatusMsg } from '../stores/useStatusMessageStore';
++import { useAudioSettingsStore } from '../stores/useAudioSettingsStore';
+ import { setPlayerState } from '../stores/usePlaybackStore';
+ import { useTranslation } from 'react-i18next';
+ import { usePlaybackStore } from '../stores/usePlaybackStore';
+@@ -286,7 +287,13 @@ export function usePlaybackTransportController({
+                                 setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : null));
+                                 return;
+                             }
+-                            setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text: `${text} · bounce failed` }));
++                            // 救不回来 = 这台机器的 Web Audio 确实拉不动元素（鸿蒙 NEXT 的 ArkWeb 就是这样：
++                            // 连纯 Web Audio 的测试页都没有声音）。把直出模式记下来 —— 下一次启动就不建图，
++                            // 声音走 <audio> 直出。代价（没有可视化/均衡/淡入淡出）比不上完全没有声音。
++                            // 开关只在建图之前有效，所以这里只能写入、不能当场切换，提示用户重启。
++                            useAudioSettingsStore.getState().handleToggleDirectOutput(true);
++                            console.warn('[Playback] context revival failed; direct output mode enabled for the next launch');
++                            setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text: t('options.directOutputRestartHint') }));
+                         }, PLAYBACK_START_WATCHDOG_MS);
+                         startWatchdogTimer.current = resample;
+                     });

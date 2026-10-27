@@ -1,7 +1,7 @@
 From 2f06552746836ba490dca08b16f36272df454ab3 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sun, 18 Oct 2026 16:42:10 +0800
-Subject: [PATCH 26/29] feat(bravais): open a collection at the full seam on a
+Subject: [PATCH 26/90] feat(bravais): open a collection at the full seam on a
  phone, not the spine
 
 Entering an artist page on the phone showed a 64px strip first: the name squeezed

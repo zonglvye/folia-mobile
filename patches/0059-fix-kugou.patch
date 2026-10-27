@@ -1,0 +1,168 @@
+From ade39f13004a01f4a57490df7350af80cde4e4c2 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 15:29:37 +0800
+Subject: [PATCH 59/90] =?UTF-8?q?fix(kugou):=20=E5=8C=BF=E5=90=8D=E6=A8=A1?=
+ =?UTF-8?q?=E5=BC=8F=E7=9A=84=E6=92=AD=E6=94=BE=E4=B8=8E=E6=AD=8C=E8=AF=8D?=
+ =?UTF-8?q?=EF=BC=8C=E4=BF=AE=E6=8E=89=E6=96=B0=E6=97=A7=E9=9F=B3=E9=A2=91?=
+ =?UTF-8?q?=E5=9C=B0=E5=9D=80=E4=BA=A4=E6=8E=A5=E6=97=B6=E7=9A=84=E8=AF=AF?=
+ =?UTF-8?q?=E6=92=A4=E9=94=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 播放：交接给 deck 之前 retireBlobUrl 传的是旧 URL，扫除把刚建好的新 blob 当成
+  没人用的地址撤销，元素随即 err 4（MEDIA_ELEMENT_ERROR: Format error）。
+  改为把即将使用的 blob 作为 next 交出去。
+- 歌词：匿名公开模式没有实例接口，改走酷狗公开的 search + download（KRC 页面解密）。
+- 元数据：单曲详情用旧版 playInfo 补齐；专辑 hydration 在匿名模式下不再触发。
+- 合唱段：匿名模式直接返回空，不再每首歌打一次注定失败的 song_climax。
+---
+ src/hooks/usePlaybackQueueController.ts   |  6 ++-
+ src/services/onlineMusic/kugouProvider.ts | 63 ++++++++++++++++++++++-
+ src/services/onlineMusic/omni.ts          |  6 ++-
+ 3 files changed, 72 insertions(+), 3 deletions(-)
+
+diff --git a/src/hooks/usePlaybackQueueController.ts b/src/hooks/usePlaybackQueueController.ts
+index 4450dd8..062c18a 100644
+--- a/src/hooks/usePlaybackQueueController.ts
++++ b/src/hooks/usePlaybackQueueController.ts
+@@ -730,7 +730,11 @@ export function usePlaybackQueueController({
+         // Handed over rather than revoked here: during a blend the song this replaces is still
+         // sounding on the other deck, and taking its URL away leaves that deck unable to seek. See
+         // `retireBlobUrl` - the failure is silent and permanent, with no error event to notice it by.
+-        retireBlobUrl(blobUrlRef.current);
++        //
++        // next 必须是「接下来要交给 deck 的那一条」：新 URL 在下面的 setAudioSrc 之前还不在任何 deck 上，
++        // 传旧 URL 会让扫除把它当作没人用的旧地址撤销。真机上的样子是元素立刻 err 4
++        // （MEDIA_ELEMENT_ERROR: Format error）、进度停在 0，而壳那边日志显示整首已经取回。
++        retireBlobUrl(audioResult.blobUrl ?? blobUrlRef.current);
+         blobUrlRef.current = null;
+ 
+         if (queue.length > 0 || playQueue.length === 0) {
+diff --git a/src/services/onlineMusic/kugouProvider.ts b/src/services/onlineMusic/kugouProvider.ts
+index 025d194..c2aa518 100644
+--- a/src/services/onlineMusic/kugouProvider.ts
++++ b/src/services/onlineMusic/kugouProvider.ts
+@@ -1,5 +1,6 @@
+ import type { SongResult, UnifiedSong } from '../../types';
+ import {
++    ANONYMOUS_PUBLIC_MODE,
+     OnlineProviderError,
+     type AudioQualityPreference,
+     type ChorusRange,
+@@ -16,6 +17,7 @@ import {
+ } from '../../types/onlineMusic';
+ import { getSizedCoverUrl } from '../../utils/coverUrl';
+ import { parseLyricsByFormat } from '../../utils/lyrics/parserCore';
++import { fetchKugouLyrics } from '../../utils/lyrics/providers/kugouLyricProvider';
+ import { isPureMusicLyricText } from '../../utils/lyrics/pureMusic';
+ import { hasRenderableLyrics } from '../../utils/lyrics/validity';
+ import { getPlaybackSongKey } from '../../utils/appPlaybackGuards';
+@@ -700,6 +702,8 @@ const parseKugouChorusRanges = (response: unknown): ChorusRange[] => {
+ const getKugouChorusRanges = async (songId: MediaId): Promise<ChorusRange[]> => {
+     const hash = String(songId).trim().toUpperCase();
+     if (!hash) return [];
++    // 匿名公开模式没有 song_climax 接口；直接给空，让上层走文本兜底，不必每首歌打一次注定失败的请求。
++    if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) return [];
+ 
+     const cached = kugouChorusRangesCache.get(hash);
+     if (cached) return cached;
+@@ -731,8 +735,58 @@ const getKugouLyricCandidate = async (song: SongResult): Promise<any | null> =>
+     return Array.isArray(candidates) ? candidates[0] ?? null : null;
+ };
+ 
++/**
++ * 旧版 playInfo 的字段名是 songName / author_name / imgUrl，和检索接口那套 SongName / Singers / FileHash 不同。
++ * 这里只补上归一化认得的键，其余原样带过去，不再养第二条 normalize 分支。
++ */
++const getKugouLegacySongDetail = async (id: MediaId): Promise<UnifiedSong | null> => {
++    const hash = String(id ?? '').trim().toUpperCase();
++    if (!hash) return null;
++    const raw = await requestKugouLegacyPlayInfo(hash);
++    if (!raw || typeof raw !== 'object') return null;
++    const song = normalizeKugouSong({
++        ...raw,
++        SongName: raw.songName,
++        SingerName: raw.author_name,
++        FileHash: raw.hash || hash,
++        Duration: raw.timeLength,
++        AlbumID: raw.albumid ?? raw.req_albumid,
++        Image: raw.imgUrl || raw.album_img,
++    });
++    return song.id ? song : null;
++};
++
++/**
++ * 匿名公开模式的歌词：酷狗自己的 search + download 两条公开接口，KRC 在页面里解密。
++ * 这条通道原本只服务歌词页的自动匹配，匿名 provider 没有实例可问，正好复用。
++ */
++const getKugouAnonymousLyrics = async (song: SongResult) => {
++    const parsed = await fetchKugouLyrics(song).catch(error => {
++        console.warn('[KugouProvider] anonymous lyric fetch failed', error);
++        return null;
++    });
++    if (!parsed) return { lyrics: null, isPureMusic: false, chorusRanges: [] };
++    // 公开接口只回解析结果、不回原始 KRC 文本；mainText 用逐行文本回填，纯音乐判定与缓存都沿用这个字符串。
++    const lyricText = parsed.lines.map((line: { fullText: string }) => line.fullText).join('\n');
++    if (isPureMusicLyricText(lyricText)) {
++        return { lyrics: null, mainText: lyricText, wordByWordText: lyricText, isPureMusic: true, chorusRanges: [] };
++    }
++    return {
++        lyrics: parsed,
++        mainText: lyricText,
++        wordByWordText: parsed.isWordByWord ? lyricText : undefined,
++        isPureMusic: false,
++        chorusRanges: [],
++    };
++};
++
+ // Fetches the server-decoded KRC payload exposed by the current KuGou provider API.
+ const getKugouLyrics = async (song: SongResult) => {
++    // 匿名公开模式没有实例接口，歌词改走公开通道，否则每首歌都会以
++    // 「VITE_KUGOU_API_BASE is not configured」失败，歌词页一片空白。
++    if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
++        return getKugouAnonymousLyrics(song);
++    }
+     const candidate = await getKugouLyricCandidate(song);
+     if (!candidate?.id || !candidate?.accesskey) {
+         return { lyrics: null, isPureMusic: false, chorusRanges: [] };
+@@ -1053,6 +1107,10 @@ export const kugouProvider: OnlineMusicProvider = {
+     },
+     playback: {
+         async getSongDetail(id) {
++            // 匿名公开模式没有实例接口；旧版 playInfo 的同一份应答里就有歌名、歌手、封面、时长。
++            if (getKugouTransportMode() === ANONYMOUS_PUBLIC_MODE) {
++                return getKugouLegacySongDetail(id);
++            }
+             const response = await requestKugou('audio', { hash: String(id) });
+             const item = listOf(response)[0] ?? dataOf(response);
+             return hashOf(item) ? normalizeKugouSong(item) : null;
+@@ -1343,7 +1401,10 @@ export const kugouProvider: OnlineMusicProvider = {
+         },
+     },
+     catalog: {
+-        canResolveSongCatalogRefs: song => Boolean(getKugouCatalogLookupId(song)),
++        // 匿名公开模式没有专辑/歌手接口：检索结果自带歌名、歌手、专辑名与封面，再 hydrate 只会
++        // 拿一条「VITE_KUGOU_API_BASE is not configured」回来，所以这里直接说不。
++        canResolveSongCatalogRefs: song => getKugouTransportMode() !== ANONYMOUS_PUBLIC_MODE
++            && Boolean(getKugouCatalogLookupId(song)),
+         resolveSongCatalogRefs: resolveKugouSongCatalogRefs,
+         async getPlaylistTracks(id, limit, offset, collection) {
+             const recommendationPage = await getKugouRecommendationPage(collection, limit, offset);
+diff --git a/src/services/onlineMusic/omni.ts b/src/services/onlineMusic/omni.ts
+index 6ce8802..24bdf22 100644
+--- a/src/services/onlineMusic/omni.ts
++++ b/src/services/onlineMusic/omni.ts
+@@ -738,7 +738,11 @@ export const omni = {
+         const source = getPlaybackSourceRef(song);
+         if (source.kind !== 'online') return false;
+         const catalog = getOnlineMusicProvider(source.providerId)?.catalog;
+-        return Boolean(catalog?.resolveSongCatalogRefs || catalog?.canResolveSongCatalogRefs?.(song));
++        if (!catalog) return false;
++        // 显式的 canResolve 优先：它回答的是「这一首能不能解析」，比「这个 provider 有没有解析器」更准确。
++        // 匿名酷狗靠它把必然失败的专辑 hydration 关掉（那一路只有实例接口）。
++        if (catalog.canResolveSongCatalogRefs) return catalog.canResolveSongCatalogRefs(song);
++        return Boolean(catalog.resolveSongCatalogRefs);
+     },
+ 
+     async resolveCatalogRefs(song: UnifiedSong): Promise<UnifiedSong> {

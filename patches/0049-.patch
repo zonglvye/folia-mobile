@@ -1,0 +1,164 @@
+From 220203256c01e5a048cc96a086e88e12375878ff Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 20 Oct 2026 21:17:20 +0800
+Subject: [PATCH 49/90] =?UTF-8?q?=E4=BF=AE=E3=80=8C=E2=8B=AF=E3=80=8D?=
+ =?UTF-8?q?=E8=8F=9C=E5=8D=95=E5=9C=A8=E6=89=8B=E6=9C=BA=E6=A8=AA=E5=B1=8F?=
+ =?UTF-8?q?=E4=B8=8A=E7=82=B9=E5=BC=80=E6=98=AF=E7=A9=BA=E7=9A=84=EF=BC=88?=
+ =?UTF-8?q?=E9=9D=A2=E6=9D=BF=E8=90=BD=E5=9C=A8=E8=A7=86=E5=8F=A3=E4=B9=8B?=
+ =?UTF-8?q?=E5=A4=96=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机量出来的证据（壳里注入 JS 量 DOM）：
+- 按钮存在、位置对、elementFromPoint 命中的就是它，程序化 click 也能打开
+- 打开后 rect=192,-240,440x232 —— 232px 高的面板被放到屏幕上方 240px 处，整块在视口外
+
+两个原因叠在一起：
+1. BravaisSeamMenuSheet 只按宽度判「窄视口」，手机横屏 823×374 宽度过了门槛，
+   于是走桌面那套「贴着按钮往上弹」；
+2. 这套「往上弹」的规则（`.bravais-seam-menu.is-home`）和底部面板规则（`.is-sheet`）
+   同为两条类的特异性，打包后 is-home 在后，于是生效的是 `bottom: calc(100% + 8px)`，
+   相对 fixed 宿主层就是 374px → top = -240；
+   而 `.is-sheet` 那几条规则原本只写在 bravaisCollection.css 里，首页根本没加载它。
+
+修法：
+- 矮视口（innerHeight <= 500）也按底部面板处理（useSheetLayout）
+- 把面板样式挪到组件自己的 bravaisMenuSheet.css，选择器带上 .is-home（三条类）稳压后者
+- 窄视口也直接开菜单，不再走「先展开缝再打开」的两步路径
+
+实测：rect=192,132,440x232，面板出现在屏幕下方，含「lumen607喜欢的音乐 / 私人FM / 每日推荐 / 过滤当前页」。
+---
+ .../suites/bravais/BravaisSeamMenuSheet.tsx   | 26 +++++---
+ .../suites/bravais/bravaisMenuSheet.css       | 66 +++++++++++++++++++
+ 2 files changed, 83 insertions(+), 9 deletions(-)
+ create mode 100644 src/library/suites/bravais/bravaisMenuSheet.css
+
+diff --git a/src/library/suites/bravais/BravaisSeamMenuSheet.tsx b/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+index 70897da..a3663e5 100644
+--- a/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
++++ b/src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom';
+ import { AnimatePresence, motion } from 'framer-motion';
+ import { isNarrowViewport } from './bravaisSeamLevel';
+ import type { bravaisPopMotion } from './bravaisSeamMotion';
++// 底部面板的样式跟着组件走：原先只写在 bravaisCollection.css 里，首页打开这条菜单时没有那套规则，
++// 面板会落在视口之外（见 bravaisMenuSheet.css 的文件头）。
++import './bravaisMenuSheet.css';
+ 
+ // src/library/suites/bravais/BravaisSeamMenuSheet.tsx
+ // 缝里的「⋯」菜单（集合层的「⋯ 更多」与首页工具格共用）。
+@@ -35,19 +38,24 @@ type BravaisSeamMenuProps = {
+     children: React.ReactNode;
+ };
+ 
+-/** 与 bravaisConstants 的 BRAVAIS_NARROW_VIEWPORT_PX 同一个门槛（窄视口默认收成书脊那条）。 */
+-const isNarrowNow = () => typeof window !== 'undefined' && isNarrowViewport(window.innerWidth);
+-
+-/** 视口宽度是否落在窄视口那档；跟着窗口尺寸变。 */
+-const useNarrowViewport = (): boolean => {
+-    const [narrow, setNarrow] = useState(isNarrowNow);
++/**
++ * 面板走「底部升起」还是「贴着按钮弹出」。
++ *
++ * 除了窄视口，**很矮的视口也算**：手机横屏是 823×374（dpr 3.5），宽度过了窄视口门槛、
++ * 于是走了桌面那套「在按钮行上方弹出」的定位，量出来 rect.top = -240 —— 一个 232px 高的面板
++ * 被放到屏幕上方 240px 处，整块在视口之外。用户看到的就是「点 ⋯ 什么都没出现」。
++ */
++const useSheetLayout = (): boolean => {
++    const [sheet, setSheet] = useState(() => typeof window !== 'undefined'
++        && (isNarrowViewport(window.innerWidth) || window.innerHeight <= 500));
+     useEffect(() => {
+-        const update = () => setNarrow(isNarrowNow());
++        const update = () => setSheet(typeof window !== 'undefined'
++            && (isNarrowViewport(window.innerWidth) || window.innerHeight <= 500));
+         update();
+         window.addEventListener('resize', update);
+         return () => window.removeEventListener('resize', update);
+     }, []);
+-    return narrow;
++    return sheet;
+ };
+ 
+ /**
+@@ -60,7 +68,7 @@ const useNarrowViewport = (): boolean => {
+ const sheetHost = (): HTMLElement | null => (typeof document === 'undefined' ? null : document.body);
+ 
+ export const BravaisSeamMenu: React.FC<BravaisSeamMenuProps> = ({ open, isHome, pop, reduced = false, ariaLabel, children }) => {
+-    const narrow = useNarrowViewport();
++    const narrow = useSheetLayout();
+     const host = narrow ? sheetHost() : null;
+     const className = `bravais-seam-menu${isHome ? ' is-home' : ''}${narrow ? ' is-sheet' : ''}`;
+     // 窄视口从底部升起：位移小、时长与宽视口的弹出同一档（bravaisPopMotion 的量级）。
+diff --git a/src/library/suites/bravais/bravaisMenuSheet.css b/src/library/suites/bravais/bravaisMenuSheet.css
+new file mode 100644
+index 0000000..4a7f02f
+--- /dev/null
++++ b/src/library/suites/bravais/bravaisMenuSheet.css
+@@ -0,0 +1,66 @@
++/* src/library/suites/bravais/bravaisMenuSheet.css
++ *
++ * 缝里的「⋯」菜单在**矮视口**（手机横屏 823×374）的底部面板样式。
++ *
++ * 这几条原本只写在 bravaisCollection.css 里，而那个文件只被 BravaisSeamCollection 引入 ——
++ * 首页的「⋯」菜单根本没有这套规则：面板带着 `is-sheet` 类、也被 portal 到了
++ * `.bravais-seam-sheet-host`，但没有 CSS 定位，量出来 rect.top = -240，整块跑到屏幕上方之外。
++ * 用户看到的就是「点 ⋯ 什么都没出现」。
++ *
++ * 所以把它挪到菜单组件自己身上（BravaisSeamMenuSheet 直接 import），哪个界面打开都能用。
++ * bravaisCollection.css 里的同名规则保留原样：内容一致，重复不会打架。
++ */
++
++.bravais-seam-sheet-host {
++    position: fixed;
++    inset: 0;
++    z-index: 130;
++    pointer-events: none;
++}
++
++/* 选择器带上 `.is-home`（三条类）是必须的：`.bravais-seam-menu.is-home` 里写的是「贴着按钮往上弹」
++ * （`bottom: calc(100% + 8px)`），和这里同为两条类的特异性，谁在后面谁赢。首页的菜单同时带着
++ * 两个类，打包后 is-home 排在后面，于是底部面板被顶到宿主层上方 100%（374px），量出来 rect.top = -240。
++ * 三条类稳压它，跟文件顺序无关。 */
++.bravais-seam-menu.is-sheet,
++.bravais-seam-menu.is-home.is-sheet {
++    position: absolute;
++    left: 0;
++    right: 0;
++    /* 先给不带 env() 的一档：env() 若被解析掉，整条声明作废，后面的 calc 里只剩 auto 就等于没定位。 */
++    bottom: 10px;
++    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
++    top: auto;
++    z-index: 1;
++    width: min(440px, calc(100vw - 24px));
++    max-height: 62vh;
++    margin-inline: auto;
++    padding: 8px;
++    gap: 0;
++    overflow-y: auto;
++    border-radius: 16px;
++    /* 面板自己带不透明底与阴影：手机上离内容更近，半透明会让下面的封面透上来。 */
++    background: color-mix(in srgb, var(--bg-color, #070707) 96%, var(--text-primary, #f7f4ee));
++    box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 14%, transparent), 0 -8px 32px rgb(0 0 0 / 44%);
++    pointer-events: auto;
++}
++
++/* 行高收紧：手机横屏视口只有 374px 高，六项菜单要一次放得下。 */
++.bravais-seam-menu.is-sheet button,
++.bravais-seam-menu.is-home.is-sheet button {
++    padding: 7px 10px;
++}
++
++.bravais-seam-menu.is-sheet > .bravais-seam-menu-rule,
++.bravais-seam-menu.is-home.is-sheet > .bravais-seam-menu-rule {
++    margin: 4px 6px;
++}
++
++/* 遮罩：把墙压暗，点它收起。跟面板在同一个宿主层里，不可能再出现「遮罩在、面板不在」。 */
++.bravais-seam-menu-scrim {
++    position: absolute;
++    inset: 0;
++    z-index: 0;
++    background: rgb(0 0 0 / 42%);
++    pointer-events: auto;
++}

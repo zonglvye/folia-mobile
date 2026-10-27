@@ -1,0 +1,73 @@
+From 598cbfc4ff846bbdd5ae6c1584a6c217a2596248 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 21 Oct 2026 16:12:22 +0800
+Subject: [PATCH 63/90] =?UTF-8?q?fix(kugou):=20=E7=99=BB=E5=BD=95=E8=AF=B7?=
+ =?UTF-8?q?=E6=B1=82=E8=A1=A5=E9=BD=90=E5=AE=98=E6=96=B9=E5=AE=A2=E6=88=B7?=
+ =?UTF-8?q?=E7=AB=AF=E7=9A=84=20kg-*=20=E8=AF=B7=E6=B1=82=E5=A4=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用 KuGouMusicApi 的调试转储对了一遍它真实发出的请求：参数、签名、body 字段一致，
+差别在头——官方客户端会带 dfid / clienttime / mid / kg-rc / kg-thash / kg-rec / kg-rf。
+这些头不参与签名，但服务端按它们识别客户端类型，缺了可能被当成另一类请求。补齐。
+---
+ src/services/onlineMusic/kugouWebAuth.ts | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/src/services/onlineMusic/kugouWebAuth.ts b/src/services/onlineMusic/kugouWebAuth.ts
+index 57280a4..8a151b6 100644
+--- a/src/services/onlineMusic/kugouWebAuth.ts
++++ b/src/services/onlineMusic/kugouWebAuth.ts
+@@ -121,6 +121,24 @@ const query = (params: Record<string, string | number>): string => (
+         .join('&')
+ );
+ 
++/**
++ * 登录链路的客户端头：与官方客户端一致（服务端按头识别客户端类型）。
++ * 这些头不参与签名，但缺了会让登录服务把请求当成另一类客户端，所以照抄，不省略。
++ */
++const clientHeaders = (extra: Record<string, string> = {}): Record<string, string> => {
++    const params = commonParams();
++    return {
++        dfid: String(params.dfid),
++        clienttime: String(params.clienttime),
++        mid: String(params.mid),
++        'kg-rc': '1',
++        'kg-thash': '5d816a0',
++        'kg-rec': '1',
++        'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F',
++        ...extra,
++    };
++};
++
+ /** 一次代理请求；返回上游状态码与原始文本。 */
+ const proxyRequest = async (
+     target: string,
+@@ -219,7 +237,7 @@ export const sendKugouLoginCode = async (mobile: string): Promise<void> => {
+     const json = await proxyJson(target, {
+         method: 'POST',
+         body,
+-        headers: { 'Content-Type': 'application/json', 'User-Agent': LOGIN_UA },
++        headers: clientHeaders({ 'Content-Type': 'application/json', 'User-Agent': LOGIN_UA }),
+     });
+     if (Number(json?.status) !== 1) {
+         throw new Error(`KuGou code request failed: ${errorTextOf(json)}`);
+@@ -275,7 +293,7 @@ export const loginKugouWithCode = async (mobile: string, code: string): Promise<
+     const json = await proxyJson(target, {
+         method: 'POST',
+         body: payload,
+-        headers: { 'Content-Type': 'application/json', 'support-calm': '1', 'User-Agent': LOGIN_UA },
++        headers: clientHeaders({ 'Content-Type': 'application/json', 'support-calm': '1', 'User-Agent': LOGIN_UA }),
+     });
+     if (Number(json?.status) !== 1) {
+         throw new Error(`KuGou login failed: ${errorTextOf(json)}`);
+@@ -321,7 +339,7 @@ export const fetchKugouWebUser = async (): Promise<ProviderUser | null> => {
+     const json = await proxyJson(target, {
+         method: 'POST',
+         body: payload,
+-        headers: { 'Content-Type': 'application/json', 'x-router': 'usercenter.kugou.com', 'User-Agent': LOGIN_UA },
++        headers: clientHeaders({ 'Content-Type': 'application/json', 'x-router': 'usercenter.kugou.com', 'User-Agent': LOGIN_UA }),
+     });
+     const data = dataOf(json) ?? {};
+     const userid = String(data.userid ?? data.user_id ?? session.userid ?? '');

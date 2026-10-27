@@ -1,0 +1,229 @@
+From 04fe0fe56b16bba33cc9e78d74c4e2f55075057d Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Mon, 19 Oct 2026 17:30:29 +0800
+Subject: [PATCH 38/90] =?UTF-8?q?=E8=B5=B7=E6=AD=A5=E5=88=A4=E8=AF=BB?=
+ =?UTF-8?q?=E5=B8=A6=E4=B8=8A=E6=95=B0=E6=8D=AE=E6=A1=A3=E4=BD=8D=E4=B8=8E?=
+ =?UTF-8?q?=E6=9A=82=E5=81=9C=E6=A0=87=E5=BF=97=EF=BC=8C=E5=B9=B6=E5=86=99?=
+ =?UTF-8?q?=E8=BF=9B=E4=BC=9A=E8=AF=9D=E6=97=A5=E5=BF=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+真机第二轮（`el:stalled · ctx:running`）：音源这次落地了（`play()` 决议、context running），
+但元素起步之后没有继续推进。这一行分不出是「没数据」还是「被别处按了暂停」，而这两种修法完全不同。
+
+- judgePlaybackStart 的 element-stalled 现在带 readyState / networkState / paused / 走的秒数，
+  文案：`el:stalled · rs 2/2 · p 0 · +0.02s`（rs 0/0 没有源、0/2 有源没数据、2/2 等流、4/2 有数据没走）。
+- 同一行同时 console.warn（`[Playback] start watchdog: …`），设置 → 开发者 → 运行日志里也看得到。
+- 顺带：按播放时元素没有音源且 store 也没有的，改成真的重取一次在线音源（force 刷新，autoplay: false，
+  取到就由本函数接着起播）；取不到才把分类后的原因（网络 / 版权 / 需要登录）写出来，而不是只报 src:missing。
+---
+ src/hooks/usePlaybackTransportController.ts   | 52 ++++++++++++++-----
+ .../playback/playbackStartWatchdog.ts         | 32 ++++++++++--
+ .../playback/playbackStartWatchdog.test.ts    | 46 ++++++++++++++--
+ 3 files changed, 109 insertions(+), 21 deletions(-)
+
+diff --git a/src/hooks/usePlaybackTransportController.ts b/src/hooks/usePlaybackTransportController.ts
+index e4ede6e..727e28a 100644
+--- a/src/hooks/usePlaybackTransportController.ts
++++ b/src/hooks/usePlaybackTransportController.ts
+@@ -175,22 +175,42 @@ export function usePlaybackTransportController({
+ 
+         // 元素里没有任何音源时 play() 按规范永不决议 —— 等 4 秒、没有声音、也没有任何线索
+         // （真机抓到的正是 `play:timeout · running · rs 0/0`：按下播放 4 秒后元素还是空的）。
+-        // 源码里音源晚到是可能的（播放落地要等在线地址），所以这里先补一手：
+-        // store 里已经有地址、元素上没有 → 直接写进去；两边都没有 → 说明白，不再白等 4 秒。
++        // 三种情形分开处理：store 里有地址 → 补进元素；没有任何地址但歌是在线的 → 现取一次（按播放本来就
++        // 是「请你再试一次」的手势，取到了就接着放、取不到就把分类后的原因说清楚）；其余 → 说明白，不再白等。
+         if (!audio.currentSrc && !audio.getAttribute('src')) {
+             const storeSrc = usePlaybackStore.getState().audioSrc;
+-            if (!storeSrc) {
+-                playbackFade.abortFadeIn(fadeToken);
++            if (storeSrc) {
++                audio.src = storeSrc;
++                audio.load();
++            } else {
++                // autoplay: false —— 这一趟只负责把音源取回来，起播由下面这段继续，免得两处同时按 play。
++                const recovered = await recoverOnlinePlaybackSource({
++                    force: true,
++                    autoplay: false,
++                    resumeAt: audio.currentTime,
++                    failedSrc: null,
++                    shouldAutoplay: isCurrent,
++                });
+                 if (!isCurrent()) return;
+-                setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : {
+-                    type: 'error',
+-                    text: `src:missing · ${usePlaybackStore.getState().playerState}`,
+-                }));
+-                setPlayerState(PlayerState.PAUSED);
+-                return;
++                const recoveredSrc = recovered.status === 'recovered' ? usePlaybackStore.getState().audioSrc : null;
++                if (recoveredSrc) {
++                    // 直接写进元素：React 的提交还没到，等它就又是同一次白等。
++                    audio.src = recoveredSrc;
++                    audio.load();
++                } else {
++                    playbackFade.abortFadeIn(fadeToken);
++                    const failure = recovered.status === 'failed' ? recovered.failure : null;
++                    const failureMessage = failure ? getPlaybackFailureMessage(failure) : null;
++                    // 在线的取不到就把分类后的原因（网络 / 版权 / 需要登录）说出来；本地、Navidrome、
++                    // stage 那几档走不到重取，报出「压根没有音源」这个事实加当时的播放状态。
++                    const text = failureMessage
++                        ? (failureMessage.params ? t(failureMessage.key, failureMessage.params) : t(failureMessage.key))
++                        : `src:missing · ${usePlaybackStore.getState().playerState}`;
++                    setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text }));
++                    setPlayerState(PlayerState.PAUSED);
++                    return;
++                }
+             }
+-            audio.src = storeSrc;
+-            audio.load();
+         }
+ 
+         try {
+@@ -238,13 +258,19 @@ export function usePlaybackTransportController({
+             startWatchdogTimer.current = setTimeout(() => {
+                 startWatchdogTimer.current = null;
+                 if (!isCurrent()) return;
++                const element = audioRef.current;
+                 const verdict = judgePlaybackStart({
+                     contextState: context ? context.state : 'absent',
+                     positionBeforeSec: positionAtStart,
+-                    positionNowSec: audioRef.current?.currentTime ?? -1,
++                    positionNowSec: element?.currentTime ?? -1,
++                    readyState: element?.readyState ?? -1,
++                    networkState: element?.networkState ?? -1,
++                    paused: element?.paused ?? true,
+                 });
+                 const text = describePlaybackStart(verdict);
+                 if (!text) return;
++                // 同一行也写进会话日志（设置 → 开发者 → 运行日志），这样截日志也能取证，不必只靠提示。
++                console.warn(`[Playback] start watchdog: ${text} (src ${(element?.currentSrc || element?.getAttribute('src') || 'none').slice(0, 64)})`);
+                 setStatusMsg(prev => (isPlaybackFailureStatus(prev) ? prev : { type: 'error', text }));
+             }, PLAYBACK_START_WATCHDOG_MS);
+             // Playback is back, so a leftover playback-failure toast goes too: its two buttons are
+diff --git a/src/services/playback/playbackStartWatchdog.ts b/src/services/playback/playbackStartWatchdog.ts
+index 1df4d71..0bf6547 100644
+--- a/src/services/playback/playbackStartWatchdog.ts
++++ b/src/services/playback/playbackStartWatchdog.ts
+@@ -20,7 +20,18 @@ export const PLAYBACK_POSITION_TOLERANCE_SEC = 0.12;
+ export type PlaybackStartVerdict =
+     | { kind: 'ok' }
+     | { kind: 'context-idle'; contextState: string; positionSec: number }
+-    | { kind: 'element-stalled'; contextState: string; positionSec: number };
++    | {
++        kind: 'element-stalled';
++        contextState: string;
++        positionSec: number;
++        /** 元素停在哪一档数据上：0/0 没有源、0/2 有源但一字节没到、2/2 有元数据在等流、4/2 有数据却没走。 */
++        readyState: number;
++        networkState: number;
++        /** paused 为 true 说明是被谁按了暂停（元素在走就不会停）。 */
++        paused: boolean;
++        /** 这 1.5 秒里元素实际走了多远（秒，三位小数）。 */
++        advanceSec: number;
++    };
+ 
+ /**
+  * 判一次：元素走了多远、context 在什么状态。
+@@ -33,11 +44,23 @@ export const judgePlaybackStart = (input: {
+     positionBeforeSec: number;
+     positionNowSec: number;
+     toleranceSec?: number;
++    readyState?: number;
++    networkState?: number;
++    paused?: boolean;
+ }): PlaybackStartVerdict => {
+     const toleranceSec = input.toleranceSec ?? PLAYBACK_POSITION_TOLERANCE_SEC;
+     const positionSec = Math.round(input.positionNowSec * 10) / 10;
+-    if (input.positionNowSec - input.positionBeforeSec < toleranceSec) {
+-        return { kind: 'element-stalled', contextState: input.contextState, positionSec };
++    const advanceSec = Math.max(0, input.positionNowSec - input.positionBeforeSec);
++    if (advanceSec < toleranceSec) {
++        return {
++            kind: 'element-stalled',
++            contextState: input.contextState,
++            positionSec,
++            readyState: input.readyState ?? -1,
++            networkState: input.networkState ?? -1,
++            paused: input.paused ?? false,
++            advanceSec,
++        };
+     }
+     if (input.contextState !== 'running' && input.contextState !== 'absent') {
+         return { kind: 'context-idle', contextState: input.contextState, positionSec };
+@@ -50,8 +73,9 @@ export const describePlaybackStart = (verdict: PlaybackStartVerdict): string =>
+     switch (verdict.kind) {
+         case 'context-idle':
+             return `ctx:${verdict.contextState} · el ${verdict.positionSec.toFixed(1)}s`;
++        // 这一行要在一屏里读完，所以只留判因要用的数：数据档位 / 网络档位 / 有没有被暂停 / 走了多远。
+         case 'element-stalled':
+-            return `el:stalled · ctx:${verdict.contextState}`;
++            return `el:stalled · rs ${verdict.readyState}/${verdict.networkState} · p ${verdict.paused ? 1 : 0} · +${verdict.advanceSec.toFixed(2)}s`;
+         default:
+             return '';
+     }
+diff --git a/test/unit/playback/playbackStartWatchdog.test.ts b/test/unit/playback/playbackStartWatchdog.test.ts
+index af747e7..f23c8d9 100644
+--- a/test/unit/playback/playbackStartWatchdog.test.ts
++++ b/test/unit/playback/playbackStartWatchdog.test.ts
+@@ -23,7 +23,26 @@ describe('judgePlaybackStart', () => {
+ 
+     it('元素自己没动：比 context 状态更靠前的问题', () => {
+         expect(judgePlaybackStart({ contextState: 'running', positionBeforeSec: 3, positionNowSec: 3 }))
+-            .toEqual({ kind: 'element-stalled', contextState: 'running', positionSec: 3 });
++            .toEqual({
++                kind: 'element-stalled',
++                contextState: 'running',
++                positionSec: 3,
++                readyState: -1,
++                networkState: -1,
++                paused: false,
++                advanceSec: 0,
++            });
++    });
++
++    it('元素没动时把数据档位、网络档位、是否被暂停一起带出来', () => {
++        expect(judgePlaybackStart({
++            contextState: 'running',
++            positionBeforeSec: 0,
++            positionNowSec: 0.02,
++            readyState: 2,
++            networkState: 2,
++            paused: false,
++        })).toMatchObject({ kind: 'element-stalled', readyState: 2, networkState: 2, paused: false, advanceSec: 0.02 });
+     });
+ 
+     it('走不到容差就算没动（差一点点不算起步）', () => {
+@@ -49,8 +68,27 @@ describe('describePlaybackStart', () => {
+             .toBe('ctx:suspended · el 4.4s');
+     });
+ 
+-    it('元素那一档写明是元素没动', () => {
+-        expect(describePlaybackStart({ kind: 'element-stalled', contextState: 'running', positionSec: 0 }))
+-            .toBe('el:stalled · ctx:running');
++    it('元素那一档写明是元素没动，并带上判因要用的数', () => {
++        expect(describePlaybackStart({
++            kind: 'element-stalled',
++            contextState: 'running',
++            positionSec: 0,
++            readyState: 2,
++            networkState: 2,
++            paused: false,
++            advanceSec: 0.02,
++        })).toBe('el:stalled · rs 2/2 · p 0 · +0.02s');
++    });
++
++    it('被暂停时 p 写 1', () => {
++        expect(describePlaybackStart({
++            kind: 'element-stalled',
++            contextState: 'running',
++            positionSec: 0,
++            readyState: 4,
++            networkState: 1,
++            paused: true,
++            advanceSec: 0,
++        })).toBe('el:stalled · rs 4/1 · p 1 · +0.00s');
+     });
+ });
