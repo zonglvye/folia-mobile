@@ -1,7 +1,7 @@
 From d8fa66648f07c65ffb9b44e4889659610110b084 Mon Sep 17 00:00:00 2001
 From: folia-mobile <mobile@folia.local>
 Date: Sat, 17 Oct 2026 12:31:48 +0800
-Subject: [PATCH 10/90] fix(mobile): keep one upcoming lyric line, and let the
+Subject: [PATCH 10/91] fix(mobile): keep one upcoming lyric line, and let the
  wall tools panel scroll
 
 Two shell-only UI corrections, both measured off a 2048x930 screenshot rather

@@ -1,0 +1,73 @@
+From 000937ba033aa730fc9750b5282db611cfd77bd9 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 28 Oct 2026 11:15:22 +0800
+Subject: [PATCH 91/91] =?UTF-8?q?feat(shell):=20=E5=90=AF=E5=8A=A8?=
+ =?UTF-8?q?=E6=97=B6=E5=91=8A=E8=AF=89=E5=A3=B3=E3=80=8C=E9=A1=B5=E9=9D=A2?=
+ =?UTF-8?q?=E5=B7=B2=E7=BB=8F=E7=94=BB=E5=A5=BD=E3=80=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+原生启动动画盖在 WebView 上面，自己判断不了 React 什么时候真正上屏：
+按 onPageEnd 猜会早一截，按固定延时猜会晚一截，两种都表现为「动画退场后还有一层黑底」。
+
+这里在 AppSplashGate 摘掉页面自身遮罩的同一个时刻调一次桥的 splashReady()，
+壳拿到的就是「这一帧已经画好」的确切时刻，退场才不会踩空。
+
+- utils/appSplash: 新增 notifyShellFirstPaint()；没有桥时（浏览器、桌面版）是空操作，
+  旧壳没有这个方法也不抛错。
+- components/AppSplashGate: 挂载后先摘遮罩，再通知壳。
+
+壳侧实现：鸿蒙 shell/StartupSplash.ets、安卓 StartupSplashView.java。
+---
+ src/components/AppSplashGate.tsx |  4 +++-
+ src/utils/appSplash.ts           | 18 ++++++++++++++++++
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/src/components/AppSplashGate.tsx b/src/components/AppSplashGate.tsx
+index 0f13fcb..4146a92 100644
+--- a/src/components/AppSplashGate.tsx
++++ b/src/components/AppSplashGate.tsx
+@@ -1,13 +1,15 @@
+ import React from 'react';
+-import { hideAppSplash } from '../utils/appSplash';
++import { hideAppSplash, notifyShellFirstPaint } from '../utils/appSplash';
+ 
+ // src/components/AppSplashGate.tsx
+ // 包在根组件树外层：首帧挂载完成后（useEffect 在浏览器绘制之后触发）移除首屏加载遮罩，
+ // 保证遮罩淡出时下面已经是渲染好的界面，而不是空白。
++// 同一个时刻还要告诉打包壳：它的原生启动动画可以退了（见 utils/appSplash）。
+ 
+ const AppSplashGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+     React.useEffect(() => {
+         hideAppSplash();
++        notifyShellFirstPaint();
+     }, []);
+ 
+     return <>{children}</>;
+diff --git a/src/utils/appSplash.ts b/src/utils/appSplash.ts
+index 0d5e364..b164eff 100644
+--- a/src/utils/appSplash.ts
++++ b/src/utils/appSplash.ts
+@@ -14,3 +14,21 @@ export const hideAppSplash = (): void => {
+     splash.classList.add('is-hiding');
+     window.setTimeout(() => splash.remove(), FADE_OUT_MS);
+ };
++
++/**
++ * 告诉打包壳「页面第一帧已经画好了」。
++ *
++ * 壳把原生启动动画画在 WebView 上面（鸿蒙 shell/StartupSplash、安卓 MainActivity 的遮罩），
++ * 它自己判断不了 React 什么时候真正上屏，只能等这一句。没有桥时（浏览器、桌面版）是空操作。
++ */
++export const notifyShellFirstPaint = (): void => {
++    const bridge = (window as { foliaAndroid?: { splashReady?: () => void } }).foliaAndroid;
++    if (!bridge || typeof bridge.splashReady !== 'function') {
++        return;
++    }
++    try {
++        bridge.splashReady();
++    } catch {
++        // 旧壳没这个方法，或者桥已经销毁：启动动画那边有自己的兜底超时，这里不该抛出去。
++    }
++};

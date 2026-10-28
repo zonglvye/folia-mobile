@@ -14,3 +14,21 @@ export const hideAppSplash = (): void => {
     splash.classList.add('is-hiding');
     window.setTimeout(() => splash.remove(), FADE_OUT_MS);
 };
+
+/**
+ * 告诉打包壳「页面第一帧已经画好了」。
+ *
+ * 壳把原生启动动画画在 WebView 上面（鸿蒙 shell/StartupSplash、安卓 MainActivity 的遮罩），
+ * 它自己判断不了 React 什么时候真正上屏，只能等这一句。没有桥时（浏览器、桌面版）是空操作。
+ */
+export const notifyShellFirstPaint = (): void => {
+    const bridge = (window as { foliaAndroid?: { splashReady?: () => void } }).foliaAndroid;
+    if (!bridge || typeof bridge.splashReady !== 'function') {
+        return;
+    }
+    try {
+        bridge.splashReady();
+    } catch {
+        // 旧壳没这个方法，或者桥已经销毁：启动动画那边有自己的兜底超时，这里不该抛出去。
+    }
+};

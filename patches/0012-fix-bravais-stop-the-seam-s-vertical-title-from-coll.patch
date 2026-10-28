@@ -1,7 +1,7 @@
 From 418d6900918c25959693783ba3c29fac7635c09d Mon Sep 17 00:00:00 2001
 From: folia-mobile <mobile@folia.local>
 Date: Sat, 17 Oct 2026 13:21:48 +0800
-Subject: [PATCH 12/90] fix(bravais): stop the seam's vertical title from
+Subject: [PATCH 12/91] fix(bravais): stop the seam's vertical title from
  collapsing to nothing
 
 Reproduced outside the app instead of guessing again: the exact title-area rules

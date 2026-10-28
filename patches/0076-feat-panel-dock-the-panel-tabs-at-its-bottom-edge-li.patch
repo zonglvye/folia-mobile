@@ -1,7 +1,7 @@
 From 80154ce30e4b5099fbe04f84e95208cba0321b6b Mon Sep 17 00:00:00 2001
 From: zonglvye <zonglvye@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 17:41:35 +0800
-Subject: [PATCH 76/90] feat(panel): dock the panel tabs at its bottom edge,
+Subject: [PATCH 76/91] feat(panel): dock the panel tabs at its bottom edge,
  like upstream v0.7.22
 
 Replaces the icon-only strip at the top with the dock upstream's TabDock has:

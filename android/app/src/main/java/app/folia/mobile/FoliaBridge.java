@@ -58,6 +58,18 @@ public class FoliaBridge {
         PlaybackService.handleSnapshotJson(activity.getApplicationContext(), snapshotJson);
     }
 
+    /**
+     * The page painted its first frame (web AppSplashGate calls this right after React mounts).
+     *
+     * The native startup animation sits on top of the WebView and cannot know when the page is
+     * actually up, so it waits for this signal before it starts leaving. Called on the bridge
+     * thread; the activity posts to the UI thread.
+     */
+    @JavascriptInterface
+    public void splashReady() {
+        activity.onWebFirstPaint();
+    }
+
     /** Opens the battery-optimisation allowlist prompt, falling back to the settings list. */
     @JavascriptInterface
     public void openBatteryOptimizationSettings() {

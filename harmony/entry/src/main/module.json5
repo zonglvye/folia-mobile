@@ -18,7 +18,9 @@
         "description": "$string:EntryAbility_desc",
         "icon": "$media:app_icon",
         "label": "$string:EntryAbility_label",
-        "startWindowIcon": "$media:app_icon",
+        // 启动窗口只留底色，不留图标：图标会在我们的启动动画之前单独闪一下，
+        // 而且系统那套启动动效还会把它再放大一次。
+        "startWindowIcon": "$media:start_icon_blank",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         // 音乐观赏播放器：锁横屏，和安卓壳一致（MainActivity 里 setRequestedOrientation）。

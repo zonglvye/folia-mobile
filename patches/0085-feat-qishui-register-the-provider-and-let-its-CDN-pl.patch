@@ -1,7 +1,7 @@
 From 6e6b3b07e1ac4be5875465ed531d6e8f169978e6 Mon Sep 17 00:00:00 2001
 From: zonglvye <zonglvye@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 00:21:23 +0800
-Subject: [PATCH 85/90] feat(qishui): register the provider and let its CDN
+Subject: [PATCH 85/91] feat(qishui): register the provider and let its CDN
  play directly
 
 Brings upstream's ten provider files over and adapts them to this branch's

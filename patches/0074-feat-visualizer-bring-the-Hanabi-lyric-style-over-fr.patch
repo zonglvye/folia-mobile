@@ -1,7 +1,7 @@
 From 463b4ccbc3f23702b5bfc622c722386f6a1e6996 Mon Sep 17 00:00:00 2001
 From: zonglvye <zonglvye@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 17:23:38 +0800
-Subject: [PATCH 74/90] feat(visualizer): bring the Hanabi lyric style over
+Subject: [PATCH 74/91] feat(visualizer): bring the Hanabi lyric style over
  from upstream v0.7.22
 
 - hanabi/: 26 files taken verbatim from the v0.7.22 tag (scene, MG ornaments,

@@ -1,7 +1,7 @@
 From 483802ff2aefc71f82b6f5d52ed80d303da9c4e7 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Tue, 27 Oct 2026 21:24:33 +0800
-Subject: [PATCH 87/90] feat(qishui): give a signed-out Qishui a way to sign in
+Subject: [PATCH 87/91] feat(qishui): give a signed-out Qishui a way to sign in
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

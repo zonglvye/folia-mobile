@@ -57,7 +57,10 @@ public class MainActivity extends Activity {
 
     /** Virtual origin the bundled assets are served from. Changing it changes the app origin. */
     private static final String VIRTUAL_HOST = "appassets.androidplatform.net";
-    private static final String HOME_URL = "https://" + VIRTUAL_HOST + "/index.html";
+    // splash=0 switches off the page's own black overlay (index.html checks for it): the
+    // startup animation is native here, and two Folia wordmarks would otherwise cross-fade
+    // on top of each other the moment the native layer starts leaving.
+    private static final String HOME_URL = "https://" + VIRTUAL_HOST + "/index.html?splash=0";
 
     private static final int REQ_FILE_CHOOSER = 1001;
     private static final int REQ_NOTIFICATION = 1002;
@@ -76,6 +79,29 @@ public class MainActivity extends Activity {
     /** Immersive is the default: this is a fullscreen viewing player, not a utility app. */
     private boolean immersiveEnabled = true;
 
+    /** Native startup animation stacked above the WebView; null once it has left. */
+    private StartupSplashView splashView;
+
+    /**
+     * Called from FoliaBridge on the JavaScript bridge thread when the page has painted its
+     * first frame. The splash cannot see that itself, so it waits for this signal.
+     */
+    void onWebFirstPaint() {
+        runOnUiThread(() -> {
+            if (splashView != null) {
+                splashView.markReady();
+            }
+        });
+    }
+
+    private void dismissStartupSplash() {
+        if (splashView == null) {
+            return;
+        }
+        rootLayout.removeView(splashView);
+        splashView = null;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -92,6 +118,14 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         portraitHint = buildPortraitHint();
         rootLayout.addView(portraitHint, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Native startup animation, added last so it covers everything. It plays from the first
+        // frame of the activity and leaves when the page reports its first paint
+        // (FoliaBridge.splashReady) — see StartupSplashView for the timing contract.
+        splashView = new StartupSplashView(this);
+        splashView.setListener(this::dismissStartupSplash);
+        rootLayout.addView(splashView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(rootLayout);
 

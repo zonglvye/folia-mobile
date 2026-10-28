@@ -40,6 +40,8 @@ export class FoliaBridge {
     'mediaStatus',
     'mediaProgress',
     'mediaRelease',
+    // 页面第一帧画好了：壳据此撤掉原生启动动画（见 shell/StartupSplash）。
+    'splashReady',
   ];
 
   private readonly session: PlaybackSession;
@@ -175,6 +177,16 @@ export class FoliaBridge {
   /** 换歌后释放上一首（壳内部也只留最近两条，这里主要是及时放掉）。 */
   mediaRelease(token: number): void {
     MediaCache.release(token);
+  }
+
+  /**
+   * 页面第一帧已经画好（web 的 AppSplashGate 在 React 挂载之后调这一句）。
+   *
+   * 壳的原生启动动画盖在 WebView 上面，自己判断不了 React 什么时候真正上屏，
+   * 只能等页面报这一声。写进 AppStorage，由 Index 的 @StorageLink 接住。
+   */
+  splashReady(): void {
+    AppStorage.setOrCreate<boolean>('webFirstPaint', true);
   }
 }
 

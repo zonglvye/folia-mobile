@@ -1,7 +1,7 @@
 From 47bc9ec6c902b220d997f4578d69eb0cd1fb238e Mon Sep 17 00:00:00 2001
 From: folia <folia@local>
 Date: Sun, 18 Oct 2026 16:55:47 +0800
-Subject: [PATCH 27/90] feat(bravais): widen the list panel to the poster width
+Subject: [PATCH 27/91] feat(bravais): widen the list panel to the poster width
  and compact it on short viewports
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

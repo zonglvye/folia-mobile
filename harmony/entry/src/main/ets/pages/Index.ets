@@ -8,6 +8,7 @@ import { WebNeteaseBridge } from '../shell/WebNeteaseBridge';
 import { playbackSession } from '../shell/PlaybackSession';
 import { ShellLog } from '../shell/ShellLog';
 import { NetworkMonitor } from '../shell/NetworkMonitor';
+import { StartupSplash } from '../shell/StartupSplash';
 
 // harmony/entry/src/main/ets/pages/Index.ets
 // ArkWeb 宿主：整屏一个 Web 组件，加载打包在 HAP 里的 web 构建。
@@ -152,11 +153,24 @@ struct Index {
   /** 启动时拿到的宿主 Context（清缓存要用到）。 */
   private hostContext: common.UIAbilityContext | null = null;
 
+  /** 原生启动动画是否还盖在页面上（见 shell/StartupSplash）。 */
+  @State splashVisible: boolean = true;
+  /** 页面第一帧是否已经画好：桥的 splashReady 写进 AppStorage，启动动画据此退场。 */
+  @StorageLink('webFirstPaint') @Watch('onWebFirstPaint') webFirstPaint: boolean = false;
+  /** 启动时刻：保证启动动画至少完整放一遍（见 StartupSplash.SPLASH_MIN_VISIBLE_MS）。 */
+  private splashStartAt: number = 0;
+
   aboutToAppear(): void {
     // getContext(this) 在这个 SDK 里已标记废弃，改用 UIContext 拿宿主 Context。
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.server = new AssetServer(context);
     this.hostContext = context;
+
+    // 启动动画：记下起点。AppStorage 是应用级的，每次装载都要把「已就绪」清回去，
+    // 否则热重启后新页面还没画好，遮罩就会按上一次的 ready 立刻退场。
+    this.splashStartAt = Date.now();
+    AppStorage.setOrCreate<boolean>('webFirstPaint', false);
+    ShellLog.info('startup splash: shown');
 
     // 联网状态：断网时桥直接给失败（不再等 20s 超时），恢复时重新武装中继页。
     // 见 shell/NetworkMonitor 与 WebNeteaseBridge.onNetworkRestored。
@@ -191,6 +205,13 @@ struct Index {
         ShellLog.info(`asset cache clear failed: ${String(error)}`);
       }
     });
+  }
+
+  /** 页面报「第一帧画好了」：只记时间，退场时机由 StartupSplash 自己算（下限 + 上限）。 */
+  onWebFirstPaint(): void {
+    if (this.webFirstPaint) {
+      ShellLog.info(`startup splash: web first paint at ${Date.now() - this.splashStartAt}ms`);
+    }
   }
 
     build() {
@@ -297,6 +318,19 @@ struct Index {
         .height(1)
         .opacity(0)
         .position({ x: 0, y: 0 })
+
+      // 原生启动动画：盖在最上层。系统启动窗口 -> 这层动画 -> 页面自己画好的界面，
+      // 中间不留黑屏，也不靠页面里的首屏遮罩来救（那个要等 JS 解析完才出现）。
+      if (this.splashVisible) {
+        StartupSplash({
+          ready: this.webFirstPaint,
+          startAt: this.splashStartAt,
+          onFinish: () => {
+            this.splashVisible = false;
+            ShellLog.info('startup splash: hidden');
+          },
+        })
+      }
     }
     .width('100%')
     .height('100%')
