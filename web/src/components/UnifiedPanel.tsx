@@ -254,7 +254,7 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
     const bottomBarBottomPx = usePlayerBottomBarBottomPx();
     const panelMaxHeight = useTransform(
         bottomBarBottomPx,
-        bottom => `calc(100dvh - ${bottom + 64}px)`,
+        bottom => `calc(100dvh - ${bottom + 8}px)`,
     );
     const likeAvailability = resolveLikeAvailability(currentSong, playbackControlsDisabled, isStage);
     const likeDisabledReason = likeAvailability.reason
@@ -641,11 +641,12 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
                             style={{ color: theme.primaryColor, maxHeight: panelMaxHeight }}
                         >
                             {/* 面板本身不再滚：页签沉在底边（PanelTabDock），只有中间这块内容滚。 */}
-                            <div className="flex-1 min-h-0 overflow-y-auto hide-scrollbar">
+                            <div className="flex-1 min-h-0 overflow-y-auto hide-scrollbar player-panel-scroll">
                             <div className="p-5 flex flex-col">
                                 {/* Top: Cover Art */}
                                 {/* 四个角上的按钮平时完全看不见，所以整块封面是思索的落点：
                                     指针停在封面上，讲的就是「这上面还藏着什么」。 */}
+                                {currentTab === 'cover' && (
                                 <div
                                     ref={coverAreaRef}
                                     data-ponder-panel-artwork
@@ -762,6 +763,7 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
                                         </div>
                                     )}
                                 </div>
+                                )}
 
                                 {/* Tab Content */}
                                 <div

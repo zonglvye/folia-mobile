@@ -1,7 +1,7 @@
 From 0610d85cfa2bac949e94cb280a3ae9c3b12a753c Mon Sep 17 00:00:00 2001
 From: zonglvye <zonglvye@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 23:32:48 +0800
-Subject: [PATCH 80/91] feat(visualizer): give Hanabi a real settings panel
+Subject: [PATCH 80/97] feat(visualizer): give Hanabi a real settings panel
 
 The parameters now live in the visualizer settings store like every other
 style's, instead of being read ad hoc by the entry:

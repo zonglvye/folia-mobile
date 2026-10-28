@@ -1,0 +1,157 @@
+From 3545cc332365bbb73ebed1b5753e39c4333e6063 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Thu, 29 Oct 2026 00:21:02 +0800
+Subject: [PATCH 95/97] =?UTF-8?q?feat(player):=20=E6=8E=A7=E5=88=B6?=
+ =?UTF-8?q?=E4=B8=AD=E5=BF=83=E5=9C=A8=E6=A8=AA=E5=B1=8F=E7=9F=AE=E8=A7=86?=
+ =?UTF-8?q?=E5=8F=A3=E4=B8=8A=E4=B8=80=E5=B1=8F=E6=94=BE=E5=AE=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+374px 高的横屏里，控制页签原本要滚 130px 才看得全。三处一起收：
+
+1. 去掉封面之后（5c41ce0），面板高度上限里那 64px 空档先收到 8px：面板 278 → 334。
+2. 矮视口（`max-height: 420px`）下把内容间距、动作按钮高度、内边距各压一档。
+3. 同一条件下隐藏页脚那行「主题名 + 昼夜」——设置里也有，不值得占掉一屏的最后 30px。
+
+实测（SCA-AL00，823×374）：滚动容器 `scrollHeight = clientHeight = 277`，不再需要滑动。
+
+注：`index.css` 里那几条用了 `!important`，因为 Tailwind 的 `space-y-*` 选择器比 `.xxx > * + *`
+更具体；范围限定在 `.player-panel-scroll` + 矮视口，不影响桌面与竖屏。
+---
+ src/components/UnifiedPanel.tsx               |  4 +-
+ src/components/panelTab/ControlsTab.tsx       |  4 +-
+ .../panelTab/controls/SongActionRow.tsx       |  2 +-
+ src/index.css                                 | 65 +++++++++++++++++++
+ 4 files changed, 70 insertions(+), 5 deletions(-)
+
+diff --git a/src/components/UnifiedPanel.tsx b/src/components/UnifiedPanel.tsx
+index 1fa148f..399c011 100644
+--- a/src/components/UnifiedPanel.tsx
++++ b/src/components/UnifiedPanel.tsx
+@@ -254,7 +254,7 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
+     const bottomBarBottomPx = usePlayerBottomBarBottomPx();
+     const panelMaxHeight = useTransform(
+         bottomBarBottomPx,
+-        bottom => `calc(100dvh - ${bottom + 64}px)`,
++        bottom => `calc(100dvh - ${bottom + 8}px)`,
+     );
+     const likeAvailability = resolveLikeAvailability(currentSong, playbackControlsDisabled, isStage);
+     const likeDisabledReason = likeAvailability.reason
+@@ -641,7 +641,7 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
+                             style={{ color: theme.primaryColor, maxHeight: panelMaxHeight }}
+                         >
+                             {/* 面板本身不再滚：页签沉在底边（PanelTabDock），只有中间这块内容滚。 */}
+-                            <div className="flex-1 min-h-0 overflow-y-auto hide-scrollbar">
++                            <div className="flex-1 min-h-0 overflow-y-auto hide-scrollbar player-panel-scroll">
+                             <div className="p-5 flex flex-col">
+                                 {/* Top: Cover Art */}
+                                 {/* 四个角上的按钮平时完全看不见，所以整块封面是思索的落点：
+diff --git a/src/components/panelTab/ControlsTab.tsx b/src/components/panelTab/ControlsTab.tsx
+index 676f2a7..de67efb 100644
+--- a/src/components/panelTab/ControlsTab.tsx
++++ b/src/components/panelTab/ControlsTab.tsx
+@@ -108,7 +108,7 @@ const ControlsTab: React.FC<ControlsTabProps> = ({
+             animate={{ opacity: 1 }}
+             className="relative"
+         >
+-            <div className="space-y-4">
++            <div className="space-y-4 panel-controls">
+                 <SongActionRow
+                     loopMode={loopMode}
+                     onToggleLoop={onToggleLoop}
+@@ -152,7 +152,7 @@ const ControlsTab: React.FC<ControlsTabProps> = ({
+                     />
+                 </div>
+ 
+-                <div className="pt-2 border-t border-white/5 flex items-center justify-between">
++                <div className="pt-2 border-t border-white/5 flex items-center justify-between panel-footer-row">
+                     <div className="flex items-center gap-2">
+                         <button
+                             type="button"
+diff --git a/src/components/panelTab/controls/SongActionRow.tsx b/src/components/panelTab/controls/SongActionRow.tsx
+index 25d31e5..348aaf6 100644
+--- a/src/components/panelTab/controls/SongActionRow.tsx
++++ b/src/components/panelTab/controls/SongActionRow.tsx
+@@ -44,7 +44,7 @@ const SongActionRow: React.FC<SongActionRowProps> = ({
+     const generateThemeTitle = isGeneratingTheme ? t('ui.generatingTheme') : t('ui.generateAITheme');
+ 
+     return (
+-        <div className="grid grid-cols-3 gap-3">
++        <div className="grid grid-cols-3 gap-3 panel-actions">
+             <button
+                 onClick={event => {
+                     onToggleLoop(event);
+diff --git a/src/index.css b/src/index.css
+index 71ef0b3..e0a1b24 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -302,3 +302,68 @@ html[data-click-through='active'] body .click-through-interactive * {
+ :root[data-reduce-motion~='uiMicroMotion'] .ponder-skeleton-label-in {
+     animation: none;
+ }
++
++/* 横屏矮视口（< 420px 高）：控制中心要一屏看全，内容间距压一档。
++   只影响矮屏，桌面与竖屏不动。 */
++@media (max-height: 420px) {
++    .player-panel-scroll .space-y-4 > * + * {
++        margin-top: 0.5rem;
++    }
++
++    .player-panel-scroll .space-y-3 > * + * {
++        margin-top: 0.4rem;
++    }
++
++    .player-panel-scroll .pt-2 {
++        padding-top: 0.25rem;
++    }
++
++    .player-panel-scroll > div {
++        padding: 0.75rem;
++    }
++}
++
++@media (max-height: 420px) {
++    /* 控制页签：行距与按钮高度再收一档，目标是 374px 高的横屏一屏放完。 */
++    .player-panel-scroll .panel-controls > * + * {
++        margin-top: 0.4rem;
++    }
++
++    .player-panel-scroll .panel-controls .grid > button {
++        height: 2.4rem;
++    }
++
++    .player-panel-scroll .panel-controls .space-y-3 > * + * {
++        margin-top: 0.3rem;
++    }
++}
++
++@media (max-height: 420px) {
++    /* 374px 高的横屏：控制页签要一屏放完。!important 是因为 Tailwind 的 space-y 选择器更具体。 */
++    .player-panel-scroll .panel-controls > * + * {
++        margin-top: 0.35rem !important;
++    }
++
++    .player-panel-scroll .panel-controls .pt-2 {
++        padding-top: 0.25rem !important;
++    }
++
++    .player-panel-scroll .panel-actions > button {
++        height: 2.2rem !important;
++    }
++
++    /* 主题名与昼夜开关在设置里也有，矮屏上不占位置。 */
++    .player-panel-scroll .panel-footer-row {
++        display: none !important;
++    }
++}
++
++@media (max-height: 420px) {
++    /* 再压一档：内容内边距与音量条的上下留白。 */
++    .player-panel-scroll > div {
++        padding: 0.5rem !important;
++    }
++    .player-panel-scroll .panel-controls > .pt-2 {
++        padding-top: 0.15rem !important;
++    }
++}

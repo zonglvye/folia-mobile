@@ -108,7 +108,7 @@ const ControlsTab: React.FC<ControlsTabProps> = ({
             animate={{ opacity: 1 }}
             className="relative"
         >
-            <div className="space-y-4">
+            <div className="space-y-4 panel-controls">
                 <SongActionRow
                     loopMode={loopMode}
                     onToggleLoop={onToggleLoop}
@@ -152,7 +152,7 @@ const ControlsTab: React.FC<ControlsTabProps> = ({
                     />
                 </div>
 
-                <div className="pt-2 border-t border-white/5 flex items-center justify-between">
+                <div className="pt-2 border-t border-white/5 flex items-center justify-between panel-footer-row">
                     <div className="flex items-center gap-2">
                         <button
                             type="button"

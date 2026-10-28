@@ -1,7 +1,7 @@
 From 2bab13028986a06c439b739d2d37013c70464799 Mon Sep 17 00:00:00 2001
 From: zonglvye <zonglvye@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 00:10:27 +0800
-Subject: [PATCH 84/91] feat(qishui): run the Qishui client inside the shell
+Subject: [PATCH 84/97] feat(qishui): run the Qishui client inside the shell
 
 qishui-music-api is a Node package: it signs with P-256 and reads/writes Buffer,
 and every call it makes has to go through a same-origin proxy because Qishui's

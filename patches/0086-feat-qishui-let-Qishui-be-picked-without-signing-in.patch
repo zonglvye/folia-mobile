@@ -1,7 +1,7 @@
 From 0b0974e3a85d4504d7be9b54cb44e18b686972d4 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Tue, 27 Oct 2026 00:40:33 +0800
-Subject: [PATCH 86/91] feat(qishui): let Qishui be picked without signing in
+Subject: [PATCH 86/97] feat(qishui): let Qishui be picked without signing in
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

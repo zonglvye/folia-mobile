@@ -639,3 +639,10 @@
     background: var(--bravais-window-glow);
 }
 
+
+/* 点开单曲后展开的那张卡：格位不变，视觉缩到 82%，不顶满一格。 */
+.bravais-tile.is-expanded {
+    transform: scale(0.82);
+    transform-origin: 50% 50%;
+    transition: transform 300ms ease-out;
+}

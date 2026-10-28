@@ -1,0 +1,47 @@
+From 4df9d00ba443d9012210d5681645a7b09c304f1c Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Thu, 29 Oct 2026 00:30:40 +0800
+Subject: [PATCH 97/97] =?UTF-8?q?feat(bravais):=20=E8=BF=94=E5=9B=9E?=
+ =?UTF-8?q?=E5=B8=B8=E9=A9=BB=E3=80=81=E5=B1=95=E5=BC=80=E5=8D=A1=E7=BC=A9?=
+ =?UTF-8?q?=E5=88=B0=2082%?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 左上角返回原来是隐藏式（鼠标进热区才出现），手机上几秒就淡掉，退层没有入口。改成常驻。
+- 点开单曲后展开的那张卡，格位不变，视觉缩到 82%，不再顶满一格。
+- 同时回滚 747dd4b（整个打开层缩 80%）：用户要的不是整层缩放，而是单卡展开别太大。
+
+注：这两处在 SCA-AL00 上看过 —— 返回按钮 8 秒后仍可见。
+---
+ src/library/suites/bravais/BravaisStageChrome.tsx | 1 -
+ src/library/suites/bravais/bravais.css            | 7 +++++++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/library/suites/bravais/BravaisStageChrome.tsx b/src/library/suites/bravais/BravaisStageChrome.tsx
+index 37a9224..f922545 100644
+--- a/src/library/suites/bravais/BravaisStageChrome.tsx
++++ b/src/library/suites/bravais/BravaisStageChrome.tsx
+@@ -97,7 +97,6 @@ const BravaisStageChrome: React.FC<BravaisStageChromeProps> = ({
+                 <WallBackButton
+                     label={back.step === 'player' ? t('libraryBravaisHome.backToPlayer') : t('libraryBravais.seamBack')}
+                     onBack={back.run}
+-                    concealed
+                 />
+             )}
+             <WallToolsButton
+diff --git a/src/library/suites/bravais/bravais.css b/src/library/suites/bravais/bravais.css
+index ce5fe8e..50a275c 100644
+--- a/src/library/suites/bravais/bravais.css
++++ b/src/library/suites/bravais/bravais.css
+@@ -639,3 +639,10 @@
+     background: var(--bravais-window-glow);
+ }
+ 
++
++/* 点开单曲后展开的那张卡：格位不变，视觉缩到 82%，不顶满一格。 */
++.bravais-tile.is-expanded {
++    transform: scale(0.82);
++    transform-origin: 50% 50%;
++    transition: transform 300ms ease-out;
++}

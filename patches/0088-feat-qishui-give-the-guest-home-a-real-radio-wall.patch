@@ -1,7 +1,7 @@
 From 826d98d027d354c4f5ef23b3d89ce69087b7a577 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Tue, 27 Oct 2026 21:36:45 +0800
-Subject: [PATCH 88/91] feat(qishui): give the guest home a real radio wall
+Subject: [PATCH 88/97] feat(qishui): give the guest home a real radio wall
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

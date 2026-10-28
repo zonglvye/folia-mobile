@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "app.folia.mobile",
     "vendor": "folia",
-    "versionCode": 3,
-    "versionName": "0.6.17",
+    "versionCode": 4,
+    "versionName": "0.6.18",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

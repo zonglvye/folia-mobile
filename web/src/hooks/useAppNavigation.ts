@@ -27,6 +27,7 @@ import { usePlaybackStore } from '../stores/usePlaybackStore';
 import { resolvePlaybackSurface, usePlaybackEntryViewStore, type PlaybackEntryView } from '../stores/usePlaybackEntryViewStore';
 import { setStatusMessage } from '../stores/useStatusMessageStore';
 import i18n from '../i18n/config';
+import { isAndroidShell } from '../utils/platform';
 
 // src/hooks/useAppNavigation.ts
 
@@ -132,8 +133,20 @@ export const isStartupLatticeDeferred = ({
 // startup view is chosen; a deferred Lattice launch waits at most this long for it.
 const STARTUP_LATTICE_RESTORE_WINDOW_MS = 10000;
 
+/**
+ * 启动是否直接进播放页。
+ *
+ * 移动壳里没有「桌面」设置区（SettingsModal 的 desktop 分区只在 Electron 下渲染），这个开关用户
+ * 根本改不了；旧版本存下的 true 会让手机每次开机都跳播放页，而手机上的首页是墙。所以壳里一律按
+ * 「不直接进播放页」处理 —— 手机启动进墙，这也是这个开关的默认值。
+ */
+const readOpenPlayerOnLaunch = (): boolean => {
+    if (isAndroidShell()) return false;
+    return localStorage.getItem(OPEN_PLAYER_ON_LAUNCH_KEY) === 'true';
+};
+
 const getStartupView = (): ViewState => resolveStartupView({
-    openPlayerOnLaunch: localStorage.getItem(OPEN_PLAYER_ON_LAUNCH_KEY) === 'true',
+    openPlayerOnLaunch: readOpenPlayerOnLaunch(),
     playbackEntryView: usePlaybackEntryViewStore.getState().playbackEntryView,
     isFmMode: usePlaybackStore.getState().isFmMode,
     queueLength: usePlaybackStore.getState().playQueue.length,
@@ -281,7 +294,7 @@ export function useAppNavigation() {
             deferredLatticeTimer = null;
         };
         const startupOptions = {
-            openPlayerOnLaunch: localStorage.getItem(OPEN_PLAYER_ON_LAUNCH_KEY) === 'true',
+            openPlayerOnLaunch: readOpenPlayerOnLaunch(),
             playbackEntryView: usePlaybackEntryViewStore.getState().playbackEntryView,
             isFmMode: usePlaybackStore.getState().isFmMode,
         };

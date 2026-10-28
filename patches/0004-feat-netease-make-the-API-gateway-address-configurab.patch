@@ -1,7 +1,7 @@
 From 0434635412c996b7a9129f6a5b6776323012aa68 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 09:40:42 +0800
-Subject: [PATCH 04/91] feat(netease): make the API gateway address
+Subject: [PATCH 04/97] feat(netease): make the API gateway address
  configurable at runtime
 
 Upstream reads VITE_NETEASE_API_BASE at build time, which is fine for a

@@ -1,0 +1,68 @@
+From 85167ae0689240ce62b805dda776e984e3fd2d27 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Thu, 29 Oct 2026 00:26:40 +0800
+Subject: [PATCH 96/97] =?UTF-8?q?Revert=20"feat(bravais):=20=E6=89=93?=
+ =?UTF-8?q?=E5=BC=80=E7=9A=84=E9=82=A3=E4=B8=80=E5=B1=82=E7=BC=A9=E5=88=B0?=
+ =?UTF-8?q?=2080%"?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This reverts commit 747dd4b9c3438540b53e44b196a4f31a6160847b.
+---
+ src/library/suites/bravais/BravaisStage.tsx      |  3 +--
+ src/library/suites/bravais/useBravaisViewport.ts | 12 ++++--------
+ 2 files changed, 5 insertions(+), 10 deletions(-)
+
+diff --git a/src/library/suites/bravais/BravaisStage.tsx b/src/library/suites/bravais/BravaisStage.tsx
+index eec036b..77c48be 100644
+--- a/src/library/suites/bravais/BravaisStage.tsx
++++ b/src/library/suites/bravais/BravaisStage.tsx
+@@ -129,8 +129,7 @@ const BravaisStage: React.FC<LibrarySuiteStageProps> = ({
+     const frameRefs = useMemo(() => ({ left: leftRef, right: rightRef, seam: seamRef, seamContent: seamContentRef, tab: tabRef }), []);
+     const { stateRef: frameRef, renderFrame } = useBravaisFrame(frameRefs);
+     const { wallLook, seamLook } = useBravaisWallLook(reportPlayerOcclusion, reportPlayerBackdrop);
+-    // 首页铺满；打开的那一层（集合 / 歌手 / 专辑）缩到 80%，进来之后能一眼看到它的边界。
+-    const view = useBravaisViewport(rootRef, navigation.depth > 0 ? 0.8 : 1);
++    const view = useBravaisViewport(rootRef);
+     const reducedMotion = useReducedMotionFor('lattice');
+     // B11：换层的翻牌 / 波次按「降低动态效果」降级成淡入淡出（lattice 或 collectionMorph，见 bravaisMotion）。
+     const reducedTransitions = useBravaisReducedTransitions();
+diff --git a/src/library/suites/bravais/useBravaisViewport.ts b/src/library/suites/bravais/useBravaisViewport.ts
+index 066c228..a5d3296 100644
+--- a/src/library/suites/bravais/useBravaisViewport.ts
++++ b/src/library/suites/bravais/useBravaisViewport.ts
+@@ -6,10 +6,7 @@ import { getBravaisScale } from './bravaisConstants';
+ // stage 的视口尺寸与相机缩放：ResizeObserver 量出来，只有尺寸真的变了才写 state（离散；缩放档位按宽度断点）。
+ // 还没量到之前是 null：墙不画，免得用默认尺寸摆一遍再挪。
+ 
+-export const useBravaisViewport = (
+-    rootRef: RefObject<HTMLElement | null>,
+-    scaleFactor: number = 1,
+-): WallView | null => {
++export const useBravaisViewport = (rootRef: RefObject<HTMLElement | null>): WallView | null => {
+     const [view, setView] = useState<WallView | null>(null);
+ 
+     useEffect(() => {
+@@ -17,18 +14,17 @@ export const useBravaisViewport = (
+         if (!root) return;
+         const update = (width: number, height: number) => {
+             if (width <= 0 || height <= 0) return;
+-            const scale = getBravaisScale(width) * scaleFactor;
+             setView(current => (
+-                current && current.width === width && current.height === height && current.scale === scale
++                current && current.width === width && current.height === height
+                     ? current
+-                    : { width, height, scale }
++                    : { width, height, scale: getBravaisScale(width) }
+             ));
+         };
+         update(root.clientWidth, root.clientHeight);
+         const observer = new ResizeObserver(([entry]) => update(entry.contentRect.width, entry.contentRect.height));
+         observer.observe(root);
+         return () => observer.disconnect();
+-    }, [rootRef, scaleFactor]);
++    }, [rootRef]);
+ 
+     return view;
+ };

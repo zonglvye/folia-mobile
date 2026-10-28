@@ -1,7 +1,7 @@
 From 1de7692ae23c142178b32c5a7ff566819e6b7369 Mon Sep 17 00:00:00 2001
 From: dev <dev@local>
 Date: Sat, 17 Oct 2026 13:52:24 +0800
-Subject: [PATCH 14/91] perf(visualizer): draw the lyric glow on the compositor
+Subject: [PATCH 14/97] perf(visualizer): draw the lyric glow on the compositor
  on Android
 
 The frame HUD off the phone says the visualizer is pinned to exactly 30 fps:

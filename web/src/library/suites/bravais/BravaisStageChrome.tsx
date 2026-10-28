@@ -97,7 +97,6 @@ const BravaisStageChrome: React.FC<BravaisStageChromeProps> = ({
                 <WallBackButton
                     label={back.step === 'player' ? t('libraryBravaisHome.backToPlayer') : t('libraryBravais.seamBack')}
                     onBack={back.run}
-                    concealed
                 />
             )}
             <WallToolsButton

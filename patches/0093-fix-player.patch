@@ -1,0 +1,41 @@
+From 5c41ce0faf858d3a7db97be8e5bab2e0a5584f58 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 28 Oct 2026 23:46:08 +0800
+Subject: [PATCH 93/97] =?UTF-8?q?fix(player):=20=E9=9D=A2=E6=9D=BF?=
+ =?UTF-8?q?=E9=87=8C=E7=9A=84=E5=B0=81=E9=9D=A2=E5=8F=AA=E5=9C=A8=E3=80=8C?=
+ =?UTF-8?q?=E5=B0=81=E9=9D=A2=E3=80=8D=E9=A1=B5=E7=AD=BE=E5=87=BA=E7=8E=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+控制中心一打开就展不全、要滑动：320×320 的封面方图把 374px 高的面板基本吃光，
+后面几个页签（歌词 / 控制 / 播放列表 / 账户）只剩一小块高度，只能在里面滚。
+
+改成封面只在 cover 页签渲染，其余页签把整块高度让给内容。桌面端同样受益。
+
+注：这条**还没上机验证** —— HAP 所在的 E: 盘在当晚出现硬件故障（写入报 fatal device
+hardware error），build-hap 跑不了。web 侧 typecheck 与 build 均通过。
+---
+ src/components/UnifiedPanel.tsx | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/components/UnifiedPanel.tsx b/src/components/UnifiedPanel.tsx
+index 366bf86..1fa148f 100644
+--- a/src/components/UnifiedPanel.tsx
++++ b/src/components/UnifiedPanel.tsx
+@@ -646,6 +646,7 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
+                                 {/* Top: Cover Art */}
+                                 {/* 四个角上的按钮平时完全看不见，所以整块封面是思索的落点：
+                                     指针停在封面上，讲的就是「这上面还藏着什么」。 */}
++                                {currentTab === 'cover' && (
+                                 <div
+                                     ref={coverAreaRef}
+                                     data-ponder-panel-artwork
+@@ -762,6 +763,7 @@ const UnifiedPanel: React.FC<UnifiedPanelProps> = ({
+                                         </div>
+                                     )}
+                                 </div>
++                                )}
+ 
+                                 {/* Tab Content */}
+                                 <div

@@ -302,3 +302,68 @@ html[data-click-through='active'] body .click-through-interactive * {
 :root[data-reduce-motion~='uiMicroMotion'] .ponder-skeleton-label-in {
     animation: none;
 }
+
+/* 横屏矮视口（< 420px 高）：控制中心要一屏看全，内容间距压一档。
+   只影响矮屏，桌面与竖屏不动。 */
+@media (max-height: 420px) {
+    .player-panel-scroll .space-y-4 > * + * {
+        margin-top: 0.5rem;
+    }
+
+    .player-panel-scroll .space-y-3 > * + * {
+        margin-top: 0.4rem;
+    }
+
+    .player-panel-scroll .pt-2 {
+        padding-top: 0.25rem;
+    }
+
+    .player-panel-scroll > div {
+        padding: 0.75rem;
+    }
+}
+
+@media (max-height: 420px) {
+    /* 控制页签：行距与按钮高度再收一档，目标是 374px 高的横屏一屏放完。 */
+    .player-panel-scroll .panel-controls > * + * {
+        margin-top: 0.4rem;
+    }
+
+    .player-panel-scroll .panel-controls .grid > button {
+        height: 2.4rem;
+    }
+
+    .player-panel-scroll .panel-controls .space-y-3 > * + * {
+        margin-top: 0.3rem;
+    }
+}
+
+@media (max-height: 420px) {
+    /* 374px 高的横屏：控制页签要一屏放完。!important 是因为 Tailwind 的 space-y 选择器更具体。 */
+    .player-panel-scroll .panel-controls > * + * {
+        margin-top: 0.35rem !important;
+    }
+
+    .player-panel-scroll .panel-controls .pt-2 {
+        padding-top: 0.25rem !important;
+    }
+
+    .player-panel-scroll .panel-actions > button {
+        height: 2.2rem !important;
+    }
+
+    /* 主题名与昼夜开关在设置里也有，矮屏上不占位置。 */
+    .player-panel-scroll .panel-footer-row {
+        display: none !important;
+    }
+}
+
+@media (max-height: 420px) {
+    /* 再压一档：内容内边距与音量条的上下留白。 */
+    .player-panel-scroll > div {
+        padding: 0.5rem !important;
+    }
+    .player-panel-scroll .panel-controls > .pt-2 {
+        padding-top: 0.15rem !important;
+    }
+}

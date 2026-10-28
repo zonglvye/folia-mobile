@@ -1,0 +1,74 @@
+From 747dd4b9c3438540b53e44b196a4f31a6160847b Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Wed, 28 Oct 2026 23:59:58 +0800
+Subject: [PATCH 94/97] =?UTF-8?q?feat(bravais):=20=E6=89=93=E5=BC=80?=
+ =?UTF-8?q?=E7=9A=84=E9=82=A3=E4=B8=80=E5=B1=82=E7=BC=A9=E5=88=B0=2080%?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+首页铺满是对的，但点开一张卡之后的层（集合 / 歌手 / 专辑）也按首页的相机档位画，边界会顶到
+屏幕外、一眼看不出「这是一层」。给视口加一个缩放系数：深度 > 0 时乘 0.8，首页保持 1。
+
+相机缩放同时决定磁贴尺寸（`getPitch(metrics) * scale`）、命中测试与裁剪，所以只改这一处，
+三层行为一起跟着走。
+
+注：**没上机验证** —— 当晚 E: 盘故障，hdc / DevEco 都读不出来（`hdc.exe 不是有效的应用程序`），
+install 与截图都做不了。web 侧 typecheck 与 build 通过。
+---
+ src/library/suites/bravais/BravaisStage.tsx      |  3 ++-
+ src/library/suites/bravais/useBravaisViewport.ts | 12 ++++++++----
+ 2 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/src/library/suites/bravais/BravaisStage.tsx b/src/library/suites/bravais/BravaisStage.tsx
+index 77c48be..eec036b 100644
+--- a/src/library/suites/bravais/BravaisStage.tsx
++++ b/src/library/suites/bravais/BravaisStage.tsx
+@@ -129,7 +129,8 @@ const BravaisStage: React.FC<LibrarySuiteStageProps> = ({
+     const frameRefs = useMemo(() => ({ left: leftRef, right: rightRef, seam: seamRef, seamContent: seamContentRef, tab: tabRef }), []);
+     const { stateRef: frameRef, renderFrame } = useBravaisFrame(frameRefs);
+     const { wallLook, seamLook } = useBravaisWallLook(reportPlayerOcclusion, reportPlayerBackdrop);
+-    const view = useBravaisViewport(rootRef);
++    // 首页铺满；打开的那一层（集合 / 歌手 / 专辑）缩到 80%，进来之后能一眼看到它的边界。
++    const view = useBravaisViewport(rootRef, navigation.depth > 0 ? 0.8 : 1);
+     const reducedMotion = useReducedMotionFor('lattice');
+     // B11：换层的翻牌 / 波次按「降低动态效果」降级成淡入淡出（lattice 或 collectionMorph，见 bravaisMotion）。
+     const reducedTransitions = useBravaisReducedTransitions();
+diff --git a/src/library/suites/bravais/useBravaisViewport.ts b/src/library/suites/bravais/useBravaisViewport.ts
+index a5d3296..066c228 100644
+--- a/src/library/suites/bravais/useBravaisViewport.ts
++++ b/src/library/suites/bravais/useBravaisViewport.ts
+@@ -6,7 +6,10 @@ import { getBravaisScale } from './bravaisConstants';
+ // stage 的视口尺寸与相机缩放：ResizeObserver 量出来，只有尺寸真的变了才写 state（离散；缩放档位按宽度断点）。
+ // 还没量到之前是 null：墙不画，免得用默认尺寸摆一遍再挪。
+ 
+-export const useBravaisViewport = (rootRef: RefObject<HTMLElement | null>): WallView | null => {
++export const useBravaisViewport = (
++    rootRef: RefObject<HTMLElement | null>,
++    scaleFactor: number = 1,
++): WallView | null => {
+     const [view, setView] = useState<WallView | null>(null);
+ 
+     useEffect(() => {
+@@ -14,17 +17,18 @@ export const useBravaisViewport = (rootRef: RefObject<HTMLElement | null>): Wall
+         if (!root) return;
+         const update = (width: number, height: number) => {
+             if (width <= 0 || height <= 0) return;
++            const scale = getBravaisScale(width) * scaleFactor;
+             setView(current => (
+-                current && current.width === width && current.height === height
++                current && current.width === width && current.height === height && current.scale === scale
+                     ? current
+-                    : { width, height, scale: getBravaisScale(width) }
++                    : { width, height, scale }
+             ));
+         };
+         update(root.clientWidth, root.clientHeight);
+         const observer = new ResizeObserver(([entry]) => update(entry.contentRect.width, entry.contentRect.height));
+         observer.observe(root);
+         return () => observer.disconnect();
+-    }, [rootRef]);
++    }, [rootRef, scaleFactor]);
+ 
+     return view;
+ };

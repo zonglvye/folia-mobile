@@ -44,7 +44,7 @@ const SongActionRow: React.FC<SongActionRowProps> = ({
     const generateThemeTitle = isGeneratingTheme ? t('ui.generatingTheme') : t('ui.generateAITheme');
 
     return (
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-3 gap-3 panel-actions">
             <button
                 onClick={event => {
                     onToggleLoop(event);

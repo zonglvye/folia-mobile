@@ -1,7 +1,7 @@
 From a0996e3c5c6ada41b1f4fc680d41c5e4c8a7776e Mon Sep 17 00:00:00 2001
 From: zonglvye <zonglvye@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 17:54:55 +0800
-Subject: [PATCH 77/91] feat(visualizer): let per-song random pick from a
+Subject: [PATCH 77/97] feat(visualizer): let per-song random pick from a
  chosen pool of styles
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

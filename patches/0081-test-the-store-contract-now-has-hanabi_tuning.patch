@@ -1,7 +1,7 @@
 From d82287074eba5e6b53a5cb66b0983270b2daccf2 Mon Sep 17 00:00:00 2001
 From: zonglvye <zonglvye@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 23:33:22 +0800
-Subject: [PATCH 81/91] test: the store contract now has hanabi_tuning
+Subject: [PATCH 81/97] test: the store contract now has hanabi_tuning
 
 The persisted-key list is the contract that catches a storage key renamed by
 accident; Hanabi's tuning adds one, so the snapshot gains it.
